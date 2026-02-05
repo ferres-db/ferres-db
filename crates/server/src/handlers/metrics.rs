@@ -1,0 +1,20 @@
+//! # Metrics Handler — handler para endpoint de métricas Prometheus
+
+use axum::response::Response;
+use axum::http::StatusCode;
+use axum::body::Body;
+
+use crate::metrics::gather_metrics;
+
+/// Handler para GET /metrics
+///
+/// Retorna métricas Prometheus em formato texto.
+pub async fn get_metrics() -> Response<Body> {
+    let metrics = gather_metrics();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/plain; version=0.0.4")
+        .body(Body::from(metrics))
+        .unwrap()
+}
+

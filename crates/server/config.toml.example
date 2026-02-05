@@ -1,0 +1,9 @@
+# Configuração do FerresDB Server
+# Copie este arquivo para config.toml e ajuste conforme necessário
+# Variáveis de ambiente têm precedência sobre este arquivo
+
+host = "0.0.0.0"
+port = 3000
+storage_path = "./data"
+log_level = "info"
+

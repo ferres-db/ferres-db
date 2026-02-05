@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Rust
+target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentação
+docs/
+*.md
+!README.md
+
+# Testes e fixtures
+tests/
+**/benches/
+**/*_test.rs
+
+# Logs
+*.log
+logs/
+
+# Dados locais
+data/
+*.db
+*.sqlite
+
+# Configuração local
+config.toml
+.env
+.env.local
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Outros
+*.tmp
+*.bak
+*.orig

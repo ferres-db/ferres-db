@@ -1,0 +1,299 @@
+//! # Collection Handlers — handlers para gerenciamento de coleções
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::Json,
+};
+use serde::{Deserialize, Serialize};
+use validator::{Validate, ValidationError};
+
+use std::sync::Arc;
+use std::sync::RwLock;
+
+use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage};
+
+use crate::error::{ApiError, ApiResult};
+use crate::state::AppState;
+
+// ─── Request/Response Types ──────────────────────────────────────────────
+
+// Validação de nome: apenas letras, números, hífens e underscores.
+lazy_static::lazy_static! {
+    static ref VALID_NAME_REGEX: regex::Regex = regex::Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap();
+}
+
+/// Validador customizado para nome de coleção usando validator crate.
+fn validate_collection_name(name: &str) -> Result<(), ValidationError> {
+    if name.is_empty() {
+        return Err(ValidationError::new("name_cannot_be_empty"));
+    }
+    if !VALID_NAME_REGEX.is_match(name) {
+        return Err(ValidationError::new("name_invalid_characters"));
+    }
+    Ok(())
+}
+
+/// Payload para criação de coleção.
+#[derive(Debug, Deserialize, Validate)]
+pub struct CreateCollectionRequest {
+    #[validate(custom(function = "validate_collection_name"))]
+    pub name: String,
+    
+    #[validate(range(min = 1, max = 4096))]
+    pub dimension: usize,
+    
+    pub distance: DistanceMetric,
+}
+
+/// Resposta de criação de coleção.
+#[derive(Debug, Serialize)]
+pub struct CreateCollectionResponse {
+    pub name: String,
+    pub dimension: usize,
+    pub distance: DistanceMetric,
+    pub created_at: u64,
+}
+
+/// Resposta de listagem de coleções.
+#[derive(Debug, Serialize)]
+pub struct ListCollectionsResponse {
+    pub collections: Vec<CollectionListItem>,
+}
+
+/// Item da listagem de coleções.
+#[derive(Debug, Serialize)]
+pub struct CollectionListItem {
+    pub name: String,
+    pub dimension: usize,
+    pub num_points: usize,
+    pub created_at: u64,
+}
+
+/// Resposta de detalhes de coleção.
+#[derive(Debug, Serialize)]
+pub struct GetCollectionResponse {
+    pub name: String,
+    pub dimension: usize,
+    pub num_points: usize,
+    pub last_updated: u64,
+    pub stats: CollectionStatsResponse,
+}
+
+/// Estatísticas da coleção na resposta.
+#[derive(Debug, Serialize)]
+pub struct CollectionStatsResponse {
+    pub index_size_bytes: usize,
+}
+
+// ─── Handlers ─────────────────────────────────────────────────────────────
+
+/// Handler para POST /api/v1/collections
+///
+/// Cria uma nova coleção.
+pub async fn create_collection(
+    State(app_state): State<AppState>,
+    Json(payload): Json<CreateCollectionRequest>,
+) -> ApiResult<(StatusCode, Json<CreateCollectionResponse>)> {
+    // Valida o payload usando validator crate
+    payload.validate().map_err(|e| {
+        let mut messages = Vec::new();
+        for (field, errors) in e.field_errors() {
+            for error in errors {
+                let msg = match error.code.as_ref() {
+                    "name_cannot_be_empty" => "name cannot be empty".to_string(),
+                    "name_invalid_characters" => "name can only contain letters, numbers, hyphens, and underscores".to_string(),
+                    "range" => "dimension must be between 1 and 4096".to_string(),
+                    _ => error.message.as_ref().map(|m| m.to_string()).unwrap_or_else(|| format!("invalid {}", field)),
+                };
+                messages.push(msg);
+            }
+        }
+        ApiError::invalid_payload(messages.join(", "))
+    })?;
+
+    let config = CollectionConfig {
+        name: payload.name.clone(),
+        dimension: payload.dimension,
+        distance: payload.distance,
+        hnsw: Default::default(),
+        search_cache_size: 0,
+    };
+
+    // Cria a coleção
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Verifica se a coleção já existe
+    if app_state.collections.contains_key(&payload.name) {
+        return Err(ApiError::collection_already_exists(&payload.name));
+    }
+
+    // Valida a configuração
+    if config.dimension == 0 {
+        return Err(ApiError::invalid_payload("dimension must be greater than 0"));
+    }
+
+    // Cria a nova coleção
+    let collection = Collection::new(config.clone());
+    let collection_arc = Arc::new(RwLock::new(collection));
+    
+    // Insere no mapa de coleções
+    app_state.collections.insert(payload.name.clone(), collection_arc.clone());
+
+    // Inicializa estatísticas de queries para a nova coleção
+    app_state.query_stats.insert(payload.name.clone(), crate::state::QueryStats::new());
+
+    // Atualiza gauge de coleções ativas
+    crate::metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
+
+    // Salva no disco
+    let collection_dir = app_state.config.storage_path.join("collections").join(&payload.name);
+    {
+        let collection = collection_arc.read().map_err(|e| {
+            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
+        })?;
+        FileStorage::save_collection(&collection, &collection_dir)
+            .map_err(|e| ApiError::from(e))?;
+    }
+
+    // Marca como limpa após salvar
+    {
+        let collection = collection_arc.write().map_err(|e| {
+            ApiError::internal_error(format!("failed to acquire write lock: {}", e))
+        })?;
+        collection.mark_clean();
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateCollectionResponse {
+            name: config.name,
+            dimension: config.dimension,
+            distance: config.distance,
+            created_at,
+        }),
+    ))
+}
+
+/// Handler para GET /api/v1/collections
+///
+/// Lista todas as coleções.
+pub async fn list_collections(
+    State(app_state): State<AppState>,
+) -> ApiResult<Json<ListCollectionsResponse>> {
+    let mut collections = Vec::new();
+
+    for entry in app_state.collections.iter() {
+        let name = entry.key();
+        let collection_arc = entry.value();
+
+        let collection = collection_arc.read().map_err(|e| {
+            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
+        })?;
+
+        let config = collection.config();
+        let num_points = collection.len();
+        
+        // Calcula created_at a partir do ponto mais antigo (se houver)
+        let created_at = collection.points_owned()
+            .iter()
+            .map(|p| p.created_at)
+            .min()
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            });
+
+        collections.push(CollectionListItem {
+            name: name.clone(),
+            dimension: config.dimension,
+            num_points,
+            created_at,
+        });
+    }
+
+    Ok(Json(ListCollectionsResponse { collections }))
+}
+
+/// Handler para GET /api/v1/collections/{name}
+///
+/// Retorna detalhes de uma coleção específica.
+pub async fn get_collection(
+    State(app_state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<GetCollectionResponse>> {
+    let collection_arc = app_state.collections.get(&name)
+        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+
+    let collection = collection_arc.read().map_err(|e| {
+        ApiError::internal_error(format!("failed to acquire read lock: {}", e))
+    })?;
+
+    let config = collection.config();
+    let num_points = collection.len();
+    
+    // Calcula last_updated a partir do ponto mais recente (se houver)
+    let last_updated = collection.points_owned()
+        .iter()
+        .map(|p| p.created_at)
+        .max()
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        });
+
+    // Estima tamanho do índice (aproximação)
+    let index_size_bytes = num_points * config.dimension * 4; // 4 bytes por f32
+
+    Ok(Json(GetCollectionResponse {
+        name: name.clone(),
+        dimension: config.dimension,
+        num_points,
+        last_updated,
+        stats: CollectionStatsResponse {
+            index_size_bytes,
+        },
+    }))
+}
+
+/// Handler para DELETE /api/v1/collections/{name}
+///
+/// Remove uma coleção.
+pub async fn delete_collection(
+    State(app_state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    // Remove do mapa de coleções
+    let collection_arc = app_state.collections.remove(&name)
+        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+
+    // Remove estatísticas de queries
+    app_state.query_stats.remove(&name);
+
+    // Atualiza gauge de coleções ativas
+    crate::metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
+
+    // Remove do disco
+    let collection_dir = app_state.config.storage_path.join("collections").join(&name);
+    if collection_dir.exists() {
+        std::fs::remove_dir_all(&collection_dir).map_err(|e| {
+            ApiError::internal_error(format!(
+                "failed to delete collection directory: {}",
+                e
+            ))
+        })?;
+    }
+
+    // Drop da coleção (libera recursos)
+    drop(collection_arc);
+
+    Ok(StatusCode::NO_CONTENT)
+}
+

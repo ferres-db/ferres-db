@@ -1,0 +1,13 @@
+[package]
+name = "ferres-db-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "SDK Rust para comunicação com o FerresDB"
+license = "MIT"
+
+[dependencies]
+ferres-db-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,55 @@
+.PHONY: help build run test docker-build docker-run docker-stop docker-logs clean
+
+# Variáveis
+BINARY_NAME=ferres-db-server
+DOCKER_IMAGE=ferres-db-server
+DOCKER_CONTAINER=ferres-db
+
+help: ## Mostra esta mensagem de ajuda
+	@echo "Comandos disponíveis:"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+
+build: ## Compila o projeto em modo release
+	@echo "Building $(BINARY_NAME)..."
+	cargo build --release --bin $(BINARY_NAME)
+	@echo "Build completo! Binário em: target/release/$(BINARY_NAME)"
+
+run: ## Executa o servidor localmente (modo dev)
+	@echo "Running $(BINARY_NAME)..."
+	cargo run --bin $(BINARY_NAME)
+
+test: ## Executa os testes
+	@echo "Running tests..."
+	cargo test --workspace
+
+docker-build: ## Constrói a imagem Docker
+	@echo "Building Docker image $(DOCKER_IMAGE)..."
+	docker build -t $(DOCKER_IMAGE):latest .
+	@echo "Docker image construída: $(DOCKER_IMAGE):latest"
+
+docker-run: ## Executa o container Docker usando docker-compose
+	@echo "Starting Docker container..."
+	docker-compose up -d
+	@echo "Container iniciado. Use 'make docker-logs' para ver os logs."
+
+docker-stop: ## Para o container Docker
+	@echo "Stopping Docker container..."
+	docker-compose down
+	@echo "Container parado."
+
+docker-logs: ## Mostra os logs do container Docker
+	docker-compose logs -f $(DOCKER_CONTAINER)
+
+docker-shell: ## Abre um shell no container Docker
+	docker-compose exec vector-db /bin/bash
+
+clean: ## Limpa arquivos de build
+	@echo "Cleaning build artifacts..."
+	cargo clean
+	@echo "Limpeza concluída."
+
+docker-clean: ## Remove imagens e containers Docker
+	@echo "Cleaning Docker artifacts..."
+	docker-compose down -v
+	docker rmi $(DOCKER_IMAGE):latest 2>/dev/null || true
+	@echo "Limpeza Docker concluída."

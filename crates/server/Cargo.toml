@@ -1,0 +1,43 @@
+[package]
+name = "ferres-db-server"
+version = "0.1.0"
+edition = "2021"
+description = "Servidor HTTP/gRPC do FerresDB"
+license = "MIT"
+
+[lib]
+name = "ferres_db_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferres-db-server"
+path = "src/main.rs"
+
+[dependencies]
+ferres-db-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-appender = "0.2"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower_governor = { version = "0.6", features = ["axum"] }
+governor = "0.8"
+thiserror = { workspace = true }
+toml = "0.8"
+chrono = { workspace = true }
+validator = { version = "0.18", features = ["derive"] }
+regex = "1.10"
+lazy_static = "1.5"
+dashmap = "6"
+tokio-stream = "0.1"
+prometheus = "0.13"
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3.10"

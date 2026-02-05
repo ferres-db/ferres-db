@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/server",
+    "crates/sdk-rust",
+]
+
+# Dependências compartilhadas no workspace — cada crate herda a versão
+# definida aqui via `workspace = true`, evitando divergência de versões.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+hnsw_rs = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.8"
+bincode = "1"
+md5 = "0.7"
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
+rayon = "1.8"
+lru = "0.12"
+quickcheck = "1"
+quickcheck_macros = "1"
+
+# O core é dependência dos outros crates do workspace
+ferres-db-core = { path = "crates/core" }
+
+# ─── Release otimizado ───────────────────────────────────────────────
+# LTO "fat" produz um binário menor e mais rápido ao custo de tempo de
+# compilação. codegen-units = 1 maximiza otimizações intra-crate.
+# strip remove símbolos de debug do binário final.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"
+
+# Profile intermediário para dev com otimizações leves — útil para
+# benchmarks locais sem esperar o build completo de release.
+[profile.dev.package."*"]
+opt-level = 1

@@ -1,0 +1,23 @@
+//! # Collection Routes — rotas de gerenciamento de coleções
+
+use axum::{
+    routing::{get, post},
+    Router,
+};
+
+use crate::handlers::collections::{
+    create_collection, delete_collection, get_collection, list_collections,
+};
+use crate::state::AppState;
+
+/// Rotas base de coleções (sem nome no path — sem rate limit por coleção).
+pub fn create_base_collection_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/collections", post(create_collection).get(list_collections))
+}
+
+/// Rotas de coleções nomeadas (com `{name}` no path — rate limited por coleção).
+pub fn create_named_collection_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/collections/{name}", get(get_collection).delete(delete_collection))
+}

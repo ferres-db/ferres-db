@@ -1,0 +1,35 @@
+[package]
+name = "ferres-db-core"
+version = "0.1.0"
+edition = "2021"
+description = "Motor de busca vetorial do FerresDB — coleções, pontos, storage e HNSW search"
+license = "MIT"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hnsw_rs = { workspace = true }
+bincode = { workspace = true }
+md5 = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+tracing-subscriber = { workspace = true }
+rayon = { workspace = true }
+lru = { workspace = true }
+
+[[bin]]
+name = "ferres-db"
+path = "src/bin/cli.rs"
+
+[dev-dependencies]
+rand = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+quickcheck = { workspace = true }
+quickcheck_macros = { workspace = true }
+tempfile = "3.10"
+
+[[bench]]
+name = "performance"
+harness = false
