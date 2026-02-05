@@ -454,6 +454,8 @@ mod tests {
             distance: DistanceMetric::Euclidean,
             hnsw: HnswConfig::default(),
             search_cache_size: 0,
+            enable_bm25: false,
+            bm25_text_field: "text".to_string(),
         };
 
         let mut collection = Collection::new(config);
@@ -513,6 +515,8 @@ mod tests {
             distance: DistanceMetric::Euclidean,
             hnsw: HnswConfig::default(),
             search_cache_size: 0,
+            enable_bm25: false,
+            bm25_text_field: "text".to_string(),
         };
         let mut collection = Collection::new(config);
         collection

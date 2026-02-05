@@ -113,6 +113,8 @@ fn benchmark_indexing(c: &mut Criterion) {
                         distance: DistanceMetric::Cosine,
                         hnsw: Default::default(),
                         search_cache_size: 0,
+                        enable_bm25: false,
+                        bm25_text_field: "text".to_string(),
                     };
                     
                     db.create_collection(config).unwrap();
@@ -166,6 +168,8 @@ fn benchmark_search(c: &mut Criterion) {
         distance: DistanceMetric::Cosine,
         hnsw: Default::default(),
         search_cache_size: 0,
+        enable_bm25: false,
+        bm25_text_field: "text".to_string(),
     };
     db.create_collection(config).unwrap();
     db.upsert_points("search_bench", points.clone()).unwrap();
@@ -281,6 +285,8 @@ fn benchmark_upsert(c: &mut Criterion) {
                 distance: DistanceMetric::Cosine,
                 hnsw: Default::default(),
                 search_cache_size: 0,
+                enable_bm25: false,
+                bm25_text_field: "text".to_string(),
             };
             db.create_collection(config).unwrap();
 

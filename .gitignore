@@ -26,3 +26,19 @@ data/
 venv
 
 sdk
+
+corpus_*.jsonl
+
+# Fixtures gerados (ex.: pipeline de ingestão)
+examples/ingestion/tests/fixtures/*.pdf
+examples/ingestion/tests/fixtures/*.md
+examples/ingestion/tests/fixtures/*.html
+
+# Cache de embeddings (módulo ingestion)
+.embeddings_cache.sqlite
+*.embeddings_cache.sqlite
+
+__pycache__
+.pytest_cache
+
+.env

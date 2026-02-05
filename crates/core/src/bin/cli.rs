@@ -143,6 +143,8 @@ fn create_collection(
         distance,
         hnsw: Default::default(),
         search_cache_size: 100, // Cache padrão de 100 queries
+        enable_bm25: false,
+        bm25_text_field: "text".to_string(),
     };
 
     db.create_collection(config)?;

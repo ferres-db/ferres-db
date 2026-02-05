@@ -23,6 +23,8 @@
 //!     distance: DistanceMetric::Cosine,
 //!     hnsw: Default::default(),
 //!     search_cache_size: 0,
+//!     enable_bm25: false,
+//!     bm25_text_field: "text".to_string(),
 //! };
 //!
 //! db.create_collection(config).unwrap();
@@ -39,6 +41,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
+pub mod bm25;
 pub mod collection;
 pub mod error;
 pub mod point;
@@ -50,6 +53,7 @@ pub mod wal;
 pub use collection::{Collection, CollectionConfig};
 pub use error::FerresError;
 pub use point::Point;
+pub use bm25::BM25Index;
 pub use search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex};
 pub use storage::{CollectionMeta, DiskStorage, FileStorage};
 pub use wal::{Wal, WalEntry, WalOperation, recover_collection};
@@ -263,6 +267,8 @@ impl VectorDB {
     ///     distance: DistanceMetric::Cosine,
     ///     hnsw: Default::default(),
     ///     search_cache_size: 100,
+    ///     enable_bm25: false,
+    ///     bm25_text_field: "text".to_string(),
     /// };
     ///
     /// db.create_collection(config)?;
@@ -961,6 +967,8 @@ mod tests {
             distance: DistanceMetric::Euclidean,
             hnsw: HnswConfig::default(),
             search_cache_size: 0,
+            enable_bm25: false,
+            bm25_text_field: "text".to_string(),
         };
         db.create_collection(config).unwrap();
     }

@@ -19,7 +19,7 @@
 //! - **`DistanceMetric` na config**: define a métrica no nível da
 //!   coleção. Todos os pontos da mesma coleção usam a mesma métrica.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -28,6 +28,7 @@ use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::bm25::BM25Index;
 use crate::error::FerresError;
 use crate::point::Point;
 use crate::search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex};
@@ -49,10 +50,20 @@ pub struct CollectionConfig {
     /// Padrão: 100 queries.
     #[serde(default = "default_cache_size")]
     pub search_cache_size: usize,
+    /// Habilita índice BM25 para busca híbrida (vetorial + keyword).
+    #[serde(default)]
+    pub enable_bm25: bool,
+    /// Chave em `metadata` usada como texto para BM25. Padrão: "text".
+    #[serde(default = "default_bm25_text_field")]
+    pub bm25_text_field: String,
 }
 
 fn default_cache_size() -> usize {
     100
+}
+
+fn default_bm25_text_field() -> String {
+    "text".to_string()
 }
 
 // ─── Collection ─────────────────────────────────────────────────────
@@ -80,11 +91,25 @@ impl PartialEq for CacheKey {
 
 impl Eq for CacheKey {}
 
+/// Extrai texto de `metadata` pela chave configurada (ex. "text" ou "content").
+fn metadata_text(metadata: &serde_json::Value, field: &str) -> String {
+    metadata
+        .get(field)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Constante RRF (Reciprocal Rank Fusion). Típico: 60.
+const RRF_K: u32 = 60;
+
 /// Uma coleção de pontos vetoriais com índice de busca ANN.
 pub struct Collection {
     config: CollectionConfig,
     points: HashMap<String, Point>,
     index: Box<dyn ANNIndex>,
+    /// Índice BM25 opcional para busca híbrida.
+    bm25_index: Option<BM25Index>,
     /// Cache LRU opcional para resultados de busca.
     /// Mutex é necessário porque search() é &self mas precisa mutar o cache.
     #[allow(dead_code)]
@@ -104,6 +129,11 @@ impl Collection {
         } else {
             None
         };
+        let bm25_index = if config.enable_bm25 {
+            Some(BM25Index::new())
+        } else {
+            None
+        };
         debug!(
             name = %config.name,
             dim = config.dimension,
@@ -115,6 +145,7 @@ impl Collection {
             config,
             points: HashMap::new(),
             index,
+            bm25_index,
             search_cache,
             dirty: AtomicBool::new(false),
         }
@@ -132,6 +163,11 @@ impl Collection {
         } else {
             None
         };
+        let bm25_index = if config.enable_bm25 {
+            Some(BM25Index::new())
+        } else {
+            None
+        };
         debug!(
             name = %config.name,
             dim = config.dimension,
@@ -141,6 +177,7 @@ impl Collection {
             config,
             points: HashMap::new(),
             index,
+            bm25_index,
             search_cache,
             dirty: AtomicBool::new(false),
         }
@@ -153,8 +190,15 @@ impl Collection {
     pub fn from_points(config: CollectionConfig, points: Vec<Point>) -> Result<Self, FerresError> {
         let mut collection = Self::new(config);
         collection.index.build(&points);
-        for point in points {
-            collection.points.insert(point.id.clone(), point);
+        for point in &points {
+            collection.points.insert(point.id.clone(), point.clone());
+        }
+        if let Some(ref mut bm25) = collection.bm25_index {
+            let field = &collection.config.bm25_text_field;
+            for point in collection.points.values() {
+                let text = metadata_text(&point.metadata, field);
+                bm25.index_document(&point.id, &text);
+            }
         }
         Ok(collection)
     }
@@ -189,6 +233,8 @@ impl Collection {
     ///     distance: DistanceMetric::Euclidean,
     ///     hnsw: Default::default(),
     ///     search_cache_size: 0,
+    ///     enable_bm25: false,
+    ///     bm25_text_field: "text".to_string(),
     /// });
     ///
     /// let point = Point::new("p1", vec![1.0, 2.0, 3.0], serde_json::json!(null))?;
@@ -198,6 +244,10 @@ impl Collection {
     pub fn insert(&mut self, point: Point) -> Result<(), FerresError> {
         self.validate_dimension(&point.vector)?;
         self.index.add_point(&point);
+        if let Some(ref mut bm25) = self.bm25_index {
+            let text = metadata_text(&point.metadata, &self.config.bm25_text_field);
+            bm25.index_document(&point.id, &text);
+        }
         self.points.insert(point.id.clone(), point);
         self.dirty.store(true, Ordering::Release);
         Ok(())
@@ -219,6 +269,8 @@ impl Collection {
     ///     distance: DistanceMetric::Euclidean,
     ///     hnsw: Default::default(),
     ///     search_cache_size: 0,
+    ///     enable_bm25: false,
+    ///     bm25_text_field: "text".to_string(),
     /// });
     ///
     /// collection.insert(Point::new("p1", vec![1.0, 0.0, 0.0], serde_json::json!(null))?)?;
@@ -266,12 +318,66 @@ impl Collection {
         Ok(results)
     }
 
+    /// Busca híbrida: combina resultados vetoriais e BM25 via RRF ponderado por `alpha`.
+    ///
+    /// Requer que a coleção tenha BM25 habilitado (`enable_bm25: true`).
+    /// `alpha` em [0, 1]: peso da busca vetorial; (1 - alpha) é o peso da busca keyword.
+    pub fn hybrid_search(
+        &self,
+        query_vector: &[f32],
+        query_text: &str,
+        k: usize,
+        alpha: f32,
+    ) -> Result<Vec<(String, f32)>, FerresError> {
+        self.validate_dimension(query_vector)?;
+        let bm25 = self
+            .bm25_index
+            .as_ref()
+            .ok_or_else(|| FerresError::Storage("hybrid search requires BM25 index enabled for this collection".to_string()))?;
+
+        let k_expanded = (k * 3).max(50).min(self.points.len().max(1));
+        let vec_results = self.search(query_vector, k_expanded)?;
+        let bm25_results = bm25.search(query_text, k_expanded);
+
+        let k_rrf = RRF_K as f32;
+        let mut rank_vec: HashMap<String, u32> = HashMap::new();
+        for (rank, (id, _)) in vec_results.iter().enumerate() {
+            rank_vec.insert(id.clone(), rank as u32 + 1);
+        }
+        let mut rank_bm25: HashMap<String, u32> = HashMap::new();
+        for (rank, (id, _)) in bm25_results.iter().enumerate() {
+            rank_bm25.insert(id.clone(), rank as u32 + 1);
+        }
+
+        let all_ids: HashSet<_> = rank_vec
+            .keys()
+            .chain(rank_bm25.keys())
+            .cloned()
+            .collect();
+        let mut combined: Vec<(String, f32)> = all_ids
+            .into_iter()
+            .map(|id| {
+                let rv = rank_vec.get(&id).copied().unwrap_or(u32::MAX);
+                let rb = rank_bm25.get(&id).copied().unwrap_or(u32::MAX);
+                let score = alpha * (1.0 / (k_rrf + rv as f32))
+                    + (1.0 - alpha) * (1.0 / (k_rrf + rb as f32));
+                (id, score)
+            })
+            .collect();
+        combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        combined.truncate(k);
+        Ok(combined)
+    }
+
     /// Remove um ponto pelo ID (da coleção e do índice).
     pub fn remove(&mut self, id: &str) -> Result<(), FerresError> {
         if self.points.remove(id).is_none() {
             return Err(FerresError::PointNotFound(id.to_string()));
         }
         self.index.remove_point(id);
+        if let Some(ref mut bm25) = self.bm25_index {
+            bm25.remove_document(id);
+        }
         self.dirty.store(true, Ordering::Release);
         Ok(())
     }
@@ -352,6 +458,8 @@ mod tests {
             distance: DistanceMetric::Euclidean,
             hnsw: HnswConfig::default(),
             search_cache_size: 0,
+            enable_bm25: false,
+            bm25_text_field: "text".to_string(),
         }
     }
 
@@ -441,6 +549,60 @@ mod tests {
         assert_eq!(restored.distance, DistanceMetric::Euclidean);
     }
 
+    #[test]
+    fn hybrid_search_requires_bm25() {
+        let col = Collection::new(test_config());
+        let result = col.hybrid_search(&[1.0, 2.0, 3.0], "query", 5, 0.5);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("BM25"));
+    }
+
+    #[test]
+    fn hybrid_search_returns_fused_results() {
+        let config = CollectionConfig {
+            name: "hybrid_test".to_string(),
+            dimension: 3,
+            distance: DistanceMetric::Euclidean,
+            hnsw: HnswConfig::default(),
+            search_cache_size: 0,
+            enable_bm25: true,
+            bm25_text_field: "text".to_string(),
+        };
+        let mut col = Collection::new(config);
+        col.insert(
+            Point::new(
+                "a",
+                vec![1.0, 0.0, 0.0],
+                serde_json::json!({"text": "hello world"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        col.insert(
+            Point::new(
+                "b",
+                vec![0.0, 1.0, 0.0],
+                serde_json::json!({"text": "foo bar"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        col.insert(
+            Point::new(
+                "c",
+                vec![0.9, 0.1, 0.0],
+                serde_json::json!({"text": "hello foo"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let results = col
+            .hybrid_search(&[1.0, 0.0, 0.0], "hello", 3, 0.5)
+            .unwrap();
+        assert!(!results.is_empty());
+        assert!(results.len() <= 3);
+    }
+
     // ─── Property Tests com QuickCheck ─────────────────────────────────
 
     #[cfg(test)]
@@ -467,6 +629,8 @@ mod tests {
                 distance: DistanceMetric::Euclidean,
                 hnsw: HnswConfig::default(),
                 search_cache_size: 0, // Desabilita cache para testes determinísticos
+                enable_bm25: false,
+                bm25_text_field: "text".to_string(),
             };
 
             let mut col = Collection::new(config);
@@ -516,6 +680,8 @@ mod tests {
                 distance: DistanceMetric::Euclidean,
                 hnsw: HnswConfig::default(),
                 search_cache_size: 0,
+                enable_bm25: false,
+                bm25_text_field: "text".to_string(),
             };
 
             let mut col = Collection::new(config);
@@ -566,6 +732,8 @@ mod tests {
                 distance: DistanceMetric::Euclidean,
                 hnsw: HnswConfig::default(),
                 search_cache_size: 0,
+                enable_bm25: false,
+                bm25_text_field: "text".to_string(),
             };
 
             let mut col = Collection::new(config);
@@ -626,6 +794,8 @@ mod tests {
                 distance: DistanceMetric::Euclidean,
                 hnsw: HnswConfig::default(),
                 search_cache_size: 0,
+                enable_bm25: false,
+                bm25_text_field: "text".to_string(),
             };
 
             let mut col = Collection::new(config);

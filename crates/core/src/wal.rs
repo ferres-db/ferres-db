@@ -421,6 +421,8 @@ mod tests {
             distance: DistanceMetric::Euclidean,
             hnsw: Default::default(),
             search_cache_size: 0,
+            enable_bm25: false,
+            bm25_text_field: "text".to_string(),
         }
     }
 

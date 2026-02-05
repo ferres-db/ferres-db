@@ -67,6 +67,21 @@ pub struct SearchPointsRequest {
     pub filter: Option<serde_json::Value>,
 }
 
+/// Payload para busca híbrida (vetorial + keyword).
+#[derive(Debug, Deserialize)]
+pub struct HybridSearchPointsRequest {
+    pub query_text: String,
+    pub query_vector: Vec<f32>,
+    pub limit: usize,
+    /// Peso da busca vetorial (0..=1). (1 - alpha) é o peso da busca keyword. Padrão: 0.5.
+    #[serde(default = "default_alpha")]
+    pub alpha: f32,
+}
+
+fn default_alpha() -> f32 {
+    0.5
+}
+
 /// Resposta de busca de pontos.
 #[derive(Debug, Serialize)]
 pub struct SearchPointsResponse {
@@ -387,6 +402,80 @@ pub async fn search_points(
             took_ms,
         ).await;
     });
+
+    Ok(Json(SearchPointsResponse { results, took_ms }))
+}
+
+/// Handler para POST /api/v1/collections/{name}/search/hybrid
+///
+/// Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF.
+/// Requer que a coleção tenha sido criada com BM25 habilitado.
+pub async fn search_hybrid(
+    State(app_state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<HybridSearchPointsRequest>,
+) -> ApiResult<Json<SearchPointsResponse>> {
+    if payload.limit == 0 {
+        return Err(ApiError::invalid_payload("limit must be greater than 0"));
+    }
+    if !(0.0..=1.0).contains(&payload.alpha) {
+        return Err(ApiError::invalid_payload("alpha must be between 0 and 1"));
+    }
+
+    let start = Instant::now();
+
+    let collection_arc = app_state.collections.get(&name)
+        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+
+    let collection = collection_arc.read().map_err(|e| {
+        ApiError::internal_error(format!("failed to acquire read lock: {}", e))
+    })?;
+
+    collection.validate_dimension(&payload.query_vector)
+        .map_err(ApiError::from)?;
+
+    let hybrid_results = collection.hybrid_search(
+        &payload.query_vector,
+        &payload.query_text,
+        payload.limit,
+        payload.alpha,
+    ).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("BM25") || msg.contains("hybrid search") {
+            ApiError::invalid_payload(msg)
+        } else {
+            ApiError::from(e)
+        }
+    })?;
+
+    let results: Vec<SearchResult> = hybrid_results
+        .into_iter()
+        .filter_map(|(id, score)| {
+            let point = collection.get(&id)?;
+            Some(SearchResult {
+                id,
+                score,
+                metadata: point.metadata.clone(),
+            })
+        })
+        .collect();
+
+    let took_ms = start.elapsed().as_millis() as u64;
+    let collection_name = name.clone();
+
+    drop(collection);
+    drop(collection_arc);
+
+    app_state.query_stats
+        .entry(collection_name.clone())
+        .or_insert_with(|| crate::state::QueryStats::new())
+        .record_query(took_ms);
+    crate::metrics::QUERIES_TOTAL
+        .with_label_values(&[&collection_name])
+        .inc();
+    crate::metrics::QUERY_DURATION_MS
+        .with_label_values(&[&collection_name])
+        .observe(took_ms as f64);
 
     Ok(Json(SearchPointsResponse { results, took_ms }))
 }

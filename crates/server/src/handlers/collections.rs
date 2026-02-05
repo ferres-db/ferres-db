@@ -44,6 +44,16 @@ pub struct CreateCollectionRequest {
     pub dimension: usize,
     
     pub distance: DistanceMetric,
+    /// Habilita índice BM25 para busca híbrida. Padrão: false.
+    #[serde(default)]
+    pub enable_bm25: bool,
+    /// Chave em metadata usada como texto para BM25. Padrão: "text".
+    #[serde(default = "default_bm25_text_field")]
+    pub bm25_text_field: String,
+}
+
+fn default_bm25_text_field() -> String {
+    "text".to_string()
 }
 
 /// Resposta de criação de coleção.
@@ -118,6 +128,8 @@ pub async fn create_collection(
         distance: payload.distance,
         hnsw: Default::default(),
         search_cache_size: 0,
+        enable_bm25: payload.enable_bm25,
+        bm25_text_field: payload.bm25_text_field.clone(),
     };
 
     // Cria a coleção
