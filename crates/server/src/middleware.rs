@@ -159,20 +159,22 @@ impl KeyExtractor for CollectionKeyExtractor {
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
         // Extrai o nome da coleção da URL
         // Formato esperado: /api/v1/collections/{name}/...
+        // Nunca retorna Err para evitar 500 (ex.: path "/" ou "/api/v1/collections/").
         let path = req.uri().path();
         let parts: Vec<&str> = path.split('/').collect();
 
-        // Procura por "collections" e pega o próximo segmento
         if let Some(pos) = parts.iter().position(|&p| p == "collections") {
             if pos + 1 < parts.len() {
                 let collection_name = parts[pos + 1];
-                if !collection_name.is_empty() {
-                    return Ok(collection_name.to_string());
-                }
+                return Ok(if collection_name.is_empty() {
+                    "__no_collection__".to_string()
+                } else {
+                    collection_name.to_string()
+                });
             }
         }
 
-        Err(GovernorError::UnableToExtractKey)
+        Ok("__no_collection__".to_string())
     }
 }
 

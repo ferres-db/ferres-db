@@ -97,8 +97,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Limite de body: default do Axum é 2MB; upserts com muitos pontos (vetores + metadata) podem exceder.
+    const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024; // 32 MB
+
     // Cria o router com todas as rotas
     let app = routes::create_router()
+        .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .layer(axum::middleware::from_fn(middleware::request_logger))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(

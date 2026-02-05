@@ -17,6 +17,111 @@ use tracing::{info, warn};
 use ferres_db_core::{Collection, FileStorage};
 
 use crate::query_logger::QueryLogger;
+use crate::query_log_analytics::QueryLogCache;
+
+// ─── GlobalQueryStats (dashboard: queries/min, top slow, histogram) ────────
+
+/// Capacidade máxima de eventos no buffer global (últimas ~24h de tráfego).
+const GLOBAL_QUERY_EVENTS_CAP: usize = 100_000;
+
+/// Um evento de query para estatísticas globais.
+#[derive(Debug, Clone)]
+pub struct GlobalQueryEvent {
+    pub timestamp_secs: u64,
+    pub latency_ms: u64,
+    pub collection: String,
+}
+
+/// Estatísticas globais de queries (últimas 24h) para o dashboard.
+#[derive(Debug)]
+pub struct GlobalQueryStats {
+    events: RwLock<VecDeque<GlobalQueryEvent>>,
+}
+
+impl GlobalQueryStats {
+    pub fn new() -> Self {
+        Self {
+            events: RwLock::new(VecDeque::with_capacity(GLOBAL_QUERY_EVENTS_CAP)),
+        }
+    }
+
+    /// Registra uma query (chamado após cada busca).
+    pub fn record(&self, collection: &str, latency_ms: u64) {
+        let timestamp_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut events = self.events.write().unwrap();
+        events.push_back(GlobalQueryEvent {
+            timestamp_secs,
+            latency_ms,
+            collection: collection.to_string(),
+        });
+        while events.len() > GLOBAL_QUERY_EVENTS_CAP {
+            events.pop_front();
+        }
+    }
+
+    /// Retorna eventos das últimas 24 horas.
+    fn events_last_24h(&self) -> Vec<GlobalQueryEvent> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cutoff = now_secs.saturating_sub(24 * 3600);
+        let events = self.events.read().unwrap();
+        events
+            .iter()
+            .filter(|e| e.timestamp_secs >= cutoff)
+            .cloned()
+            .collect()
+    }
+
+    /// Queries por minuto (últimas 24h): cada item é (minute_ts, count).
+    pub fn queries_per_minute_24h(&self) -> Vec<(u64, u64)> {
+        let events = self.events_last_24h();
+        let mut buckets: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for e in &events {
+            let minute = e.timestamp_secs / 60;
+            *buckets.entry(minute).or_insert(0) += 1;
+        }
+        let mut out: Vec<(u64, u64)> = buckets.into_iter().collect();
+        out.sort_by_key(|&(k, _)| k);
+        out
+    }
+
+    /// Top N queries mais lentas (collection, latency_ms, timestamp_secs).
+    pub fn top_slowest(&self, n: usize) -> Vec<GlobalQueryEvent> {
+        let mut events = self.events_last_24h();
+        events.sort_by(|a, b| b.latency_ms.cmp(&a.latency_ms));
+        events.into_iter().take(n).collect()
+    }
+
+    /// Histograma de latências: buckets (label, count). Bordas: 0, 5, 10, 25, 50, 100, 500, inf.
+    pub fn latency_histogram(&self) -> Vec<(&'static str, u64)> {
+        let events = self.events_last_24h();
+        let labels = ["0-5ms", "5-10ms", "10-25ms", "25-50ms", "50-100ms", "100-500ms", "500ms+"];
+        let mut counts = vec![0u64; 7];
+        for e in &events {
+            if e.latency_ms < 5 {
+                counts[0] += 1;
+            } else if e.latency_ms < 10 {
+                counts[1] += 1;
+            } else if e.latency_ms < 25 {
+                counts[2] += 1;
+            } else if e.latency_ms < 50 {
+                counts[3] += 1;
+            } else if e.latency_ms < 100 {
+                counts[4] += 1;
+            } else if e.latency_ms < 500 {
+                counts[5] += 1;
+            } else {
+                counts[6] += 1;
+            }
+        }
+        labels.iter().copied().zip(counts).collect()
+    }
+}
 
 // ─── ServerConfig ──────────────────────────────────────────────────────
 
@@ -172,8 +277,12 @@ pub struct AppState {
     pub collections: Arc<DashMap<String, Arc<RwLock<Collection>>>>,
     /// Estatísticas de queries por coleção.
     pub query_stats: Arc<DashMap<String, QueryStats>>,
+    /// Estatísticas globais (últimas 24h) para dashboard.
+    pub global_query_stats: Arc<GlobalQueryStats>,
     /// Logger de queries.
     pub query_logger: Arc<QueryLogger>,
+    /// Cache de analytics (leitura de queries.log, TTL 1h).
+    pub query_log_cache: Arc<QueryLogCache>,
     /// Configuração do servidor.
     pub config: ServerConfig,
     /// Notificador para shutdown graceful.
@@ -253,6 +362,8 @@ impl AppState {
             query_stats.insert(name, QueryStats::new());
         }
 
+        let global_query_stats = Arc::new(GlobalQueryStats::new());
+
         // Inicializa query logger
         let log_dir = config.storage_path.join("logs");
         let query_logger = Arc::new(
@@ -263,6 +374,8 @@ impl AppState {
             })?
         );
 
+        let query_log_cache = Arc::new(QueryLogCache::new(log_dir.join("queries.log")));
+
         info!(
             collections = collections.len(),
             log_dir = %log_dir.display(),
@@ -272,7 +385,9 @@ impl AppState {
         Ok(Self {
             collections,
             query_stats,
+            global_query_stats,
             query_logger,
+            query_log_cache,
             config,
             shutdown_notify: Arc::new(Notify::new()),
             is_shutting_down: Arc::new(AtomicBool::new(false)),

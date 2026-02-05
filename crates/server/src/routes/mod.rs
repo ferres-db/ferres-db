@@ -31,5 +31,6 @@ pub fn create_router() -> Router<AppState> {
         .merge(health::create_health_routes())
         .merge(metrics::create_metrics_routes())
         .merge(collections::create_base_collection_routes())
+        .merge(stats::create_global_stats_routes())
         .merge(collection_scoped)
 }

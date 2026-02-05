@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 /// Estrutura de log de uma query.
 #[derive(Debug, Serialize)]
 struct QueryLogEntry {
+    query_id: String,
     timestamp: String,
     collection: String,
     vector_preview: String,
@@ -60,6 +61,7 @@ impl QueryLogger {
         };
 
         let entry = QueryLogEntry {
+            query_id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().to_rfc3339(),
             collection: collection.to_string(),
             vector_preview,

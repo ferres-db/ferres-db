@@ -19,6 +19,8 @@ import os
 import subprocess
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -273,6 +275,34 @@ def save_history_entry(
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def save_feedback_entry(
+    feedback_path: Path,
+    session_id: str,
+    turn_index: int,
+    useful: bool,
+    comment: Optional[str] = None,
+) -> None:
+    """Append one line to feedback.jsonl (PoC: feedback inline Útil/Não útil)."""
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "session_id": session_id,
+        "turn_index": turn_index,
+        "useful": useful,
+        "comment": comment,
+    }
+    with open(feedback_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def save_session_event(session_path: Path, event: Dict[str, Any]) -> None:
+    """Append one session event (query ou feedback) para replay depois."""
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    event["ts"] = time.time()
+    with open(session_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
 def interactive_loop(args: argparse.Namespace) -> None:
     session = requests.Session()
     session.headers.setdefault("Content-Type", "application/json")
@@ -286,6 +316,20 @@ def interactive_loop(args: argparse.Namespace) -> None:
     if history_path:
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
+    session_id = os.environ.get("SESSION_ID") or str(uuid.uuid4())
+    session_path: Optional[Path] = None
+    if getattr(args, "session_file", None):
+        session_path = Path(args.session_file).resolve()
+    else:
+        # Gravar sessão por padrão quando feedback está ativo (replay depois)
+        if getattr(args, "feedback", False):
+            session_path = APP_ROOT / "data" / "sessions" / f"{session_id}.jsonl"
+    feedback_path: Optional[Path] = None
+    if getattr(args, "feedback", False):
+        default_feedback = APP_ROOT.parent.parent / "data" / "logs" / "feedback.jsonl"
+        feedback_path = Path(args.feedback_file).resolve() if getattr(args, "feedback_file", None) else default_feedback
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
+
     reranker_instance = None
     if getattr(args, "rerank", False):
         try:
@@ -297,9 +341,14 @@ def interactive_loop(args: argparse.Namespace) -> None:
     print("RAG (FerresDB + LLM). Coleção:", args.collection, "| LLM:", args.llm, "| Embedding:", args.embedding, end="")
     if reranker_instance:
         print(" | Rerank:", args.reranker, f"({args.retrieve_top_k}->{args.rerank_top_k})", end="")
+    if getattr(args, "feedback", False):
+        print(" | Feedback: on", end="")
+    if session_path:
+        print(" | Sessão:", session_id, end="")
     print()
     print("Digite sua pergunta (enter). Sair: quit, exit ou Ctrl+D.\n")
 
+    turn_index = 0
     while True:
         try:
             line = input("RAG> ").strip()
@@ -310,6 +359,7 @@ def interactive_loop(args: argparse.Namespace) -> None:
         question = line
 
         print("[buscando contexto...]")
+        t0 = time.perf_counter()
         try:
             answer, sources = rag_query(
                 question,
@@ -329,6 +379,7 @@ def interactive_loop(args: argparse.Namespace) -> None:
         except Exception as e:
             print(f"Erro: {e}", file=sys.stderr)
             continue
+        latency_ms = int((time.perf_counter() - t0) * 1000)
 
         if not args.stream:
             print("Resposta:", answer)
@@ -353,10 +404,54 @@ def interactive_loop(args: argparse.Namespace) -> None:
             score = r.get("score", 0)
             print(f"  - {src} (score: {score:.2f})")
 
+        if session_path:
+            save_session_event(
+                session_path,
+                {
+                    "event": "query",
+                    "session_id": session_id,
+                    "turn_index": turn_index,
+                    "question": question,
+                    "answer": answer,
+                    "sources": [
+                        {"id": r.get("id"), "score": r.get("score"), "source": (r.get("metadata") or {}).get("source")}
+                        for r in sources
+                    ],
+                    "latency_ms": latency_ms,
+                },
+            )
+
+        if feedback_path:
+            while True:
+                try:
+                    useful_in = input("Resposta foi útil? (s/n): ").strip().lower()
+                except EOFError:
+                    useful_in = ""
+                if useful_in in ("s", "sim", "y", "yes"):
+                    useful = True
+                    break
+                if useful_in in ("n", "não", "nao", "no"):
+                    useful = False
+                    break
+                print("Digite s ou n.")
+            try:
+                comment = input("Comentário (enter para pular): ").strip() or None
+            except EOFError:
+                comment = None
+            save_feedback_entry(feedback_path, session_id, turn_index, useful, comment)
+            if session_path:
+                save_session_event(
+                    session_path,
+                    {"event": "feedback", "session_id": session_id, "turn_index": turn_index, "useful": useful, "comment": comment},
+                )
+
         if history_path:
             save_history_entry(history_path, question, answer, sources)
+        turn_index += 1
         print()
 
+    if session_path:
+        print("Sessão gravada em:", session_path)
     print("Até mais.")
 
 
@@ -457,6 +552,9 @@ def main() -> None:
     parser.add_argument("--show-chunks", action="store_true")
     parser.add_argument("--no-stream", action="store_true", dest="no_stream")
     parser.add_argument("--history", help="Arquivo de histórico JSONL")
+    parser.add_argument("--feedback", action="store_true", help="Após cada resposta, perguntar Útil/Não útil e salvar em feedback.jsonl")
+    parser.add_argument("--feedback-file", help="Caminho do feedback.jsonl (default: data/logs/feedback.jsonl para o dashboard)")
+    parser.add_argument("--session-file", help="Gravar sessão (fluxo completo) em JSONL para replay (default: data/sessions/<session_id>.jsonl)")
     parser.add_argument("--questions-file", help="Arquivo com uma pergunta por linha (modo batch: imprime JSONL com question, answer, latency_ms)")
 
     args = parser.parse_args()

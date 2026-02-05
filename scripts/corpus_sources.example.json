@@ -1,0 +1,11 @@
+{
+  "sources": [
+    "docs/",
+    "README.md",
+    "CHANGELOG.md",
+    "examples/",
+    "tests/e2e/fixtures/corpus_10",
+    "faq/",
+    "articles/"
+  ]
+}

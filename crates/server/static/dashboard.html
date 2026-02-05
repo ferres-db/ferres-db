@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FerresDB Dashboard</title>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen font-sans antialiased" x-data="dashboard()" x-init="init()">
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    <header class="mb-8">
+      <h1 class="text-2xl font-bold text-slate-100">FerresDB Dashboard</h1>
+      <p class="text-slate-400 text-sm mt-1">Atualização a cada 5s · Queries ao vivo a cada 2s</p>
+    </header>
+
+    <!-- Collections + stats -->
+    <section class="mb-8">
+      <h2 class="text-lg font-semibold text-slate-300 mb-4">Coleções</h2>
+      <div class="rounded-xl bg-slate-900/80 border border-slate-700/60 overflow-hidden">
+        <div x-show="loadingCollections" class="p-6 text-slate-500" x-cloak>Carregando...</div>
+        <div x-show="!loadingCollections && collections.length === 0" class="p-6 text-slate-500" x-cloak>Nenhuma coleção.</div>
+        <ul x-show="!loadingCollections && collections.length > 0" class="divide-y divide-slate-700/60" x-cloak>
+          <template x-for="c in collections" :key="c.name">
+            <li class="flex flex-wrap items-center gap-4 px-6 py-4 hover:bg-slate-800/50 transition">
+              <span class="font-mono text-amber-400" x-text="c.name"></span>
+              <span class="text-slate-500 text-sm">pontos: <span class="text-slate-300" x-text="c.num_points ?? '-'"></span></span>
+              <template x-if="c.stats">
+                <span class="text-slate-500 text-sm">
+                  queries: <span class="text-slate-300" x-text="c.stats.num_queries"></span>
+                  · avg <span class="text-slate-300" x-text="(c.stats.avg_latency_ms ?? 0).toFixed(1)"></span> ms
+                  · p95 <span class="text-slate-300" x-text="(c.stats.p95_latency_ms ?? 0).toFixed(1)"></span> ms
+                </span>
+              </template>
+            </li>
+          </template>
+        </ul>
+      </div>
+    </section>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+      <!-- Queries/min chart -->
+      <section class="rounded-xl bg-slate-900/80 border border-slate-700/60 p-6">
+        <h2 class="text-lg font-semibold text-slate-300 mb-4">Queries/min (últimas 24h)</h2>
+        <div class="h-64">
+          <canvas id="chartQpm" width="400" height="256"></canvas>
+        </div>
+      </section>
+
+      <!-- Latency histogram -->
+      <section class="rounded-xl bg-slate-900/80 border border-slate-700/60 p-6">
+        <h2 class="text-lg font-semibold text-slate-300 mb-4">Distribuição de latências</h2>
+        <div class="h-64">
+          <canvas id="chartHistogram" width="400" height="256"></canvas>
+        </div>
+      </section>
+    </div>
+
+    <!-- Queries ao vivo (tempo real, destaque para problemáticas) -->
+    <section class="mt-8 rounded-xl bg-slate-900/80 border border-slate-700/60 overflow-hidden">
+      <h2 class="text-lg font-semibold text-slate-300 px-6 py-4 border-b border-slate-700/60">Queries ao vivo</h2>
+      <div x-show="loadingLive" class="p-6 text-slate-500" x-cloak>Carregando...</div>
+      <div x-show="!loadingLive && liveQueries.length === 0" class="p-6 text-slate-500" x-cloak>Nenhuma query recente.</div>
+      <div class="overflow-x-auto max-h-80 overflow-y-auto" x-show="!loadingLive && liveQueries.length > 0" x-cloak>
+        <table class="w-full text-sm">
+          <thead class="sticky top-0 bg-slate-900 z-10">
+            <tr class="text-left text-slate-500 border-b border-slate-700/60">
+              <th class="px-6 py-3">Coleção</th>
+              <th class="px-6 py-3">Resultados</th>
+              <th class="px-6 py-3">Latência</th>
+              <th class="px-6 py-3">Horário</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="q in liveQueries" :key="q.query_id">
+              <tr class="border-b border-slate-700/40 hover:bg-slate-800/50"
+                  :class="{ 'bg-red-900/30 text-red-200': isProblematic(q) }">
+                <td class="px-6 py-2 font-mono text-amber-400" x-text="q.collection"></td>
+                <td class="px-6 py-2" x-text="q.results_count"></td>
+                <td class="px-6 py-2" :class="q.took_ms >= 5000 ? 'text-red-400 font-medium' : ''" x-text="q.took_ms + ' ms'"></td>
+                <td class="px-6 py-2 text-slate-400" x-text="formatTimestamp(q.timestamp)"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Satisfação (feedback Útil / Não útil) -->
+    <section class="mt-8 rounded-xl bg-slate-900/80 border border-slate-700/60 p-6">
+      <h2 class="text-lg font-semibold text-slate-300 mb-4">Satisfação (feedback)</h2>
+      <div class="h-48" x-show="feedbackStats">
+        <canvas id="chartSatisfaction" width="400" height="192"></canvas>
+      </div>
+      <p x-show="feedbackStats && (feedbackStats.useful_count + feedbackStats.not_useful_count) === 0" class="text-slate-500 text-sm mt-2">Nenhum feedback ainda. Habilite <code class="bg-slate-800 px-1 rounded">--feedback</code> no app RAG.</p>
+      <p x-show="feedbackStats && (feedbackStats.useful_count + feedbackStats.not_useful_count) > 0" class="text-slate-400 text-sm mt-2" x-text="'Útil: ' + (feedbackStats?.useful_count ?? 0) + ' · Não útil: ' + (feedbackStats?.not_useful_count ?? 0)"></p>
+    </section>
+
+    <!-- Top 10 slowest (from /api/v1/stats/slow-queries) -->
+    <section class="mt-8 rounded-xl bg-slate-900/80 border border-slate-700/60 overflow-hidden">
+      <h2 class="text-lg font-semibold text-slate-300 px-6 py-4 border-b border-slate-700/60">Top 10 queries mais lentas</h2>
+      <div x-show="loadingSlow" class="p-6 text-slate-500" x-cloak>Carregando...</div>
+      <div x-show="!loadingSlow && slowQueries.length === 0" class="p-6 text-slate-500" x-cloak>Nenhuma query lenta (threshold 100ms).</div>
+      <div class="overflow-x-auto" x-show="!loadingSlow && slowQueries.length > 0" x-cloak>
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-slate-500 border-b border-slate-700/60">
+              <th class="px-6 py-3">Coleção</th>
+              <th class="px-6 py-3">Latência (ms)</th>
+              <th class="px-6 py-3">Horário</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="q in slowQueries" :key="q.query_id">
+              <tr class="border-b border-slate-700/40 hover:bg-slate-800/50">
+                <td class="px-6 py-3 font-mono text-amber-400" x-text="q.collection"></td>
+                <td class="px-6 py-3 text-rose-400" x-text="q.took_ms"></td>
+                <td class="px-6 py-3 text-slate-400" x-text="formatTimestamp(q.timestamp)"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    function dashboard() {
+      return {
+        collections: [],
+        globalStats: null,
+        slowQueries: [],
+        liveQueries: [],
+        feedbackStats: null,
+        loadingCollections: true,
+        loadingGlobal: true,
+        loadingSlow: true,
+        loadingLive: true,
+        chartQpm: null,
+        chartHistogram: null,
+        chartSatisfaction: null,
+
+        isProblematic(q) {
+          return (q.took_ms || 0) >= 5000 || (q.results_count || 0) === 0;
+        },
+
+        async fetchCollections() {
+          try {
+            const res = await fetch('/api/v1/collections');
+            if (!res.ok) return;
+            const data = await res.json();
+            this.collections = data.collections || [];
+            for (const c of this.collections) {
+              try {
+                const r = await fetch(`/api/v1/collections/${encodeURIComponent(c.name)}/stats`);
+                if (r.ok) c.stats = await r.json();
+              } catch (_) {}
+            }
+          } catch (_) {}
+          this.loadingCollections = false;
+        },
+
+        async fetchGlobal() {
+          try {
+            const res = await fetch('/api/v1/stats/global');
+            if (!res.ok) return;
+            this.globalStats = await res.json();
+            this.updateQpmChart();
+          } catch (_) {}
+          this.loadingGlobal = false;
+        },
+
+        async fetchSlowQueries() {
+          try {
+            const res = await fetch('/api/v1/stats/slow-queries?threshold_ms=100&limit=10');
+            if (!res.ok) return;
+            this.slowQueries = await res.json();
+          } catch (_) {}
+          this.loadingSlow = false;
+        },
+
+        async fetchQueriesForHistogram() {
+          try {
+            const res = await fetch('/api/v1/stats/queries?limit=500&sort=latency');
+            if (!res.ok) return;
+            const list = await res.json();
+            this.updateHistogramFromQueries(list);
+          } catch (_) {}
+        },
+
+        async fetchLiveQueries() {
+          try {
+            const res = await fetch('/api/v1/stats/queries?limit=30');
+            if (!res.ok) return;
+            this.liveQueries = await res.json();
+          } catch (_) {}
+          this.loadingLive = false;
+        },
+
+        async fetchFeedback() {
+          try {
+            const res = await fetch('/api/v1/stats/feedback');
+            if (!res.ok) return;
+            this.feedbackStats = await res.json();
+            this.updateSatisfactionChart();
+          } catch (_) {}
+        },
+
+        updateSatisfactionChart() {
+          const s = this.feedbackStats;
+          if (!s || !this.chartSatisfaction) return;
+          const total = s.useful_count + s.not_useful_count;
+          if (total === 0) return;
+          this.chartSatisfaction.data.datasets[0].data = [s.useful_count, s.not_useful_count];
+          this.chartSatisfaction.update('none');
+        },
+
+        formatTimestamp(iso) {
+          if (!iso) return '-';
+          try {
+            const d = new Date(iso);
+            return isNaN(d.getTime()) ? iso : d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'medium' });
+          } catch (_) { return iso; }
+        },
+
+        updateQpmChart() {
+          const g = this.globalStats;
+          if (!g || !this.chartQpm) return;
+          const qpm = g.queries_per_minute || [];
+          const labels = qpm.map(b => {
+            const d = new Date(b.timestamp * 1000);
+            return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+          });
+          this.chartQpm.data.labels = labels;
+          this.chartQpm.data.datasets[0].data = qpm.map(b => b.count);
+          this.chartQpm.update('none');
+        },
+
+        updateHistogramFromQueries(queries) {
+          const buckets = ['0-5ms', '5-10ms', '10-25ms', '25-50ms', '50-100ms', '100-500ms', '500ms+'];
+          const counts = [0,0,0,0,0,0,0];
+          for (const q of queries || []) {
+            const ms = q.took_ms || 0;
+            if (ms < 5) counts[0]++;
+            else if (ms < 10) counts[1]++;
+            else if (ms < 25) counts[2]++;
+            else if (ms < 50) counts[3]++;
+            else if (ms < 100) counts[4]++;
+            else if (ms < 500) counts[5]++;
+            else counts[6]++;
+          }
+          if (this.chartHistogram) {
+            this.chartHistogram.data.labels = buckets;
+            this.chartHistogram.data.datasets[0].data = counts;
+            this.chartHistogram.update('none');
+          }
+        },
+
+        initCharts() {
+          const grid = { color: 'rgba(148, 163, 184, 0.15)' };
+          const ticks = { color: '#94a3b8' };
+
+          this.chartQpm = new Chart(document.getElementById('chartQpm'), {
+            type: 'line',
+            data: {
+              labels: [],
+              datasets: [{
+                label: 'Queries/min',
+                data: [],
+                borderColor: '#f59e0b',
+                backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                fill: true,
+                tension: 0.2
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { grid, ticks },
+                y: { grid, ticks, beginAtZero: true }
+              }
+            }
+          });
+
+          this.chartHistogram = new Chart(document.getElementById('chartHistogram'), {
+            type: 'bar',
+            data: {
+              labels: [],
+              datasets: [{
+                label: 'Queries',
+                data: [],
+                backgroundColor: 'rgba(34, 197, 94, 0.6)',
+                borderColor: '#22c55e',
+                borderWidth: 1
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { grid, ticks },
+                y: { grid, ticks, beginAtZero: true }
+              }
+            }
+          });
+
+          const satCtx = document.getElementById('chartSatisfaction');
+          if (satCtx) {
+            this.chartSatisfaction = new Chart(satCtx, {
+              type: 'doughnut',
+              data: {
+                labels: ['Útil', 'Não útil'],
+                datasets: [{
+                  data: [0, 0],
+                  backgroundColor: ['#22c55e', '#ef4444'],
+                  borderColor: ['#16a34a', '#dc2626'],
+                  borderWidth: 1
+                }]
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom' } }
+              }
+            });
+          }
+        },
+
+        async poll() {
+          await Promise.all([
+            this.fetchCollections(),
+            this.fetchGlobal(),
+            this.fetchSlowQueries(),
+            this.fetchQueriesForHistogram(),
+            this.fetchFeedback()
+          ]);
+        },
+
+        init() {
+          this.initCharts();
+          this.poll();
+          this.fetchLiveQueries();
+          setInterval(() => this.poll(), 5000);
+          setInterval(() => this.fetchLiveQueries(), 2000);
+        }
+      };
+    }
+  </script>
+</body>
+</html>

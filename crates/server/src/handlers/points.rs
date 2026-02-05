@@ -376,6 +376,8 @@ pub async fn search_points(
         .entry(collection_name.clone())
         .or_insert_with(|| crate::state::QueryStats::new())
         .record_query(took_ms);
+
+    app_state.global_query_stats.record(&collection_name, took_ms);
     
     // Registra métricas Prometheus (não precisa de guard)
     crate::metrics::QUERIES_TOTAL
@@ -470,12 +472,31 @@ pub async fn search_hybrid(
         .entry(collection_name.clone())
         .or_insert_with(|| crate::state::QueryStats::new())
         .record_query(took_ms);
+    app_state.global_query_stats.record(&collection_name, took_ms);
     crate::metrics::QUERIES_TOTAL
         .with_label_values(&[&collection_name])
         .inc();
     crate::metrics::QUERY_DURATION_MS
         .with_label_values(&[&collection_name])
         .observe(took_ms as f64);
+
+    let query_logger = app_state.query_logger.clone();
+    let collection_name_for_log = collection_name.clone();
+    let vector_for_log = payload.query_vector.clone();
+    let limit_for_log = payload.limit;
+    let results_count = results.len();
+    tokio::spawn(async move {
+        query_logger
+            .log_query(
+                &collection_name_for_log,
+                &vector_for_log,
+                limit_for_log,
+                None,
+                results_count,
+                took_ms,
+            )
+            .await;
+    });
 
     Ok(Json(SearchPointsResponse { results, took_ms }))
 }

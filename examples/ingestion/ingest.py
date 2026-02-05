@@ -47,7 +47,8 @@ from embeddings import (
 )
 
 SUPPORTED_EXTENSIONS = {".md", ".pdf", ".html"}
-UPSERT_BATCH_SIZE = 500
+# Servidor Axum tem limite de body (ex.: 2MB default); batches menores evitam 413 Payload Too Large
+UPSERT_BATCH_SIZE = 100
 
 
 def discover_files(source: Path) -> List[Path]:
@@ -418,7 +419,7 @@ def main() -> None:
     parser.add_argument("--embedding", "-e", choices=["openai", "cohere", "local"], default="openai")
     parser.add_argument("--chunker", choices=["semantic", "fixed", "markdown"], default="semantic")
     parser.add_argument("--chunk-size", type=int, default=512)
-    parser.add_argument("--server", default="http://localhost:8080")
+    parser.add_argument("--server", default="http://localhost:3000")
     parser.add_argument("--manifest", "-m", help="Caminho do manifesto JSON")
     parser.add_argument("--incremental", "-i", action="store_true")
     parser.add_argument("--errors-log", default="errors.log")

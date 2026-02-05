@@ -17,11 +17,11 @@ Referência dos endpoints REST do servidor FerresDB. Base URL de exemplo: `http:
 }
 ```
 
-| Campo    | Tipo   | Descrição                          |
-| -------- | ------ | ---------------------------------- |
-| `error`  | string | Tipo: `collection_not_found`, `collection_already_exists`, `invalid_payload`, `invalid_dimension`, `internal_error` |
-| `message`| string | Mensagem legível                   |
-| `code`   | number | Código HTTP (400, 404, 409, 500)   |
+| Campo     | Tipo   | Descrição                                                                                                           |
+| --------- | ------ | ------------------------------------------------------------------------------------------------------------------- |
+| `error`   | string | Tipo: `collection_not_found`, `collection_already_exists`, `invalid_payload`, `invalid_dimension`, `internal_error` |
+| `message` | string | Mensagem legível                                                                                                    |
+| `code`    | number | Código HTTP (400, 404, 409, 500)                                                                                    |
 
 ---
 
@@ -99,12 +99,12 @@ Cria uma nova coleção.
 
 **Request body:**
 
-| Campo             | Tipo    | Obrigatório | Descrição |
-| ----------------- | ------- | ----------- | --------- |
-| `name`            | string  | sim         | Nome único: apenas `a-zA-Z0-9_-` |
-| `dimension`       | number  | sim         | Dimensão dos vetores (1–4096) |
-| `distance`        | string  | sim         | Métrica: `Cosine`, `Euclidean`, `DotProduct` |
-| `enable_bm25`     | boolean | não         | Habilita índice BM25 para busca híbrida (default: false) |
+| Campo             | Tipo    | Obrigatório | Descrição                                                        |
+| ----------------- | ------- | ----------- | ---------------------------------------------------------------- |
+| `name`            | string  | sim         | Nome único: apenas `a-zA-Z0-9_-`                                 |
+| `dimension`       | number  | sim         | Dimensão dos vetores (1–4096)                                    |
+| `distance`        | string  | sim         | Métrica: `Cosine`, `Euclidean`, `DotProduct`                     |
+| `enable_bm25`     | boolean | não         | Habilita índice BM25 para busca híbrida (default: false)         |
 | `bm25_text_field` | string  | não         | Chave em metadata usada como texto para BM25 (default: `"text"`) |
 
 **Schema de request:**
@@ -227,17 +227,17 @@ Insere ou atualiza pontos em lote (até 1000 pontos por request).
 
 **Request body:**
 
-| Campo   | Tipo  | Descrição |
-| ------- | ----- | --------- |
+| Campo    | Tipo  | Descrição                                 |
+| -------- | ----- | ----------------------------------------- |
 | `points` | array | Lista de 1 a 1000 pontos (objeto abaixo). |
 
 Cada elemento de `points`:
 
-| Campo     | Tipo   | Obrigatório | Descrição |
-| --------- | ------ | ----------- | --------- |
-| `id`      | string | sim         | ID único do ponto |
-| `vector`  | array  | sim         | Array de números (float), dimensão igual à da coleção |
-| `metadata`| object | não         | JSON arbitrário (default: `{}`) |
+| Campo      | Tipo   | Obrigatório | Descrição                                             |
+| ---------- | ------ | ----------- | ----------------------------------------------------- |
+| `id`       | string | sim         | ID único do ponto                                     |
+| `vector`   | array  | sim         | Array de números (float), dimensão igual à da coleção |
+| `metadata` | object | não         | JSON arbitrário (default: `{}`)                       |
 
 **Schema de request:**
 
@@ -345,11 +345,11 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 
 **Request body:**
 
-| Campo   | Tipo   | Obrigatório | Descrição |
-| ------- | ------ | ----------- | --------- |
-| `vector`| array  | sim         | Vetor de consulta (mesma dimensão da coleção) |
-| `limit`| number | sim         | Número máximo de resultados (> 0) |
-| `filter`| object | não         | Filtro por igualdade em metadata (ex.: `{"source": "manual"}`) |
+| Campo    | Tipo   | Obrigatório | Descrição                                                      |
+| -------- | ------ | ----------- | -------------------------------------------------------------- |
+| `vector` | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                  |
+| `limit`  | number | sim         | Número máximo de resultados (> 0)                              |
+| `filter` | object | não         | Filtro por igualdade em metadata (ex.: `{"source": "manual"}`) |
 
 **Schema de request:**
 
@@ -396,12 +396,12 @@ Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF. A coleç�
 
 **Request body:**
 
-| Campo          | Tipo   | Obrigatório | Descrição |
-| -------------- | ------ | ----------- | --------- |
-| `query_text`  | string | sim         | Texto para busca keyword (BM25) |
-| `query_vector`| array  | sim         | Vetor para busca vetorial |
-| `limit`       | number | sim         | Número máximo de resultados (> 0) |
-| `alpha`       | number | não         | Peso da busca vetorial 0..1 (default: 0.5). (1 - alpha) = peso keyword |
+| Campo          | Tipo   | Obrigatório | Descrição                                                              |
+| -------------- | ------ | ----------- | ---------------------------------------------------------------------- |
+| `query_text`   | string | sim         | Texto para busca keyword (BM25)                                        |
+| `query_vector` | array  | sim         | Vetor para busca vetorial                                              |
+| `limit`        | number | sim         | Número máximo de resultados (> 0)                                      |
+| `alpha`        | number | não         | Peso da busca vetorial 0..1 (default: 0.5). (1 - alpha) = peso keyword |
 
 **Schema de request:**
 
@@ -418,9 +418,7 @@ Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF. A coleç�
 
 ```json
 {
-  "results": [
-    { "id": "doc-1", "score": 0.85, "metadata": { "text": "..." } }
-  ],
+  "results": [{ "id": "doc-1", "score": 0.85, "metadata": { "text": "..." } }],
   "took_ms": 3
 }
 ```
@@ -435,7 +433,94 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/hybrid \
 
 ---
 
-## Estatísticas
+## Dashboard
+
+### GET /dashboard
+
+Retorna a página HTML do dashboard (single-file com Alpine.js, Tailwind CDN e Chart.js). Exibe lista de coleções com stats, gráfico de queries/min (24h), top 10 queries mais lentas (`GET /api/v1/stats/slow-queries`) e distribuição de latências. Atualiza via polling a cada 5s usando `GET /api/v1/stats/global`, `GET /api/v1/stats/queries`, `GET /api/v1/stats/slow-queries` e `GET /api/v1/collections/{name}/stats`.
+
+**Resposta:** `200 OK` (HTML)
+
+---
+
+## Estatísticas e analytics
+
+Os endpoints de analytics leem o arquivo `queries.log` (JSONL) e mantêm cache em memória por 1h.
+
+### GET /api/v1/stats/global
+
+Retorna estatísticas globais: totais do servidor (coleções, pontos) e agregados das últimas 24h a partir do log de queries.
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "total_collections": 2,
+  "total_points": 150,
+  "total_queries_24h": 420,
+  "avg_latency_ms": 3.5,
+  "queries_per_minute": [{ "timestamp": 1738742400, "count": 12 }]
+}
+```
+
+| Campo                | Tipo   | Descrição                                                 |
+| -------------------- | ------ | --------------------------------------------------------- |
+| `total_collections`  | number | Número de coleções                                        |
+| `total_points`       | number | Soma de pontos em todas as coleções                       |
+| `total_queries_24h`  | number | Queries nas últimas 24h (do log)                          |
+| `avg_latency_ms`     | number | Latência média (ms) nas últimas 24h                       |
+| `queries_per_minute` | array  | Buckets por minuto: `timestamp` (Unix do minuto), `count` |
+
+---
+
+### GET /api/v1/stats/queries
+
+Lista queries das últimas 24h (lê de `queries.log`, cache 1h).
+
+**Query params:**
+
+| Param        | Tipo   | Default | Descrição                                               |
+| ------------ | ------ | ------- | ------------------------------------------------------- |
+| `collection` | string | —       | Filtrar por nome da coleção                             |
+| `limit`      | number | 100     | Máximo de entradas                                      |
+| `sort`       | string | —       | `latency` = ordenar por latência (mais lentas primeiro) |
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:** array de objetos:
+
+```json
+[
+  {
+    "timestamp": "2025-02-05T12:00:00Z",
+    "collection": "docs",
+    "limit": 10,
+    "filter": null,
+    "took_ms": 5,
+    "results_count": 10,
+    "query_id": "uuid"
+  }
+]
+```
+
+---
+
+### GET /api/v1/stats/slow-queries
+
+Queries com latência acima do threshold (lê de `queries.log`, cache 1h).
+
+**Query params:**
+
+| Param          | Tipo   | Default | Descrição            |
+| -------------- | ------ | ------- | -------------------- |
+| `threshold_ms` | number | 100     | Latência mínima (ms) |
+| `limit`        | number | 10      | Máximo de entradas   |
+
+**Resposta:** `200 OK` — mesmo schema de array que `GET /api/v1/stats/queries`.
+
+---
 
 ### GET /api/v1/collections/{name}/stats
 
