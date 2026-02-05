@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
-use ferres_db_core::{Collection, FileStorage};
+use ferres_db_core::{Collection, FileStorage, SearchResult};
 
 use crate::query_logger::QueryLogger;
 use crate::query_log_analytics::QueryLogCache;
@@ -407,6 +407,55 @@ impl AppState {
     /// Verifica se o servidor está em shutdown.
     pub fn is_shutting_down(&self) -> bool {
         self.is_shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Busca em todas as coleções em paralelo.
+    ///
+    /// Retorna pares (nome_da_coleção, resultados). Coleções com dimensão
+    /// incompatível com o vetor de consulta são ignoradas (não entram no resultado).
+    pub async fn search_all_collections(
+        &self,
+        query: Vec<f32>,
+        limit: usize,
+    ) -> Vec<(String, Vec<SearchResult>)> {
+        let entries: Vec<(String, Arc<RwLock<Collection>>)> = self
+            .collections
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+
+        let handles: Vec<_> = entries
+            .into_iter()
+            .map(|(name, collection_arc)| {
+                let query = query.clone();
+                tokio::task::spawn_blocking(move || {
+                    let coll = collection_arc.read().ok()?;
+                    coll.validate_dimension(&query).ok()?;
+                    let raw = coll.search(&query, limit).ok()?;
+                    let results: Vec<SearchResult> = raw
+                        .into_iter()
+                        .filter_map(|(id, score)| {
+                            let point = coll.get(&id)?;
+                            Some(SearchResult {
+                                id,
+                                score,
+                                metadata: point.metadata.clone(),
+                                vector: None,
+                            })
+                        })
+                        .collect();
+                    Some((name, results))
+                })
+            })
+            .collect();
+
+        let mut out = Vec::new();
+        for h in handles {
+            if let Ok(Some(pair)) = h.await {
+                out.push(pair);
+            }
+        }
+        out
     }
 
     /// Salva todas as coleções dirty no disco.

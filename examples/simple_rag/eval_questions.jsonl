@@ -1,0 +1,29 @@
+{"question": "O que é FerresDB e para que serve?", "expected_docs": ["058fe27392fd9b09", "f56a66f3c65a089e"], "keywords": ["vetor", "embedding", "busca", "semântica"]}
+{"question": "Como fazer ingestão de documentos no FerresDB?", "expected_docs": ["0852dd01b0dcf1b5", "058fe27392fd9b09"], "keywords": ["ingestão", "chunks", "embedding", "markdown", "PDF"]}
+{"question": "Quais formatos de arquivo são suportados na ingestão?", "expected_docs": ["0852dd01b0dcf1b5"], "keywords": ["Markdown", "PDF", "HTML"]}
+{"question": "O que são embeddings e como funcionam?", "expected_docs": ["7885fa212c40e3ee", "5efbd3d7afc6145a"], "keywords": ["vetor", "numérico", "semântica", "similar"]}
+{"question": "Como funciona a busca semântica?", "expected_docs": ["5efbd3d7afc6145a", "7885fa212c40e3ee"], "keywords": ["significado", "query", "vetor", "top-k"]}
+{"question": "O que é RAG e como o exemplo usa FerresDB?", "expected_docs": ["f56a66f3c65a089e", "058fe27392fd9b09"], "keywords": ["Retrieval", "Augmented", "contexto", "LLM"]}
+{"question": "Quais LLMs podem ser usados no exemplo RAG?", "expected_docs": ["058fe27392fd9b09", "33247987e538c841"], "keywords": ["OpenAI", "Anthropic", "streaming"]}
+{"question": "Como criar e gerenciar coleções?", "expected_docs": ["1be61d4bb25dfe26"], "keywords": ["coleção", "dimensão", "distância", "API"]}
+{"question": "Onde os dados são persistidos e como garantir durabilidade?", "expected_docs": ["75d8b49ca62b345b"], "keywords": ["storage", "disco", "WAL", "save"]}
+{"question": "Qual biblioteca é usada para o índice de busca vetorial e por quê?", "expected_docs": ["2db37e0a8b9e8b53"], "keywords": ["HNSW", "hnsw_rs", "ANN"]}
+{"question": "Por que o projeto usa JSONL para persistência?", "expected_docs": ["2db37e0a8b9e8b53"], "keywords": ["JSON-lines", "append", "incremental"]}
+{"question": "Descreva a arquitetura em camadas do FerresDB Core.", "expected_docs": ["3635a83470869ac0"], "keywords": ["API", "coleções", "HNSW", "Storage"]}
+{"question": "Como usar o SDK Rust para busca híbrida?", "expected_docs": ["5332b15802744e6c"], "keywords": ["SDK", "Rust", "hybrid", "API"]}
+{"question": "Como configurar o exemplo RAG com OpenAI e Anthropic?", "expected_docs": ["058fe27392fd9b09"], "keywords": [".env", "OPENAI_API_KEY", "ANTHROPIC", "embedding"]}
+{"question": "O que são chunks e como são gerados na ingestão?", "expected_docs": ["0852dd01b0dcf1b5", "058fe27392fd9b09"], "keywords": ["chunk", "segmentação", "embedding"]}
+{"question": "Quais endpoints da API REST existem para coleções?", "expected_docs": ["5332b15802744e6c"], "keywords": ["API", "REST", "collections", "endpoint"]}
+{"question": "Como a integração com LLM funciona no pipeline RAG?", "expected_docs": ["33247987e538c841", "f56a66f3c65a089e"], "keywords": ["LLM", "contexto", "prompt", "resposta"]}
+{"question": "Qual métrica de distância é usada nas coleções?", "expected_docs": ["1be61d4bb25dfe26", "3635a83470869ac0"], "keywords": ["Cosine", "distância", "vetor"]}
+{"question": "O que é busca híbrida e quando usar?", "expected_docs": ["5332b15802744e6c", "3635a83470869ac0"], "keywords": ["híbrida", "vetorial", "BM25"]}
+{"question": "Quais decisões arquiteturais foram tomadas (ADRs)?", "expected_docs": ["2db37e0a8b9e8b53"], "keywords": ["ADR", "decisão", "HNSW", "JSONL"]}
+{"question": "Como subir o FerresDB e conectar o exemplo RAG?", "expected_docs": ["058fe27392fd9b09"], "keywords": ["servidor", "localhost", "collection", "ingest"]}
+{"question": "O que é um ponto (point) no FerresDB?", "expected_docs": ["1be61d4bb25dfe26", "3635a83470869ac0"], "keywords": ["point", "id", "vector", "metadata"]}
+{"question": "Como os dados sobrevivem a reinício do servidor?", "expected_docs": ["75d8b49ca62b345b"], "keywords": ["persistência", "disco", "save", "WAL"]}
+{"question": "Quais alternativas foram consideradas ao HNSW?", "expected_docs": ["2db37e0a8b9e8b53"], "keywords": ["implementar", "usearch", "faiss", "hnsw_rs"]}
+{"question": "Como fazer deploy do servidor FerresDB?", "expected_docs": ["058fe27392fd9b09", "5332b15802744e6c"], "keywords": ["deploy", "servidor", "API", "HTTP"]}
+{"question": "O que é o pipeline de ingestão passo a passo?", "expected_docs": ["058fe27392fd9b09", "0852dd01b0dcf1b5"], "keywords": ["pré-requisitos", "dependências", "ingest", "chunks"]}
+{"question": "Como usar Python ou TypeScript para falar com a API?", "expected_docs": ["5332b15802744e6c"], "keywords": ["Python", "TypeScript", "HTTP", "API"]}
+{"question": "O que é BM25 e onde é usado no FerresDB?", "expected_docs": ["3635a83470869ac0", "5332b15802744e6c"], "keywords": ["BM25", "busca", "texto", "híbrida"]}
+{"question": "Como o reranker funciona no exemplo RAG?", "expected_docs": ["058fe27392fd9b09"], "keywords": ["rerank", "cross-encoder", "Cohere", "top-k"]}

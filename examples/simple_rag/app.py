@@ -212,7 +212,7 @@ def rag_query(
         if stream:
             print("Resposta: ", end="", flush=True)
     if llm == "openai":
-        model = llm_model or "gpt-4o-mini"
+        model = llm_model or "gpt-3.5-turbo"
         answer = llm_openai(prompt, stream=stream, model=model)
     elif llm == "anthropic":
         from anthropic import Anthropic

@@ -225,13 +225,6 @@ pub async fn upsert_points(
                 }
             }
         }
-    }
-
-    // Marca como dirty após modificação
-    {
-        let collection = collection_arc.read().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-        })?;
         collection.mark_dirty();
     }
 
@@ -256,35 +249,12 @@ pub async fn delete_points(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    // Conta pontos antes da deleção
-    let _count_before = {
-        let collection = collection_arc.read().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-        })?;
-        collection.len()
-    };
-
-    // Remove os pontos
-    let mut deleted = 0;
-    {
+    let deleted = {
         let mut collection = collection_arc.write().map_err(|e| {
             ApiError::internal_error(format!("failed to acquire write lock: {}", e))
         })?;
-
-        for id in &payload.ids {
-            if collection.remove(id).is_ok() {
-                deleted += 1;
-            }
-        }
-    }
-
-    // Marca como dirty após modificação
-    {
-        let collection = collection_arc.read().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-        })?;
-        collection.mark_dirty();
-    }
+        collection.delete_points_batch(&payload.ids).map_err(ApiError::from)?
+    };
 
     Ok(Json(DeletePointsResponse { deleted }))
 }
@@ -359,7 +329,7 @@ pub async fn search_points(
         .collect();
 
     let results_count = results.len();
-    let took_ms = start.elapsed().as_millis() as u64;
+    let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let collection_name = name.clone();
     let vector_preview = payload.vector.clone();
     let filter_clone = payload.filter.clone();
@@ -462,7 +432,7 @@ pub async fn search_hybrid(
         })
         .collect();
 
-    let took_ms = start.elapsed().as_millis() as u64;
+    let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let collection_name = name.clone();
 
     drop(collection);

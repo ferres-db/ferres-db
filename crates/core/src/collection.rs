@@ -189,7 +189,7 @@ impl Collection {
     /// server ao carregar coleções persistidas.
     pub fn from_points(config: CollectionConfig, points: Vec<Point>) -> Result<Self, FerresError> {
         let mut collection = Self::new(config);
-        collection.index.build(&points);
+        collection.index.build(&points)?;
         for point in &points {
             collection.points.insert(point.id.clone(), point.clone());
         }
@@ -215,6 +215,16 @@ impl Collection {
             });
         }
         Ok(())
+    }
+
+    /// Invalida o cache de busca após mutação (insert/remove).
+    /// Evita resultados desatualizados e crescimento indefinido do cache em workloads write-heavy.
+    fn invalidate_search_cache(&self) {
+        if let Some(cache) = &self.search_cache {
+            if let Ok(mut guard) = cache.lock() {
+                guard.clear();
+            }
+        }
     }
 
     /// Insere um ponto na coleção e no índice ANN.
@@ -243,12 +253,13 @@ impl Collection {
     /// ```
     pub fn insert(&mut self, point: Point) -> Result<(), FerresError> {
         self.validate_dimension(&point.vector)?;
-        self.index.add_point(&point);
+        self.index.add_point(&point)?;
         if let Some(ref mut bm25) = self.bm25_index {
             let text = metadata_text(&point.metadata, &self.config.bm25_text_field);
             bm25.index_document(&point.id, &text);
         }
         self.points.insert(point.id.clone(), point);
+        self.invalidate_search_cache();
         self.dirty.store(true, Ordering::Release);
         Ok(())
     }
@@ -306,7 +317,7 @@ impl Collection {
         }
 
         // Executa busca
-        let results = self.index.search(query, k);
+        let results = self.index.search(query, k)?;
 
         // Armazena no cache se habilitado
         if let Some(cache) = &self.search_cache {
@@ -378,8 +389,35 @@ impl Collection {
         if let Some(ref mut bm25) = self.bm25_index {
             bm25.remove_document(id);
         }
+        self.invalidate_search_cache();
         self.dirty.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Remove múltiplos pontos por ID em batch.
+    ///
+    /// IDs são ordenados para melhor cache locality. Retorna o número de
+    /// pontos efetivamente removidos (IDs inexistentes são ignorados).
+    pub fn delete_points_batch(&mut self, ids: &[String]) -> Result<usize, FerresError> {
+        let mut sorted_ids = ids.to_vec();
+        sorted_ids.sort_unstable();
+
+        let mut deleted = 0;
+        for id in &sorted_ids {
+            if self.points.remove(id).is_some() {
+                self.index.remove_point(id);
+                if let Some(ref mut bm25) = self.bm25_index {
+                    bm25.remove_document(id);
+                }
+                deleted += 1;
+            }
+        }
+
+        if deleted > 0 {
+            self.invalidate_search_cache();
+            self.dirty.store(true, Ordering::Release);
+        }
+        Ok(deleted)
     }
 
     /// Recupera um ponto pelo ID.

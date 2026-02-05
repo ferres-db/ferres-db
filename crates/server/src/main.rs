@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_notify_for_task = shutdown_notify.clone();
     let is_shutting_down = app_state.is_shutting_down.clone();
 
-    tokio::spawn(async move {
+    let save_task_handle = tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(30));
         loop {
             tokio::select! {
@@ -137,13 +137,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Marca como em shutdown
+    // Marca shutdown ANTES de notificar (task deixa de iniciar novos saves)
     app_state.set_shutting_down();
-    
-    // Notifica a background task para parar
-    shutdown_notify.notify_one();
 
-    // Salva todas as coleções antes de sair
+    // Notifica a task e aguarda ela terminar para evitar salvar em paralelo
+    shutdown_notify.notify_one();
+    const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_secs(10);
+    match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, save_task_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!(error = %e, "auto-save task panicked"),
+        Err(_) => warn!(
+            "auto-save task did not exit within {:?}, proceeding with shutdown save",
+            SHUTDOWN_TASK_TIMEOUT
+        ),
+    }
+
+    // Agora é seguro salvar (task já encerrou)
     if let Err(e) = app_state.save_all_collections() {
         error!(error = %e, "failed to save collections during shutdown");
     }

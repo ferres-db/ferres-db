@@ -76,6 +76,10 @@ pub struct Wal {
     snapshot_threshold: usize,
 }
 
+/// Limite de operações no WAL antes de forçar backpressure (snapshot obrigatório).
+/// Heurística: ~100MB de WAL para evitar crescimento indefinido e OOM.
+const MAX_WAL_OPS_BEFORE_BACKPRESSURE: usize = 10_000;
+
 impl Wal {
     /// Threshold padrão: snapshot a cada 1000 operações.
     pub const DEFAULT_SNAPSHOT_THRESHOLD: usize = 1000;
@@ -123,7 +127,13 @@ impl Wal {
     /// Registra uma operação de upsert no WAL.
     ///
     /// Deve ser chamado ANTES da mutação em memória.
+    /// Retorna erro se o WAL já tiver muitas operações (backpressure: snapshot obrigatório).
     pub fn append_upsert(&mut self, point: &Point) -> Result<(), FerresError> {
+        if self.ops_since_snapshot >= MAX_WAL_OPS_BEFORE_BACKPRESSURE {
+            return Err(FerresError::Storage(
+                "WAL too large, snapshot required".to_string(),
+            ));
+        }
         let entry = WalEntry {
             timestamp: current_timestamp(),
             operation: WalOperation::Upsert {
@@ -138,7 +148,13 @@ impl Wal {
     /// Registra uma operação de delete no WAL.
     ///
     /// Deve ser chamado ANTES da mutação em memória.
+    /// Retorna erro se o WAL já tiver muitas operações (backpressure: snapshot obrigatório).
     pub fn append_delete(&mut self, id: &str) -> Result<(), FerresError> {
+        if self.ops_since_snapshot >= MAX_WAL_OPS_BEFORE_BACKPRESSURE {
+            return Err(FerresError::Storage(
+                "WAL too large, snapshot required".to_string(),
+            ));
+        }
         let entry = WalEntry {
             timestamp: current_timestamp(),
             operation: WalOperation::Delete { id: id.to_string() },

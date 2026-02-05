@@ -59,7 +59,7 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
 
     // Adiciona request_id como header na resposta (opcional, para debugging)
     let response = next.run(req).await;
-    let latency_ms = start.elapsed().as_millis() as u64;
+    let latency_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let status = response.status();
     let status_str = status.as_u16().to_string();
 
@@ -179,11 +179,11 @@ impl KeyExtractor for CollectionKeyExtractor {
 }
 
 /// Cria o layer de rate limiting por coleção.
-/// Limite: 100 requisições por segundo por coleção.
+/// Baseline: 100 req/s por coleção; burst até 200 req/s.
 pub fn create_collection_rate_limit_layer() -> GovernorLayer<CollectionKeyExtractor, NoOpMiddleware> {
     let mut builder = GovernorConfigBuilder::default();
-    builder.per_second(1);
-    builder.burst_size(100);
+    builder.per_second(100);
+    builder.burst_size(200);
     let config = builder.key_extractor(CollectionKeyExtractor).finish().unwrap();
 
     GovernorLayer { config: Arc::new(config) }

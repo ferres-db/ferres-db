@@ -404,7 +404,7 @@ impl VectorDB {
                     use crate::search::normalize_vectors_parallel;
 
                     let vectors: Vec<Vec<f32>> = points.iter().map(|p| p.vector.clone()).collect();
-                    let normalized_vectors = normalize_vectors_parallel(&vectors);
+                    let normalized_vectors = normalize_vectors_parallel(&vectors)?;
 
                     points
                         .into_iter()

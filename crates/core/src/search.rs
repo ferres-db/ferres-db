@@ -30,6 +30,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::error::FerresError;
 use crate::point::Point;
 
 // ─── DistanceMetric ─────────────────────────────────────────────────
@@ -65,17 +66,18 @@ pub enum DistanceMetric {
 /// }
 ///
 /// impl ANNIndex for BruteForceIndex {
-///     fn build(&mut self, points: &[Point]) {
+///     fn build(&mut self, points: &[Point]) -> Result<(), ferres_db_core::FerresError> {
 ///         self.points = points.to_vec();
+///         Ok(())
 ///     }
 ///
-///     fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
-///         // Implementação brute-force...
-///         vec![]
+///     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, ferres_db_core::FerresError> {
+///         Ok(vec![])
 ///     }
 ///
-///     fn add_point(&mut self, point: &Point) {
+///     fn add_point(&mut self, point: &Point) -> Result<(), ferres_db_core::FerresError> {
 ///         self.points.push(point.clone());
+///         Ok(())
 ///     }
 ///
 ///     fn remove_point(&mut self, id: &str) {
@@ -88,16 +90,16 @@ pub trait ANNIndex: Send + Sync {
     ///
     /// Descarta o índice anterior e cria um novo. Útil para compactação
     /// (eliminar tombstones) e para o carregamento inicial do disco.
-    fn build(&mut self, points: &[Point]);
+    fn build(&mut self, points: &[Point]) -> Result<(), FerresError>;
 
     /// Busca os `k` vizinhos mais próximos do vetor de consulta.
     ///
     /// Retorna pares `(point_id, distância)` ordenados por distância
     /// crescente.
-    fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)>;
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, FerresError>;
 
     /// Adiciona um único ponto ao índice.
-    fn add_point(&mut self, point: &Point);
+    fn add_point(&mut self, point: &Point) -> Result<(), FerresError>;
 
     /// Remove um ponto do índice pelo ID.
     ///
@@ -143,43 +145,67 @@ impl Default for HnswConfig {
 ///
 /// Para métrica **Cosine**, normalizar antes de inserir transforma a busca
 /// por cosseno em busca L2, melhorando estabilidade numérica.
-/// Vetores com norma zero são retornados inalterados.
+/// Rejeita vetores com valores não finitos (NaN/Infinity) ou norma zero.
 ///
 /// A norma é calculada em `f64` para evitar acúmulo de erro em vetores
 /// de alta dimensão (384+), onde a soma de quadrados em `f32` pode
 /// resultar em norma ligeiramente > 1.0 após divisão.
-fn normalize_vector(v: &[f32]) -> Vec<f32> {
+fn normalize_vector(v: &[f32]) -> Result<Vec<f32>, FerresError> {
+    if let Some(pos) = v.iter().position(|x| !x.is_finite()) {
+        return Err(FerresError::InvalidVector {
+            reason: format!("non-finite value at index {}", pos),
+        });
+    }
+
     let norm = v
         .iter()
         .map(|x| (*x as f64) * (*x as f64))
         .sum::<f64>()
         .sqrt();
+
     if norm < f64::EPSILON {
-        return v.to_vec();
+        return Err(FerresError::InvalidVector {
+            reason: "zero-norm vector".to_string(),
+        });
     }
-    v.iter().map(|x| (*x as f64 / norm) as f32).collect()
+
+    Ok(v.iter().map(|x| (*x as f64 / norm) as f32).collect())
 }
 
 /// Normaliza múltiplos vetores em paralelo usando rayon.
 ///
 /// Útil para batch insert quando a métrica é Cosine.
 /// Pública para uso em otimizações de batch insert.
-pub(crate) fn normalize_vectors_parallel(vectors: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    vectors
+pub(crate) fn normalize_vectors_parallel(vectors: &[Vec<f32>]) -> Result<Vec<Vec<f32>>, FerresError> {
+    let results: Vec<Result<Vec<f32>, FerresError>> = vectors
         .par_iter()
         .map(|v| normalize_vector(v))
-        .collect()
+        .collect();
+    results.into_iter().collect()
+}
+
+/// Valida que todos os componentes do vetor são finitos (não NaN nem infinito).
+fn validate_vector_finite(v: &[f32]) -> Result<(), FerresError> {
+    if let Some(pos) = v.iter().position(|x| !x.is_finite()) {
+        return Err(FerresError::InvalidVector {
+            reason: format!("non-finite value at index {}", pos),
+        });
+    }
+    Ok(())
 }
 
 /// Prepara o vetor de acordo com a métrica antes da inserção/busca.
 ///
 /// - `Cosine` → normaliza para que distância cosseno = distância L2
-/// - `DotProduct` → usa o vetor diretamente
-/// - `Euclidean` → usa o vetor diretamente (L2 nativo)
-fn prepare_vector(v: &[f32], metric: DistanceMetric) -> Vec<f32> {
+/// - `DotProduct` → usa o vetor diretamente (valida finitude)
+/// - `Euclidean` → usa o vetor diretamente (L2 nativo, valida finitude)
+fn prepare_vector(v: &[f32], metric: DistanceMetric) -> Result<Vec<f32>, FerresError> {
     match metric {
         DistanceMetric::Cosine => normalize_vector(v),
-        DistanceMetric::DotProduct | DistanceMetric::Euclidean => v.to_vec(),
+        DistanceMetric::DotProduct | DistanceMetric::Euclidean => {
+            validate_vector_finite(v)?;
+            Ok(v.to_vec())
+        }
     }
 }
 
@@ -306,7 +332,7 @@ impl Drop for HnswIndex {
 }
 
 impl ANNIndex for HnswIndex {
-    fn build(&mut self, points: &[Point]) {
+    fn build(&mut self, points: &[Point]) -> Result<(), FerresError> {
         // Recria o grafo do zero — limpa tombstones e mapeamentos.
         self.inner = Self::create_variant(self.distance, &self.config);
         self.id_map.clear();
@@ -317,8 +343,8 @@ impl ANNIndex for HnswIndex {
         if self.distance == DistanceMetric::Cosine && points.len() > 100 {
             // Pré-normaliza todos os vetores em paralelo
             let vectors: Vec<Vec<f32>> = points.par_iter().map(|p| p.vector.clone()).collect();
-            let normalized = normalize_vectors_parallel(&vectors);
-            
+            let normalized = normalize_vectors_parallel(&vectors)?;
+
             // Insere pontos com vetores já normalizados
             for (point, normalized_vec) in points.iter().zip(normalized.iter()) {
                 let data_id = self.id_map.len();
@@ -334,16 +360,17 @@ impl ANNIndex for HnswIndex {
         } else {
             // Para pequenos batches ou outras métricas, usa inserção sequencial
             for point in points {
-                self.add_point(point);
+                self.add_point(point)?;
             }
         }
 
         debug!(count = points.len(), "HNSW index rebuilt");
+        Ok(())
     }
 
-    fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, FerresError> {
         // Normaliza o query se a métrica for Cosine.
-        let prepared = prepare_vector(query, self.distance);
+        let prepared = prepare_vector(query, self.distance)?;
 
         // Limita k ao número máximo de pontos disponíveis para evitar overflow
         // e alocações excessivas. Não podemos retornar mais resultados do que
@@ -353,7 +380,7 @@ impl ANNIndex for HnswIndex {
 
         // Se não há pontos, retorna vazio imediatamente
         if k == 0 || max_points == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Pedimos mais resultados para compensar tombstones filtrados.
@@ -367,7 +394,7 @@ impl ANNIndex for HnswIndex {
             IndexVariant::Euclidean(hnsw) => hnsw.search(&prepared, extra, ef),
         };
 
-        neighbours
+        Ok(neighbours
             .into_iter()
             .filter_map(|n| {
                 let id = self.id_map.get(n.d_id)?;
@@ -377,22 +404,23 @@ impl ANNIndex for HnswIndex {
                 Some((id.clone(), n.distance))
             })
             .take(k)
-            .collect()
+            .collect())
     }
 
-    fn add_point(&mut self, point: &Point) {
+    fn add_point(&mut self, point: &Point) -> Result<(), FerresError> {
         let data_id = self.id_map.len();
         self.id_map.push(point.id.clone());
         self.reverse_map.insert(point.id.clone(), data_id);
 
         // Normaliza o vetor se a métrica for Cosine.
-        let prepared = prepare_vector(&point.vector, self.distance);
+        let prepared = prepare_vector(&point.vector, self.distance)?;
 
         match &mut self.inner {
             IndexVariant::Cosine(hnsw) => hnsw.insert_data(&prepared, data_id),
             IndexVariant::DotProduct(hnsw) => hnsw.insert_data(&prepared, data_id),
             IndexVariant::Euclidean(hnsw) => hnsw.insert_data(&prepared, data_id),
         }
+        Ok(())
     }
 
     fn remove_point(&mut self, id: &str) {
@@ -409,6 +437,7 @@ impl ANNIndex for HnswIndex {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::FerresError;
     use super::*;
 
     /// Helper para criar pontos de teste sem validação (bypass do `new`).
@@ -425,11 +454,11 @@ mod tests {
     fn insert_and_search_returns_nearest() {
         let mut index = HnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default());
 
-        index.add_point(&make_point("a", vec![1.0, 0.0, 0.0]));
-        index.add_point(&make_point("b", vec![0.0, 1.0, 0.0]));
-        index.add_point(&make_point("c", vec![0.9, 0.1, 0.0]));
+        index.add_point(&make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        index.add_point(&make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
+        index.add_point(&make_point("c", vec![0.9, 0.1, 0.0])).unwrap();
 
-        let results = index.search(&[1.0, 0.0, 0.0], 2);
+        let results = index.search(&[1.0, 0.0, 0.0], 2).unwrap();
         assert_eq!(results.len(), 2);
         // O mais próximo de [1,0,0] deve ser "a" (distância 0)
         assert_eq!(results[0].0, "a");
@@ -439,9 +468,9 @@ mod tests {
     #[test]
     fn cosine_distance_works() {
         let mut index = HnswIndex::new(DistanceMetric::Cosine, HnswConfig::default());
-        index.add_point(&make_point("x", vec![1.0, 0.0]));
+        index.add_point(&make_point("x", vec![1.0, 0.0])).unwrap();
 
-        let results = index.search(&[1.0, 0.0], 1);
+        let results = index.search(&[1.0, 0.0], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "x");
     }
@@ -449,9 +478,9 @@ mod tests {
     #[test]
     fn dot_product_distance_works() {
         let mut index = HnswIndex::new(DistanceMetric::DotProduct, HnswConfig::default());
-        index.add_point(&make_point("d", vec![1.0, 0.0]));
+        index.add_point(&make_point("d", vec![1.0, 0.0])).unwrap();
 
-        let results = index.search(&[1.0, 0.0], 1);
+        let results = index.search(&[1.0, 0.0], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "d");
     }
@@ -460,12 +489,12 @@ mod tests {
     fn remove_point_excludes_from_search() {
         let mut index = HnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default());
 
-        index.add_point(&make_point("keep", vec![1.0, 0.0, 0.0]));
-        index.add_point(&make_point("remove", vec![0.9, 0.1, 0.0]));
+        index.add_point(&make_point("keep", vec![1.0, 0.0, 0.0])).unwrap();
+        index.add_point(&make_point("remove", vec![0.9, 0.1, 0.0])).unwrap();
 
         index.remove_point("remove");
 
-        let results = index.search(&[1.0, 0.0, 0.0], 2);
+        let results = index.search(&[1.0, 0.0, 0.0], 2).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "keep");
     }
@@ -476,15 +505,15 @@ mod tests {
 
         let p1 = make_point("a", vec![1.0, 0.0]);
         let p2 = make_point("b", vec![0.0, 1.0]);
-        index.add_point(&p1);
-        index.add_point(&p2);
+        index.add_point(&p1).unwrap();
+        index.add_point(&p2).unwrap();
         index.remove_point("b");
 
         // Rebuild só com p1
-        index.build(&[p1]);
+        index.build(&[p1]).unwrap();
 
         assert_eq!(index.len(), 1);
-        let results = index.search(&[1.0, 0.0], 5);
+        let results = index.search(&[1.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "a");
     }
@@ -492,7 +521,7 @@ mod tests {
     #[test]
     fn normalize_vector_unit_norm() {
         let v = vec![3.0, 4.0];
-        let n = normalize_vector(&v);
+        let n = normalize_vector(&v).unwrap();
         let norm: f32 = n.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-6);
         assert!((n[0] - 0.6).abs() < 1e-6);
@@ -500,10 +529,19 @@ mod tests {
     }
 
     #[test]
-    fn normalize_zero_vector_returns_zero() {
+    fn normalize_zero_vector_returns_error() {
         let v = vec![0.0, 0.0, 0.0];
-        let n = normalize_vector(&v);
-        assert_eq!(n, v);
+        let err = normalize_vector(&v).unwrap_err();
+        assert!(matches!(err, FerresError::InvalidVector { .. }));
+        assert!(err.to_string().contains("zero-norm"));
+    }
+
+    #[test]
+    fn normalize_nan_vector_returns_error() {
+        let v = vec![1.0, f32::NAN, 0.0];
+        let err = normalize_vector(&v).unwrap_err();
+        assert!(matches!(err, FerresError::InvalidVector { .. }));
+        assert!(err.to_string().contains("non-finite"));
     }
 
     /// Testa recall@10 com 1000 vetores aleatórios de 384 dimensões.
@@ -546,12 +584,12 @@ mod tests {
             };
 
             let mut index = HnswIndex::new(metric, config);
-            index.build(&points);
+            index.build(&points).unwrap();
 
             // Para cada vetor, busca top-10 e verifica se ele mesmo aparece.
             let mut hits = 0usize;
             for point in &points {
-                let results = index.search(&point.vector, K);
+                let results = index.search(&point.vector, K).unwrap();
                 let ids: Vec<&str> = results.iter().map(|r| r.0.as_str()).collect();
                 if ids.contains(&point.id.as_str()) {
                     hits += 1;

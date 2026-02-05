@@ -42,3 +42,5 @@ __pycache__
 .pytest_cache
 
 .env
+
+eval_report.json
