@@ -132,93 +132,74 @@ pub async fn upsert_points(
         ApiError::invalid_payload(messages.join(", "))
     })?;
 
-    // Obtém a dimensão esperada da coleção
-    let expected_dimension = {
-        let collection_arc = app_state.collections.get(&name)
-            .ok_or_else(|| ApiError::collection_not_found(&name))?;
-        
-        let collection = collection_arc.read().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-        })?;
-        
-        collection.config().dimension
-    };
-
-    // Valida dimensão de cada vetor e cria os pontos
-    let mut points = Vec::new();
-    let mut failed = Vec::new();
-
-    for input in payload.points {
-        // Valida dimensão do vetor
-        if input.vector.len() != expected_dimension {
-            failed.push(FailedPoint {
-                id: input.id.clone(),
-                reason: format!(
-                    "dimension mismatch: expected {}, got {}",
-                    expected_dimension,
-                    input.vector.len()
-                ),
-            });
-            continue;
-        }
-
-        // Valida que o vetor não está vazio
-        if input.vector.is_empty() {
-            failed.push(FailedPoint {
-                id: input.id.clone(),
-                reason: "vector cannot be empty".to_string(),
-            });
-            continue;
-        }
-
-        // Valida que não há valores NaN ou infinito
-        if let Some(pos) = input.vector.iter().position(|v| !v.is_finite()) {
-            failed.push(FailedPoint {
-                id: input.id.clone(),
-                reason: format!("non-finite value at index {}", pos),
-            });
-            continue;
-        }
-
-        // Cria o ponto
-        match Point::new(input.id.clone(), input.vector, input.metadata) {
-            Ok(point) => points.push(point),
-            Err(e) => {
-                failed.push(FailedPoint {
-                    id: input.id,
-                    reason: e.to_string(),
-                });
-            }
-        }
-    }
-
-    // Se não há pontos válidos, retorna apenas os falhos
-    if points.is_empty() {
-        return Ok(Json(UpsertPointsResponse {
-            upserted: 0,
-            failed,
-        }));
-    }
-
-    // Obtém a coleção
+    // Obtém a coleção uma vez e mantém um único write lock para validação + inserção + mark_dirty
+    // (evita race: outra thread não pode alterar a coleção entre validação e inserção)
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    // Insere os pontos válidos
-    let mut upserted = 0;
-    let mut batch_failed = failed;
-
-    {
+    let (upserted, batch_failed) = {
         let mut collection = collection_arc.write().map_err(|e| {
             ApiError::internal_error(format!("failed to acquire write lock: {}", e))
         })?;
 
+        // Fase 1: validação e construção dos pontos (dentro do mesmo lock)
+        let mut points = Vec::new();
+        let mut failed = Vec::new();
+
+        for input in payload.points {
+            // Valida dimensão do vetor (usa a coleção atual, não dados obsoletos)
+            if let Err(e) = collection.validate_dimension(&input.vector) {
+                failed.push(FailedPoint {
+                    id: input.id.clone(),
+                    reason: e.to_string(),
+                });
+                continue;
+            }
+
+            // Valida que o vetor não está vazio
+            if input.vector.is_empty() {
+                failed.push(FailedPoint {
+                    id: input.id.clone(),
+                    reason: "vector cannot be empty".to_string(),
+                });
+                continue;
+            }
+
+            // Valida que não há valores NaN ou infinito
+            if let Some(pos) = input.vector.iter().position(|v| !v.is_finite()) {
+                failed.push(FailedPoint {
+                    id: input.id.clone(),
+                    reason: format!("non-finite value at index {}", pos),
+                });
+                continue;
+            }
+
+            match Point::new(input.id.clone(), input.vector, input.metadata) {
+                Ok(point) => points.push(point),
+                Err(e) => {
+                    failed.push(FailedPoint {
+                        id: input.id,
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        if points.is_empty() {
+            return Ok(Json(UpsertPointsResponse {
+                upserted: 0,
+                failed,
+            }));
+        }
+
+        // Fase 2: inserção e mark_dirty (mesmo lock)
+        let mut upserted = 0;
         for point in points {
             let point_id = point.id.clone();
             match collection.insert(point) {
                 Ok(_) => upserted += 1,
                 Err(err) => {
-                    batch_failed.push(FailedPoint {
+                    failed.push(FailedPoint {
                         id: point_id,
                         reason: err.to_string(),
                     });
@@ -226,7 +207,8 @@ pub async fn upsert_points(
             }
         }
         collection.mark_dirty();
-    }
+        (upserted, failed)
+    };
 
     Ok(Json(UpsertPointsResponse {
         upserted,
