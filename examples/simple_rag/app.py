@@ -191,6 +191,7 @@ def rag_query(
     retrieve_top_k: int = 20,
     rerank_top_k: int = 5,
     hybrid_alpha: float = 0.5,
+    quiet: bool = False,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Pipeline RAG: embed -> search (e opcionalmente rerank) -> prompt -> LLM. Retorna (resposta, resultados da busca)."""
     q_vector = embedding_provider.embed_batch([question])[0]
@@ -204,9 +205,10 @@ def rag_query(
         results = search_collection(server_base, collection, q_vector, limit=top_k, session=session)
     prompt = build_rag_prompt(question, results)
 
-    print("[gerando resposta...]")
-    if stream:
-        print("Resposta: ", end="", flush=True)
+    if not quiet:
+        print("[gerando resposta...]")
+        if stream:
+            print("Resposta: ", end="", flush=True)
     if llm == "openai":
         model = llm_model or "gpt-4o-mini"
         answer = llm_openai(prompt, stream=stream, model=model)
@@ -358,6 +360,73 @@ def interactive_loop(args: argparse.Namespace) -> None:
     print("Até mais.")
 
 
+def batch_loop(args: argparse.Namespace) -> None:
+    """Run RAG for each question in --questions-file; print one JSONL line per result (question, answer, latency_ms)."""
+    questions_path = Path(args.questions_file)
+    if not questions_path.exists():
+        print(f"Erro: arquivo não encontrado: {questions_path}", file=sys.stderr)
+        sys.exit(1)
+    questions = [
+        line.strip() for line in questions_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not questions:
+        print("Erro: nenhuma pergunta no arquivo", file=sys.stderr)
+        sys.exit(1)
+
+    session = requests.Session()
+    session.headers.setdefault("Content-Type", "application/json")
+    try:
+        provider = get_embedding_provider(args.embedding)
+    except (ValueError, ImportError) as e:
+        print(f"Erro: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    reranker_instance = None
+    if getattr(args, "rerank", False):
+        try:
+            reranker_instance = get_reranker(args.reranker)
+        except (ValueError, ImportError) as e:
+            print(f"Erro ao carregar reranker: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    for question in questions:
+        t0 = time.perf_counter()
+        try:
+            answer, sources = rag_query(
+                question,
+                server_base=args.server,
+                collection=args.collection,
+                embedding_provider=provider,
+                llm=args.llm,
+                llm_model=args.llm_model,
+                top_k=args.top_k,
+                stream=False,
+                session=session,
+                reranker=reranker_instance,
+                retrieve_top_k=getattr(args, "retrieve_top_k", 20),
+                rerank_top_k=getattr(args, "rerank_top_k", 5),
+                hybrid_alpha=getattr(args, "hybrid_alpha", 0.5),
+                quiet=True,
+            )
+        except Exception as e:
+            answer = ""
+            sources = []
+            print(f"Erro para pergunta: {e}", file=sys.stderr)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        out = {
+            "question": question,
+            "answer": answer,
+            "latency_ms": latency_ms,
+        }
+        if getattr(args, "show_sources_in_batch", False):
+            out["sources"] = [
+                {"id": r.get("id"), "score": r.get("score"), "source": (r.get("metadata") or {}).get("source")}
+                for r in sources
+            ]
+        print(json.dumps(out, ensure_ascii=False))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="RAG com FerresDB: ingestão + query interativa")
     subparsers = parser.add_subparsers(dest="command", help="comando")
@@ -388,6 +457,7 @@ def main() -> None:
     parser.add_argument("--show-chunks", action="store_true")
     parser.add_argument("--no-stream", action="store_true", dest="no_stream")
     parser.add_argument("--history", help="Arquivo de histórico JSONL")
+    parser.add_argument("--questions-file", help="Arquivo com uma pergunta por linha (modo batch: imprime JSONL com question, answer, latency_ms)")
 
     args = parser.parse_args()
 
@@ -395,10 +465,14 @@ def main() -> None:
         run_ingest(args)
         return
 
-    # Default: query interativa
+    # Default: query interativa ou batch
     if not getattr(args, "collection", None):
         parser.error("--collection é obrigatório para o modo query. Use: python app.py --collection docs --llm openai")
     args.stream = not getattr(args, "no_stream", True)
+
+    if getattr(args, "questions_file", None):
+        batch_loop(args)
+        return
     interactive_loop(args)
 
 

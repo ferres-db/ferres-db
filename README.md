@@ -2,18 +2,16 @@
 
 Motor de busca vetorial de alta performance escrito em Rust, projetado para aplicações de busca semântica, RAG (Retrieval-Augmented Generation) e sistemas de recomendação.
 
-## 🚀 Visão Geral
+## Visão geral
 
-O FerresDB Core é o motor de busca vetorial que fornece:
+O FerresDB Core é um motor de busca vetorial em Rust para busca semântica, RAG e recomendação. Inclui **servidor HTTP** com API REST para criar coleções, inserir pontos e buscar por similaridade (vetorial e híbrida com BM25).
 
-- **Busca por similaridade vetorial** usando algoritmo HNSW (Hierarchical Navigable Small World)
-- **Múltiplas métricas de distância**: Cosine, Euclidean (L2) e Dot Product
-- **Persistência em disco** com formato JSON-lines para recuperação e backup
-- **API de alto nível** (`VectorDB`) para gerenciar múltiplas coleções
-- **Otimizações de performance**: paralelização com Rayon, cache LRU opcional
-- **Validação robusta** de dados e tratamento de erros com tipos específicos
+- **Busca vetorial** com HNSW; métricas: Cosine, Euclidean, Dot Product
+- **Persistência** em disco (JSON-lines, WAL, crash recovery)
+- **API REST** para coleções, pontos, busca e stats; SDK Rust para busca híbrida
+- **Uso como biblioteca** (`VectorDB`) ou via servidor para pipelines RAG (ex.: [simple_rag](examples/simple_rag/README.md))
 
-### Características Principais
+### Características principais
 
 - ✅ **Alta performance**: Busca em milissegundos mesmo com milhões de vetores
 - ✅ **Thread-safe**: Pronto para uso em servidores multi-threaded
@@ -24,9 +22,44 @@ O FerresDB Core é o motor de busca vetorial que fornece:
 - ✅ **Extensível**: Trait `ANNIndex` permite trocar o backend de busca
 - ✅ **Type-safe**: Tipos de erro específicos facilitam tratamento e debugging
 
-## 📦 Quick Start
+## Quick start (3 passos)
 
-### Instalação
+**1. Subir o servidor**
+
+```bash
+cargo run --bin server
+# ou: make run   /  docker-compose up -d
+```
+
+Por padrão o servidor fica em `http://localhost:8080`.
+
+**2. Criar uma coleção**
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/collections \
+  -H "Content-Type: application/json" \
+  -d '{"name":"docs","dimension":384,"distance":"Cosine"}'
+```
+
+**3. Inserir pontos e buscar**
+
+```bash
+# Upsert
+curl -s -X POST http://localhost:8080/api/v1/collections/docs/points \
+  -H "Content-Type: application/json" \
+  -d '{"points":[{"id":"doc-1","vector":[0.1,0.2,-0.1],"metadata":{"text":"Hello world"}}]}'
+
+# Busca vetorial (ajuste o vetor para a dimensão da coleção, ex.: 384)
+curl -s -X POST http://localhost:8080/api/v1/collections/docs/search \
+  -H "Content-Type: application/json" \
+  -d '{"vector":[0.1,0.2,-0.1],"limit":5}'
+```
+
+Referência completa dos endpoints e schemas: [docs/api.md](docs/api.md).
+
+---
+
+## Uso como biblioteca (Rust)
 
 Adicione ao seu `Cargo.toml`:
 
@@ -35,111 +68,38 @@ Adicione ao seu `Cargo.toml`:
 ferres-db-core = { path = "crates/core" }
 ```
 
-### Exemplo Básico
+### Exemplo básico
 
 ```rust
 use ferres_db_core::{VectorDB, CollectionConfig, DistanceMetric, Point};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Cria uma instância do VectorDB
     let mut db = VectorDB::new("./data".into())?;
 
-    // Configura uma nova coleção
     let config = CollectionConfig {
         name: "embeddings".into(),
-        dimension: 384,  // Dimensão dos vetores (ex: all-MiniLM-L6-v2)
-        distance: DistanceMetric::Cosine,
-        hnsw: Default::default(),  // Usa configuração padrão do HNSW
-        search_cache_size: 100,    // Cache de 100 queries
-    };
-
-    // Cria a coleção
-    db.create_collection(config)?;
-
-    // Insere pontos
-    let points = vec![
-        Point::new(
-            "doc-1",
-            vec![0.1; 384],  // Vetor de exemplo
-            serde_json::json!({"text": "Primeiro documento"})
-        )?,
-        Point::new(
-            "doc-2",
-            vec![0.2; 384],
-            serde_json::json!({"text": "Segundo documento"})
-        )?,
-    ];
-    db.upsert_points("embeddings", points)?;
-
-    // Busca os 5 pontos mais similares
-    let query_vector = vec![0.15; 384];
-    let results = db.search("embeddings", query_vector, 5)?;
-
-    for result in results {
-        println!("ID: {}, Score: {:.4}, Metadata: {}",
-                 result.id, result.score, result.metadata);
-    }
-
-    Ok(())
-}
-```
-
-### Exemplo com Embeddings Reais
-
-```rust
-use ferres_db_core::{VectorDB, CollectionConfig, DistanceMetric, Point};
-
-// Assumindo que você tem uma função que gera embeddings
-fn generate_embedding(text: &str) -> Vec<f32> {
-    // Use sua biblioteca de embeddings (sentence-transformers, etc)
-    // Retorna um vetor de 384 dimensões
-    vec![0.0; 384]  // Placeholder
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = VectorDB::new("./data".into())?;
-
-    let config = CollectionConfig {
-        name: "documents".into(),
         dimension: 384,
         distance: DistanceMetric::Cosine,
         hnsw: Default::default(),
-        search_cache_size: 0,
+        search_cache_size: 100,
     };
     db.create_collection(config)?;
 
-    // Indexa documentos
-    let documents = vec![
-        "Rust é uma linguagem de programação",
-        "Python é popular para machine learning",
-        "Vector databases são úteis para RAG",
+    let points = vec![
+        Point::new("doc-1", vec![0.1; 384], serde_json::json!({"text": "Primeiro documento"}))?,
+        Point::new("doc-2", vec![0.2; 384], serde_json::json!({"text": "Segundo documento"}))?,
     ];
+    db.upsert_points("embeddings", points)?;
 
-    let mut points = Vec::new();
-    for (i, doc) in documents.iter().enumerate() {
-        let embedding = generate_embedding(doc);
-        let point = Point::new(
-            format!("doc-{}", i),
-            embedding,
-            serde_json::json!({"text": doc})
-        )?;
-        points.push(point);
-    }
-    db.upsert_points("documents", points)?;
-
-    // Busca semântica
-    let query_embedding = generate_embedding("linguagem de programação");
-    let results = db.search("documents", query_embedding, 3)?;
-
-    println!("Documentos mais similares:");
+    let results = db.search("embeddings", vec![0.15; 384], 5)?;
     for result in results {
-        println!("  - {} (similaridade: {:.4})",
-                 result.metadata["text"], result.score);
+        println!("ID: {}, Score: {:.4}", result.id, result.score);
     }
-
     Ok(())
 }
 ```
+
+Mais exemplos e SDK (Rust, Python, TypeScript): [docs/sdk.md](docs/sdk.md).
 
 ## 📊 Benchmarks
 
@@ -207,24 +167,56 @@ Os benchmarks geram relatórios HTML em `target/criterion/`. Abra `target/criter
 - [ ] API gRPC nativa
 - [ ] Dashboard de métricas
 
-## 📚 Documentação
+## Documentação
 
-- **[API Docs](https://docs.rs/ferres-db-core)** - Documentação completa da API (gere com `cargo doc --open`)
-- **[Architecture Guide](docs/architecture.md)** - Arquitetura interna e decisões de design
-- **[ADRs](docs/decisions.md)** - Architecture Decision Records
+- [docs/api.md](docs/api.md) — Referência da API HTTP (endpoints, curl, schemas JSON)
+- [docs/sdk.md](docs/sdk.md) — SDK Rust e uso da API em Python/TypeScript
+- [docs/architecture.md](docs/architecture.md) — Arquitetura interna e fluxos de dados
+- [docs/decisions.md](docs/decisions.md) — ADRs (Architecture Decision Records)
+- [examples/simple_rag/README.md](examples/simple_rag/README.md) — Tutorial RAG passo a passo
+- [tests/e2e/README.md](tests/e2e/README.md) — Testes end-to-end
 
-## 🏗️ Arquitetura
+Documentação Rust (crates): `cargo doc --open`
+
+## Arquitetura (high-level)
+
+```mermaid
+flowchart LR
+  subgraph clients [Clientes]
+    CLI[CLI]
+    RAG[simple_rag / Ingestão]
+    Custom[Apps custom]
+  end
+  subgraph server [Servidor HTTP]
+    API[REST API]
+  end
+  subgraph core [FerresDB Core]
+    VectorDB[VectorDB]
+    Coll[Coleções]
+    HNSW[HNSW / Storage]
+  end
+  CLI --> API
+  RAG --> API
+  Custom --> API
+  API --> VectorDB
+  VectorDB --> Coll
+  Coll --> HNSW
+```
+
+Estrutura do repositório:
 
 ```
 ferres-db-core/
 ├── crates/
-│   ├── core/          # Motor vetorial: pontos, coleções, HNSW, storage
-│   ├── server/        # Servidor HTTP/gRPC (em desenvolvimento)
-│   └── sdk-rust/      # SDK Rust para consumidores do FerresDB
+│   ├── core/          # Motor vetorial: pontos, coleções, HNSW, storage, WAL
+│   ├── server/        # Servidor HTTP (REST)
+│   └── sdk-rust/      # SDK Rust (cliente HTTP, busca híbrida)
 ├── docs/
-│   ├── architecture.md # Arquitetura e fluxos de dados
-│   └── decisions.md   # ADRs (Architecture Decision Records)
-├── examples/
+│   ├── api.md         # Referência da API
+│   ├── sdk.md         # Guia SDK e clientes
+│   ├── architecture.md
+│   └── decisions.md
+├── examples/          # Ingestão, simple_rag
 └── tests/
 ```
 

@@ -6,5 +6,6 @@ pub mod collections;
 pub mod health;
 pub mod metrics;
 pub mod points;
+pub mod save;
 pub mod stats;
 
