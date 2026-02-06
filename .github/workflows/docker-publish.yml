@@ -40,7 +40,7 @@ jobs:
         id: meta-backend
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.DOCKER_NAMESPACE }}/ferres-db-backend
+          images: ${{ env.DOCKER_NAMESPACE }}/ferres-db-core
           tags: |
             type=ref,event=branch
             type=sha,prefix=

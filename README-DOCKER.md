@@ -105,7 +105,7 @@ O workflow `.github/workflows/docker-publish.yml` faz build e push das imagens p
 
 ### Imagens publicadas
 
-- `DOCKERHUB_USERNAME/ferres-db-backend`
+- `DOCKERHUB_USERNAME/ferres-db-core`
 - `DOCKERHUB_USERNAME/ferres-db-frontend`
 
 Tags: `latest` (apenas em push na `main`), nome da branch e SHA do commit.
@@ -116,7 +116,7 @@ Tags: `latest` (apenas em push na `main`), nome da branch e SHA do commit.
 # docker-compose usando imagens do Hub em vez de build local
 services:
   backend:
-    image: SEU_USER/ferres-db-backend:latest
+    image: SEU_USER/ferres-db-core:latest
     # ...
   frontend:
     image: SEU_USER/ferres-db-frontend:latest

@@ -6,7 +6,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ferres-db-backend-dev
+    container_name: ferres-db-core-dev
     ports:
       - "8080:8080"
     volumes:

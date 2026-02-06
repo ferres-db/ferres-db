@@ -3,9 +3,8 @@
 .gitignore
 .gitattributes
 
-# Rust
+# Rust (Cargo.lock deve ser incluído no build para dependências fixas)
 target/
-Cargo.lock
 
 # IDE
 .vscode/

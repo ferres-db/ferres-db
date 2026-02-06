@@ -9,7 +9,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ferres-db-backend
+    container_name: ferres-db-core
     ports:
       - "${BACKEND_PORT:-8080}:${BACKEND_PORT:-8080}"
     volumes:

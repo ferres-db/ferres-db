@@ -1,5 +1,5 @@
 # Stage 1: Builder
-FROM rust:1.75 as builder
+FROM rust:1.75 AS builder
 
 # Instala dependências do sistema necessárias para compilar
 RUN apt-get update && apt-get install -y \
