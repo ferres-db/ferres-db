@@ -4,7 +4,7 @@
 
 # Arquivos gerados pelo cargo
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock deve ser commitado para builds reproduzíveis (Docker/CI)
 
 # IDE
 .idea/

@@ -16,11 +16,13 @@ COPY crates/core/Cargo.toml ./crates/core/
 COPY crates/server/Cargo.toml ./crates/server/
 COPY crates/sdk-rust/Cargo.toml ./crates/sdk-rust/
 
-# Cria um binário dummy para compilar dependências (cache layer)
-RUN mkdir -p crates/core/src crates/server/src crates/sdk-rust/src && \
-    echo "fn main() {}" > crates/core/src/lib.rs && \
+# Cria stubs dummy para compilar dependências (cache layer); core tem lib, bin e bench
+RUN mkdir -p crates/core/src/bin crates/core/benches crates/server/src crates/sdk-rust/src && \
+    echo "pub fn dummy() {}" > crates/core/src/lib.rs && \
+    echo "fn main() {}" > crates/core/src/bin/cli.rs && \
+    echo "fn main() {}" > crates/core/benches/performance.rs && \
     echo "fn main() {}" > crates/server/src/main.rs && \
-    echo "fn main() {}" > crates/sdk-rust/src/lib.rs && \
+    echo "pub fn dummy() {}" > crates/sdk-rust/src/lib.rs && \
     cargo build --release --bin ferres-db-server && \
     rm -rf crates
 
