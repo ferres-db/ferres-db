@@ -51,24 +51,27 @@ WORKDIR /app
 # Copia o binário compilado do stage builder
 COPY --from=builder /app/target/release/ferres-db-server /app/ferres-db-server
 
+# Entrypoint: cria STORAGE_PATH se definido e repassa env ao executar o servidor
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Muda para o usuário não-root
 USER ferres
 
-# Expõe a porta 8080
 EXPOSE 8080
 
-# Volume para dados persistentes
 VOLUME ["/data"]
 
-# Define variáveis de ambiente padrão
 ENV HOST=0.0.0.0
 ENV PORT=8080
 ENV STORAGE_PATH=/data
 ENV LOG_LEVEL=info
 
-# Health check
+# CORS: origens permitidas (ex.: docker run -e CORS_ORIGINS=https://app.example.com,https://dashboard.example.com)
+# Se não definido, usa localhost:3000 e localhost:5173.
+
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-# Comando padrão para executar o servidor
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/app/ferres-db-server"]

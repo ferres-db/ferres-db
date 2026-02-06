@@ -1,11 +1,25 @@
 import axios from 'axios';
 import type { Collection, Point, SearchResult, GlobalStats, QueryEntry, CollectionStats, ApiKeyInfo, CreateApiKeyResponse, UserInfo } from '@/types';
 
-// Em dev: URL vazia para usar o proxy do Vite (/api/v1 → backend), evitando CORS
-// Em produção/Docker: VITE_API_BASE_URL (ex.: http://localhost:8080)
-const API_BASE_URL = import.meta.env.DEV
-  ? (import.meta.env.VITE_API_BASE_URL ?? '')
-  : (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080');
+// Runtime (Docker): window.__RUNTIME_CONFIG__ é preenchido pelo entrypoint.
+// Build-time (Vite): import.meta.env. Fallback para dev com proxy.
+declare global {
+  interface Window {
+    __RUNTIME_CONFIG__?: { apiBaseUrl?: string; apiKey?: string };
+  }
+}
+const runtime = typeof window !== 'undefined' ? window.__RUNTIME_CONFIG__ : undefined;
+const API_BASE_URL =
+  runtime?.apiBaseUrl ||
+  (import.meta.env.DEV
+    ? (import.meta.env.VITE_API_BASE_URL ?? '')
+    : (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'));
+
+/** API key (env ou runtime). Usada quando o usuário não está logado. */
+function getApiKey(): string | null {
+  const key = runtime?.apiKey || import.meta.env.VITE_API_KEY;
+  return (typeof key === 'string' && key.trim()) ? key.trim() : null;
+}
 
 const TOKEN_KEY = 'ferresdb_token';
 const ROLE_KEY = 'ferresdb_role';
@@ -42,10 +56,15 @@ const apiClient = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
-// Interceptor: adiciona Bearer token (login) em toda requisição
+// Interceptor: Bearer = token de login (se houver) ou API key (VITE_API_KEY / runtime)
 apiClient.interceptors.request.use((config) => {
   const token = getStoredToken();
-  if (token) config.headers.Authorization = `Bearer ${token}`;
+  const apiKey = getApiKey();
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  } else if (apiKey) {
+    config.headers.Authorization = `Bearer ${apiKey}`;
+  }
   return config;
 });
 

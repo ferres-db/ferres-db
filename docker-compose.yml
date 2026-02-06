@@ -1,14 +1,10 @@
-# Portas e configurações podem ser alteradas via variáveis de ambiente.
-# Crie um arquivo .env na mesma pasta ou exporte antes de subir:
-#   BACKEND_PORT=8080
-#   FRONTEND_PORT=3000
-#   LOG_LEVEL=info
-#   VITE_API_BASE_URL=http://localhost:8080
+# Portas e config em runtime via .env (copie .env.docker.example para .env).
+# Backend: PORT, STORAGE_PATH, LOG_LEVEL, CORS_ORIGINS
+# Frontend: VITE_API_BASE_URL, VITE_API_KEY (usados pelo entrypoint em runtime)
 
 version: '3.8'
 
 services:
-  # Backend Rust API
   backend:
     build:
       context: .
@@ -23,6 +19,7 @@ services:
       - PORT=${BACKEND_PORT:-8080}
       - STORAGE_PATH=${STORAGE_PATH:-/data}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${BACKEND_PORT:-8080}/health"]
       interval: 30s
@@ -33,17 +30,16 @@ services:
     networks:
       - ferres-network
 
-  # Frontend React (Produção)
   frontend:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
-      args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080}
-        VITE_API_KEY: ${VITE_API_KEY:-}
     container_name: ferres-db-frontend
     ports:
       - "${FRONTEND_PORT:-3000}:80"
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8080}
+      - VITE_API_KEY=${VITE_API_KEY:-}
     depends_on:
       - backend
     restart: unless-stopped

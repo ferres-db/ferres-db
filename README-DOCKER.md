@@ -83,6 +83,46 @@ docker-compose exec backend /app/ferres-db-server --help
 docker-compose exec frontend sh
 ```
 
+## 📦 Publicar no Docker Hub (GitHub Actions)
+
+O workflow `.github/workflows/docker-publish.yml` faz build e push das imagens para o Docker Hub.
+
+### Quando roda
+
+- **Push na branch `main`**: build + push das imagens
+- **Pull request para `main`**: só build (sem push), para validar
+- **Manual**: em **Actions** → **Docker Publish** → **Run workflow**
+
+### Configurar no repositório
+
+1. **Secrets** (Settings → Secrets and variables → Actions):
+   - `DOCKERHUB_USERNAME`: seu usuário do Docker Hub
+   - `DOCKERHUB_TOKEN`: token de acesso (Access tokens em [Docker Hub](https://hub.docker.com/settings/security))
+   - `VITE_API_KEY`: (opcional) chave usada pelo frontend no build
+
+2. **Variável** (opcional):
+   - `VITE_API_BASE_URL`: URL da API no build do frontend (padrão: `http://localhost:8080`). Em produção, use a URL pública da sua API.
+
+### Imagens publicadas
+
+- `DOCKERHUB_USERNAME/ferres-db-backend`
+- `DOCKERHUB_USERNAME/ferres-db-frontend`
+
+Tags: `latest` (apenas em push na `main`), nome da branch e SHA do commit.
+
+### Usar as imagens publicadas
+
+```yaml
+# docker-compose usando imagens do Hub em vez de build local
+services:
+  backend:
+    image: SEU_USER/ferres-db-backend:latest
+    # ...
+  frontend:
+    image: SEU_USER/ferres-db-frontend:latest
+    # ...
+```
+
 ## 🐛 Troubleshooting
 
 ### Frontend não conecta na API

@@ -165,18 +165,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Limite de body: default do Axum é 2MB; upserts com muitos pontos (vetores + metadata) podem exceder.
     const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 
-    // Configura CORS para as rotas da API
-    // Permite requisições do frontend React (rodando em porta diferente)
-    // Nota: quando allow_credentials(true), não podemos usar Any para origin, methods ou headers
-    // Precisamos especificar tudo explicitamente
+    // Configura CORS: CORS_ORIGINS (vírgula) em runtime, senão defaults (localhost)
     use axum::http::{Method, HeaderValue};
+    let default_origins: Vec<HeaderValue> = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ]
+    .iter()
+    .map(|s| s.parse().unwrap())
+    .collect();
+    let cors_origins: Vec<HeaderValue> = std::env::var("CORS_ORIGINS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|o| o.trim().parse::<HeaderValue>().ok())
+                .collect()
+        })
+        .filter(|v: &Vec<_>| !v.is_empty())
+        .unwrap_or(default_origins);
     let cors = CorsLayer::new()
-        .allow_origin([
-            "http://localhost:3000".parse::<HeaderValue>().unwrap(), // Frontend produção (Nginx)
-            "http://localhost:5173".parse::<HeaderValue>().unwrap(), // Frontend desenvolvimento (Vite)
-            "http://127.0.0.1:3000".parse::<HeaderValue>().unwrap(),
-            "http://127.0.0.1:5173".parse::<HeaderValue>().unwrap(),
-        ])
+        .allow_origin(tower_http::cors::AllowOrigin::list(cors_origins))
         .allow_methods([
             Method::GET,
             Method::POST,
