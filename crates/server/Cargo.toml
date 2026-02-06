@@ -33,6 +33,7 @@ tower_governor = { version = "0.6", features = ["axum"] }
 governor = "0.8"
 thiserror = { workspace = true }
 toml = "0.8"
+dotenvy = "0.15"
 chrono = { workspace = true }
 validator = { version = "0.18", features = ["derive"] }
 regex = "1.10"
@@ -43,6 +44,12 @@ prometheus = "0.13"
 uuid = { workspace = true }
 sysinfo = "0.31"
 fs4 = "0.6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+getrandom = "0.2"
+argon2 = "0.5"
+jsonwebtoken = "9.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 # Optional: OpenTelemetry export (feature "otel"); build with --features otel
 opentelemetry = { version = "0.28", optional = true }

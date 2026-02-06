@@ -2,10 +2,12 @@
 //!
 //! Cada módulo contém os handlers para um grupo de rotas relacionadas.
 
+pub mod auth;
 pub mod collections;
-pub mod dashboard;
+pub mod users;
 pub mod debug;
 pub mod health;
+pub mod keys;
 pub mod metrics;
 pub mod points;
 pub mod save;

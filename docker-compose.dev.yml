@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # Backend Rust API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ferres-db-backend-dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ferres-data:/data
+      # Mount do código para desenvolvimento (opcional)
+      # - ./crates:/app/crates:ro
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      - STORAGE_PATH=/data
+      - LOG_LEVEL=debug
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - ferres-network
+
+  # Frontend React (Desenvolvimento com hot reload)
+  frontend:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile.dev
+    container_name: ferres-db-frontend-dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./dashboard:/app
+      - /app/node_modules
+    environment:
+      # Em desenvolvimento, o navegador acessa localhost:8080 (port mapping)
+      # Se rodar tudo no Docker, use http://backend:8080
+      - VITE_API_BASE_URL=http://localhost:8080
+      - VITE_API_KEY=sk-dev-abc123
+    command: npm run dev -- --host 0.0.0.0
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - ferres-network
+
+volumes:
+  ferres-data:
+    driver: local
+
+networks:
+  ferres-network:
+    driver: bridge

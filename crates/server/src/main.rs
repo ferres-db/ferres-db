@@ -4,14 +4,22 @@ use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt, Registry, Layer};
 use tracing_appender::{non_blocking, rolling};
+use tower_http::cors::CorsLayer;
 
+use std::sync::Arc;
+use ferres_db_server::api_keys::ApiKeyStore;
+use ferres_db_server::auth;
 use ferres_db_server::state::{AppState, ServerConfig};
+use ferres_db_server::users::UserStore;
 use ferres_db_server::routes;
 use ferres_db_server::middleware;
 use ferres_db_server::metrics;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Carrega .env do diretório atual ou do workspace (para FERRESDB_API_KEYS, etc.)
+    dotenvy::dotenv().ok();
+
     // Carrega configuração
     let config = ServerConfig::load().map_err(|e| {
         eprintln!("Failed to load configuration: {}", e);
@@ -81,16 +89,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("FerresDB server starting...");
 
-    // Inicializa API keys para autenticação
-    ferres_db_server::auth::init_api_keys();
-    info!("API key authentication enabled");
+    // Inicializa store de API keys (SQLite) e opcionalmente chaves bootstrap do config/env
+    let api_keys_path = config.storage_path.join("api_keys.db");
+    let api_key_store = ApiKeyStore::new(&api_keys_path).map_err(|e| {
+        eprintln!("Failed to open API key store at {}: {}", api_keys_path.display(), e);
+        e
+    })?;
+    api_key_store.init(config.api_keys.as_deref()).map_err(|e| {
+        eprintln!("Failed to initialize API key store: {}", e);
+        e
+    })?;
+    let api_key_store = Some(Arc::new(api_key_store));
+    info!("API key store initialized (multi-key support enabled)");
+
+    // Chaves do config/env continuam válidas como "super" (legacy) além das do SQLite
+    auth::init_api_keys_from(config.api_keys.as_deref());
+
+    // Store de usuários do dashboard (SQLite) e usuário padrão root/ferresdb
+    let users_path = config.storage_path.join("users.db");
+    let user_store = UserStore::new(&users_path).map_err(|e| {
+        eprintln!("Failed to open user store at {}: {}", users_path.display(), e);
+        e
+    })?;
+    user_store.ensure_default_user().map_err(|e| {
+        eprintln!("Failed to ensure default user: {}", e);
+        e
+    })?;
+    let user_store = Some(Arc::new(user_store));
+    info!("User store initialized (default user root)");
+
+    // JWT para sessão do dashboard (FERRESDB_JWT_SECRET ou valor padrão em dev)
+    let jwt_secret = std::env::var("FERRESDB_JWT_SECRET")
+        .unwrap_or_else(|_| "ferresdb-dashboard-secret-change-in-production".to_string());
+    auth::set_jwt_secret(jwt_secret.into_bytes());
 
     // Inicializa métricas Prometheus
     // As métricas são registradas automaticamente via lazy_static no módulo metrics
     info!("Prometheus metrics initialized");
 
-    // Inicializa AppState
-    let app_state = AppState::new(config.clone())
+    // Inicializa AppState (com store de API keys e de usuários)
+    let app_state = AppState::new(config.clone(), api_key_store, user_store)
         .map_err(|e| {
             error!(error = %e, "failed to initialize collections");
             e
@@ -127,17 +165,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Limite de body: default do Axum é 2MB; upserts com muitos pontos (vetores + metadata) podem exceder.
     const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 
-    // Cria o router com todas as rotas
+    // Configura CORS para as rotas da API
+    // Permite requisições do frontend React (rodando em porta diferente)
+    // Nota: quando allow_credentials(true), não podemos usar Any para origin, methods ou headers
+    // Precisamos especificar tudo explicitamente
+    use axum::http::{Method, HeaderValue};
+    let cors = CorsLayer::new()
+        .allow_origin([
+            "http://localhost:3000".parse::<HeaderValue>().unwrap(), // Frontend produção (Nginx)
+            "http://localhost:5173".parse::<HeaderValue>().unwrap(), // Frontend desenvolvimento (Vite)
+            "http://127.0.0.1:3000".parse::<HeaderValue>().unwrap(),
+            "http://127.0.0.1:5173".parse::<HeaderValue>().unwrap(),
+        ])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+            Method::PATCH,
+        ])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+        ])
+        .allow_credentials(true);
+
+    // Cria o router com todas as rotas da API
     let app = routes::create_router()
         .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .layer(axum::middleware::from_fn(middleware::request_logger))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        )
+        .layer(cors)
         .with_state(app_state.clone());
 
     // Bind do servidor

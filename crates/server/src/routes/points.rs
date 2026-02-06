@@ -6,7 +6,7 @@ use axum::{
 };
 
 use crate::handlers::points::{
-    delete_points, get_point, search_hybrid, search_points, upsert_points,
+    delete_points, get_point, list_points, search_hybrid, search_points, upsert_points,
 };
 use crate::state::AppState;
 
@@ -15,7 +15,7 @@ pub fn create_points_routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/v1/collections/{name}/points",
-            post(upsert_points).delete(delete_points),
+            get(list_points).post(upsert_points).delete(delete_points),
         )
         .route(
             "/api/v1/collections/{name}/search",

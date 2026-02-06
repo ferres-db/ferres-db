@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ use validator::Validate;
 use ferres_db_core::{MetadataFilter, Point};
 
 use crate::api_err;
+use crate::auth::RequireEditor;
 use crate::error::{ApiError, ApiResult};
 use crate::request_validation;
 use crate::state::{AppState, QueryPhase, QueryProfile, QUERY_PROFILES_CAP};
@@ -112,12 +113,44 @@ pub struct GetPointResponse {
     pub created_at: u64,
 }
 
+/// Parâmetros de query para listagem de pontos.
+#[derive(Debug, Deserialize)]
+pub struct ListPointsParams {
+    /// Número máximo de pontos a retornar (padrão: 100, máximo: 1000)
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Número de pontos a pular (para paginação)
+    #[serde(default = "default_offset")]
+    pub offset: usize,
+    /// Filtro de metadata em formato JSON string (ex: {"field": {"eq": "value"}})
+    pub filter: Option<String>,
+}
+
+fn default_limit() -> usize {
+    100
+}
+
+fn default_offset() -> usize {
+    0
+}
+
+/// Resposta de listagem de pontos.
+#[derive(Debug, Serialize)]
+pub struct ListPointsResponse {
+    pub points: Vec<GetPointResponse>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub has_more: bool,
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────
 
 /// Handler para POST /api/v1/collections/{name}/points
 ///
-/// Insere ou atualiza pontos em uma coleção (batch de até 1000 pontos).
+/// Insere ou atualiza pontos (Editor ou Admin).
 pub async fn upsert_points(
+    _editor: RequireEditor,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<UpsertPointsRequest>,
@@ -224,8 +257,9 @@ pub async fn upsert_points(
 
 /// Handler para DELETE /api/v1/collections/{name}/points
 ///
-/// Remove pontos de uma coleção pelos IDs.
+/// Remove pontos (Editor ou Admin).
 pub async fn delete_points(
+    _editor: RequireEditor,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<DeletePointsRequest>,
@@ -245,14 +279,14 @@ pub async fn delete_points(
 
 /// Handler para POST /api/v1/collections/{name}/search
 ///
-/// Busca pontos similares a um vetor de consulta.
-/// Sub-operações são instrumentadas com spans para distributed tracing (validate_query, hnsw_search, hydrate_results).
+/// Busca por similaridade (Editor ou Admin; Query Tester).
 #[tracing::instrument(
     name = "search_points",
     skip(app_state, payload),
     fields(collection = %name, limit = payload.limit)
 )]
 pub async fn search_points(
+    _editor: RequireEditor,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<SearchPointsRequest>,
@@ -424,6 +458,7 @@ pub async fn search_points(
     fields(collection = %name, limit = payload.limit, alpha = payload.alpha)
 )]
 pub async fn search_hybrid(
+    _editor: RequireEditor,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<HybridSearchPointsRequest>,
@@ -558,6 +593,70 @@ pub async fn search_hybrid(
         results,
         took_ms,
         query_id: Some(query_id),
+    }))
+}
+
+/// Handler para GET /api/v1/collections/{name}/points
+///
+/// Retorna pontos de uma coleção com paginação e filtro por metadata.
+/// Query params: limit=100, offset=0, filter={"field": {"eq": "value"}}
+pub async fn list_points(
+    State(app_state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<ListPointsParams>,
+) -> ApiResult<Json<ListPointsResponse>> {
+    // Valida limit (máximo 1000)
+    let limit = params.limit.min(1000);
+    let offset = params.offset;
+
+    let collection_arc = app_state.collections.get(&name)
+        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+
+    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+
+    // Obtém todos os pontos
+    let mut all_points: Vec<GetPointResponse> = collection.points_owned()
+        .iter()
+        .map(|point| GetPointResponse {
+            id: point.id.clone(),
+            vector: point.vector.clone(),
+            metadata: point.metadata.clone(),
+            created_at: point.created_at,
+        })
+        .collect();
+
+    // Aplica filtro de metadata se fornecido
+    if let Some(filter_str) = &params.filter {
+        if !filter_str.is_empty() {
+            // Parse do JSON string para serde_json::Value
+            let filter_value: serde_json::Value = serde_json::from_str(filter_str)
+                .map_err(|e| ApiError::invalid_payload(format!("invalid JSON filter: {}", e)))?;
+            
+            let filter = MetadataFilter::from_json(filter_value)
+                .map_err(|e| ApiError::invalid_payload(format!("invalid metadata filter: {}", e)))?;
+
+            all_points.retain(|point| {
+                filter.matches(&point.metadata)
+            });
+        }
+    }
+
+    let total = all_points.len();
+    let has_more = offset + limit < total;
+
+    // Aplica paginação
+    let points: Vec<GetPointResponse> = all_points
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect();
+
+    Ok(Json(ListPointsResponse {
+        points,
+        total,
+        limit,
+        offset,
+        has_more,
     }))
 }
 

@@ -41,9 +41,10 @@ async fn setup_server() -> TestServer {
         port,
         storage_path: storage_path.clone(),
         log_level: "error".to_string(),
+        api_keys: Some(TEST_API_KEY.to_string()),
     };
 
-    let app_state = AppState::new(config.clone()).unwrap();
+    let app_state = AppState::new(config.clone(), None, None).unwrap();
 
     let app = routes::create_router()
         .layer(axum::middleware::from_fn(middleware::request_logger))
@@ -135,20 +136,6 @@ async fn test_metrics_endpoint_public() {
     // Metrics não requer API key
     let res = client
         .get(&format!("{}/metrics", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 200);
-}
-
-#[tokio::test]
-async fn test_dashboard_endpoint_public() {
-    let server = setup_server().await;
-    let client = reqwest::Client::new();
-
-    // Dashboard não requer API key
-    let res = client
-        .get(&format!("{}/dashboard", server.base_url))
         .send()
         .await
         .unwrap();

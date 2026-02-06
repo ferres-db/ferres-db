@@ -3,10 +3,13 @@
 //! Organiza as rotas do servidor em módulos separados por funcionalidade.
 //! Rotas protegidas requerem API key via header `Authorization: Bearer <key>`.
 
+mod auth;
 mod collections;
 mod debug;
 mod health;
+mod keys;
 mod metrics;
+mod users;
 mod points;
 mod stats;
 
@@ -19,7 +22,7 @@ use crate::state::AppState;
 /// Cria o router principal com todas as rotas.
 ///
 /// - **Rotas protegidas** (requerem API key): collections, points, stats por coleção, save
-/// - **Rotas públicas** (sem autenticação): health, metrics, dashboard, stats globais
+/// - **Rotas públicas** (sem autenticação): health, metrics, stats globais
 pub fn create_router() -> Router<AppState> {
     // Rotas protegidas com rate limit por coleção + autenticação
     let collection_scoped = Router::new()
@@ -32,6 +35,8 @@ pub fn create_router() -> Router<AppState> {
     let protected = Router::new()
         .merge(collections::create_base_collection_routes())
         .merge(health::create_save_routes())
+        .merge(keys::create_keys_routes())
+        .merge(users::create_users_routes())
         .merge(collection_scoped)
         .layer(axum::middleware::from_fn(require_api_key));
 
@@ -40,7 +45,8 @@ pub fn create_router() -> Router<AppState> {
         .merge(health::create_health_routes())
         .merge(metrics::create_metrics_routes())
         .merge(stats::create_global_stats_routes())
-        .merge(debug::create_debug_routes());
+        .merge(debug::create_debug_routes())
+        .merge(auth::create_auth_routes());
 
     public.merge(protected)
 }

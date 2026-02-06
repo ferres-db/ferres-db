@@ -60,6 +60,11 @@ pub enum ApiError {
         /// Mensagem de erro.
         message: String,
     },
+    /// API key store não disponível (múltiplas chaves não configuradas).
+    ApiKeyStoreUnavailable {
+        /// Mensagem de erro.
+        message: String,
+    },
 }
 
 impl ApiError {
@@ -105,6 +110,13 @@ impl ApiError {
         }
     }
 
+    /// Cria um erro de store de API keys indisponível.
+    pub fn api_key_store_unavailable(message: impl Into<String>) -> Self {
+        Self::ApiKeyStoreUnavailable {
+            message: message.into(),
+        }
+    }
+
     /// Retorna o código de status HTTP correspondente.
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -116,6 +128,7 @@ impl ApiError {
                 StatusCode::BAD_REQUEST
             }
             Self::InternalError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ApiKeyStoreUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -128,6 +141,7 @@ impl ApiError {
             Self::InvalidPayload { .. } => "invalid_payload",
             Self::InternalError { .. } => "internal_error",
             Self::QueryProfileNotFound { .. } => "query_profile_not_found",
+            Self::ApiKeyStoreUnavailable { .. } => "api_key_store_unavailable",
         }
     }
 
@@ -140,6 +154,7 @@ impl ApiError {
             Self::InvalidPayload { message } => message,
             Self::InternalError { message } => message,
             Self::QueryProfileNotFound { message } => message,
+            Self::ApiKeyStoreUnavailable { message } => message,
         }
     }
 }
@@ -204,6 +219,24 @@ impl From<FerresError> for ApiError {
             FerresError::EmptyVector => {
                 ApiError::invalid_dimension("vector cannot be empty")
             }
+        }
+    }
+}
+
+impl From<crate::api_keys::ApiKeyError> for ApiError {
+    fn from(err: crate::api_keys::ApiKeyError) -> Self {
+        ApiError::internal_error(err.to_string())
+    }
+}
+
+impl From<crate::users::UserError> for ApiError {
+    fn from(err: crate::users::UserError) -> Self {
+        use crate::users::UserError;
+        match &err {
+            UserError::DuplicateUsername => ApiError::invalid_payload("username already exists"),
+            UserError::InvalidUsername => ApiError::invalid_payload("username is required"),
+            UserError::InvalidPassword => ApiError::invalid_payload("password is required"),
+            _ => ApiError::internal_error(err.to_string()),
         }
     }
 }

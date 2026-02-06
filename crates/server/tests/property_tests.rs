@@ -50,9 +50,10 @@ async fn setup_server() -> TestServer {
         port,
         storage_path: storage_path.clone(),
         log_level: "error".to_string(),
+        api_keys: Some(TEST_API_KEY.to_string()),
     };
 
-    let app_state = AppState::new(config.clone()).unwrap();
+    let app_state = AppState::new(config.clone(), None, None).unwrap();
 
     let app = routes::create_router()
         .layer(axum::middleware::from_fn(middleware::request_logger))

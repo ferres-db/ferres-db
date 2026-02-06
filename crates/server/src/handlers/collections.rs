@@ -14,6 +14,7 @@ use std::sync::RwLock;
 use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage};
 
 use crate::api_err;
+use crate::auth::RequireEditor;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -79,6 +80,7 @@ pub struct CollectionListItem {
     pub dimension: usize,
     pub num_points: usize,
     pub created_at: u64,
+    pub distance: DistanceMetric,
 }
 
 /// Resposta de detalhes de coleção.
@@ -88,6 +90,7 @@ pub struct GetCollectionResponse {
     pub dimension: usize,
     pub num_points: usize,
     pub last_updated: u64,
+    pub distance: DistanceMetric,
     pub stats: CollectionStatsResponse,
 }
 
@@ -101,8 +104,9 @@ pub struct CollectionStatsResponse {
 
 /// Handler para POST /api/v1/collections
 ///
-/// Cria uma nova coleção.
+/// Cria uma nova coleção (Editor ou Admin).
 pub async fn create_collection(
+    _editor: RequireEditor,
     State(app_state): State<AppState>,
     Json(payload): Json<CreateCollectionRequest>,
 ) -> ApiResult<(StatusCode, Json<CreateCollectionResponse>)> {
@@ -221,6 +225,7 @@ pub async fn list_collections(
             dimension: config.dimension,
             num_points,
             created_at,
+            distance: config.distance,
         });
     }
 
@@ -262,6 +267,7 @@ pub async fn get_collection(
         dimension: config.dimension,
         num_points,
         last_updated,
+        distance: config.distance,
         stats: CollectionStatsResponse {
             index_size_bytes,
         },
@@ -270,8 +276,9 @@ pub async fn get_collection(
 
 /// Handler para DELETE /api/v1/collections/{name}
 ///
-/// Remove uma coleção.
+/// Remove uma coleção (Editor ou Admin).
 pub async fn delete_collection(
+    _editor: RequireEditor,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<StatusCode> {

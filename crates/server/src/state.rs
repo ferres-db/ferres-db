@@ -17,6 +17,8 @@ use tracing::{info, warn};
 
 use ferres_db_core::{Collection, FileStorage, SearchResult};
 
+use crate::api_keys::ApiKeyStore;
+use crate::users::UserStore;
 use crate::query_logger::QueryLogger;
 use crate::query_log_analytics::QueryLogCache;
 
@@ -141,6 +143,9 @@ pub struct ServerConfig {
     /// Nível de log (trace, debug, info, warn, error).
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// API keys para autenticação (separadas por vírgula).
+    #[serde(default)]
+    pub api_keys: Option<String>,
 }
 
 fn default_host() -> String {
@@ -190,6 +195,9 @@ impl ServerConfig {
         if let Ok(log_level) = std::env::var("LOG_LEVEL") {
             config.log_level = log_level;
         }
+        if let Ok(api_keys) = std::env::var("FERRESDB_API_KEYS") {
+            config.api_keys = Some(api_keys);
+        }
 
         info!(
             host = %config.host,
@@ -210,6 +218,7 @@ impl Default for ServerConfig {
             port: default_port(),
             storage_path: default_storage_path(),
             log_level: default_log_level(),
+            api_keys: None,
         }
     }
 }
@@ -315,13 +324,23 @@ pub struct AppState {
     pub is_shutting_down: Arc<AtomicBool>,
     /// Instante de inicialização do servidor (para health check uptime).
     pub started_at: Arc<Instant>,
+    /// Store de API keys (SQLite). Se None, apenas chaves legacy (config/env) são aceitas.
+    pub api_key_store: Option<Arc<ApiKeyStore>>,
+    /// Store de usuários do dashboard (SQLite). Usado para login.
+    pub user_store: Option<Arc<UserStore>>,
 }
 
 impl AppState {
     /// Cria uma nova instância do AppState.
     ///
     /// Carrega coleções existentes do disco e inicializa o estado.
-    pub fn new(config: ServerConfig) -> Result<Self, ferres_db_core::FerresError> {
+    /// Se `api_key_store` for fornecido, a autenticação usará as chaves do SQLite.
+    /// Se `user_store` for fornecido, o login do dashboard usará usuários do SQLite.
+    pub fn new(
+        config: ServerConfig,
+        api_key_store: Option<Arc<ApiKeyStore>>,
+        user_store: Option<Arc<UserStore>>,
+    ) -> Result<Self, ferres_db_core::FerresError> {
         info!(
             storage_path = %config.storage_path.display(),
             "initializing collections"
@@ -420,6 +439,8 @@ impl AppState {
             shutdown_notify: Arc::new(Notify::new()),
             is_shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Arc::new(Instant::now()),
+            api_key_store,
+            user_store,
         })
     }
 

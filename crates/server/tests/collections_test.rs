@@ -51,10 +51,11 @@ async fn setup_server() -> TestServer {
         port,
         storage_path: storage_path.clone(),
         log_level: "error".to_string(), // Reduz logs durante testes
+        api_keys: Some(TEST_API_KEY.to_string()),
     };
 
     // Inicializa AppState
-    let app_state = AppState::new(config.clone()).unwrap();
+    let app_state = AppState::new(config.clone(), None, None).unwrap();
 
     // Cria o router com middleware
     let app = routes::create_router()

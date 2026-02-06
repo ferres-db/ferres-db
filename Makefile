@@ -14,8 +14,10 @@ build: ## Compila o projeto em modo release
 	cargo build --release --bin $(BINARY_NAME)
 	@echo "Build completo! Binário em: target/release/$(BINARY_NAME)"
 
-run: ## Executa o servidor localmente (modo dev)
+run: ## Executa o servidor Rust localmente (modo dev)
 	@echo "Running $(BINARY_NAME)..."
+	@echo "Backend API will be available at http://localhost:8080"
+	@echo "To run the frontend separately, use: cd dashboard && npm run dev"
 	cargo run --bin $(BINARY_NAME)
 
 test: ## Executa os testes
@@ -27,18 +29,30 @@ docker-build: ## Constrói a imagem Docker
 	docker build -t $(DOCKER_IMAGE):latest .
 	@echo "Docker image construída: $(DOCKER_IMAGE):latest"
 
-docker-run: ## Executa o container Docker usando docker-compose
-	@echo "Starting Docker container..."
+docker-run: ## Executa os containers Docker em modo produção
+	@echo "Starting Docker containers (production)..."
 	docker-compose up -d
-	@echo "Container iniciado. Use 'make docker-logs' para ver os logs."
+	@echo "Containers iniciados. Backend: http://localhost:8080, Frontend: http://localhost:3000"
+	@echo "Use 'make docker-logs' para ver os logs."
+
+docker-dev: ## Executa os containers Docker em modo desenvolvimento
+	@echo "Starting Docker containers (development)..."
+	docker-compose -f docker-compose.dev.yml up --build
+	@echo "Containers iniciados. Backend: http://localhost:8080, Frontend: http://localhost:5173"
 
 docker-stop: ## Para o container Docker
 	@echo "Stopping Docker container..."
 	docker-compose down
 	@echo "Container parado."
 
-docker-logs: ## Mostra os logs do container Docker
-	docker-compose logs -f $(DOCKER_CONTAINER)
+docker-logs: ## Mostra os logs dos containers Docker
+	docker-compose logs -f
+
+docker-logs-backend: ## Mostra os logs do backend
+	docker-compose logs -f backend
+
+docker-logs-frontend: ## Mostra os logs do frontend
+	docker-compose logs -f frontend
 
 docker-shell: ## Abre um shell no container Docker
 	docker-compose exec vector-db /bin/bash
