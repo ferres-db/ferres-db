@@ -1,0 +1,3 @@
+[submodule "sdk/typescript"]
+	path = sdk/typescript
+	url = git@github.com:ferres-db/ferres-db-typescript-sdk.git

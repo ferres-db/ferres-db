@@ -4,6 +4,7 @@
 
 pub mod collections;
 pub mod dashboard;
+pub mod debug;
 pub mod health;
 pub mod metrics;
 pub mod points;

@@ -1,6 +1,9 @@
 //! # Collection Integration Tests
 //!
 //! Testes de integração para os endpoints de gerenciamento de coleções.
+//!
+//! Para **testes de propriedade** (quickcheck), **concorrência** e **carga**,
+//! ver `property_tests.rs`.
 
 use std::net::SocketAddr;
 use tokio::sync::oneshot;

@@ -44,8 +44,10 @@ impl QueryLogger {
     }
 
     /// Loga uma query de busca.
+    /// Se `query_id` for `Some`, usa esse id; caso contrário gera um novo UUID.
     pub async fn log_query(
         &self,
+        query_id: Option<&str>,
         collection: &str,
         vector: &[f32],
         limit: usize,
@@ -61,7 +63,9 @@ impl QueryLogger {
         };
 
         let entry = QueryLogEntry {
-            query_id: uuid::Uuid::new_v4().to_string(),
+            query_id: query_id
+                .map(String::from)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             timestamp: Utc::now().to_rfc3339(),
             collection: collection.to_string(),
             vector_preview,

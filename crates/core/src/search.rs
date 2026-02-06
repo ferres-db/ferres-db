@@ -176,7 +176,7 @@ fn normalize_vector(v: &[f32]) -> Result<Vec<f32>, FerresError> {
 ///
 /// Útil para batch insert quando a métrica é Cosine.
 /// Pública para uso em otimizações de batch insert.
-pub(crate) fn normalize_vectors_parallel(vectors: &[Vec<f32>]) -> Result<Vec<Vec<f32>>, FerresError> {
+pub fn normalize_vectors_parallel(vectors: &[Vec<f32>]) -> Result<Vec<Vec<f32>>, FerresError> {
     let results: Vec<Result<Vec<f32>, FerresError>> = vectors
         .par_iter()
         .map(|v| normalize_vector(v))

@@ -12,7 +12,7 @@ use validator::Validate;
 use ferres_db_core::Point;
 
 use crate::error::{ApiError, ApiResult};
-use crate::state::AppState;
+use crate::state::{AppState, QueryPhase, QueryProfile, QUERY_PROFILES_CAP};
 
 // ─── Request/Response Types ──────────────────────────────────────────────
 
@@ -87,6 +87,9 @@ fn default_alpha() -> f32 {
 pub struct SearchPointsResponse {
     pub results: Vec<SearchResult>,
     pub took_ms: u64,
+    /// ID da query (para debug: GET /api/v1/debug/query-profile/{query_id}).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_id: Option<String>,
 }
 
 /// Resultado de uma busca.
@@ -192,20 +195,19 @@ pub async fn upsert_points(
             }));
         }
 
-        // Fase 2: inserção e mark_dirty (mesmo lock)
-        let mut upserted = 0;
-        for point in points {
-            let point_id = point.id.clone();
-            match collection.insert(point) {
-                Ok(_) => upserted += 1,
-                Err(err) => {
-                    failed.push(FailedPoint {
-                        id: point_id,
-                        reason: err.to_string(),
-                    });
-                }
+        // Fase 2: inserção em batch otimizada e mark_dirty (mesmo lock)
+        let upserted = match collection.insert_batch(points) {
+            Ok(result) => result.inserted,
+            Err(err) => {
+                // Se o batch falhou, não podemos saber quais pontos falharam individualmente
+                // então retornamos 0 inseridos e adicionamos um erro genérico
+                failed.push(FailedPoint {
+                    id: "batch".to_string(),
+                    reason: err.to_string(),
+                });
+                0
             }
-        }
+        };
         collection.mark_dirty();
         (upserted, failed)
     };
@@ -253,8 +255,10 @@ pub async fn search_points(
         return Err(ApiError::invalid_payload("limit must be greater than 0"));
     }
 
+    let query_id = uuid::Uuid::new_v4().to_string();
     let start = Instant::now();
 
+    // Fase: validação (get collection + validate dimension)
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
@@ -262,15 +266,20 @@ pub async fn search_points(
         ApiError::internal_error(format!("failed to acquire read lock: {}", e))
     })?;
 
-    // Valida dimensão do query
     collection.validate_dimension(&payload.vector)
         .map_err(|e| ApiError::from(e))?;
 
-    // Realiza a busca
+    let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let search_start = Instant::now();
+
+    // Fase: busca
     let results = collection.search(&payload.vector, payload.limit)
         .map_err(|e| ApiError::from(e))?;
 
-    // Constrói SearchResults
+    let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let hydrate_start = Instant::now();
+
+    // Fase: hydrate (construir SearchResults + filtro)
     let search_results: Vec<ferres_db_core::SearchResult> = results
         .into_iter()
         .filter_map(|(id, score)| {
@@ -291,7 +300,6 @@ pub async fn search_points(
             filtered_results = filtered_results
                 .into_iter()
                 .filter(|result| {
-                    // Verifica se todos os campos do filtro correspondem (equality)
                     filter_obj.iter().all(|(key, value)| {
                         result.metadata.get(key) == Some(value)
                     })
@@ -300,7 +308,6 @@ pub async fn search_points(
         }
     }
 
-    // Converte para formato de resposta
     let results: Vec<SearchResult> = filtered_results
         .into_iter()
         .map(|r| SearchResult {
@@ -310,54 +317,91 @@ pub async fn search_points(
         })
         .collect();
 
+    let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let results_count = results.len();
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let collection_name = name.clone();
     let vector_preview = payload.vector.clone();
     let filter_clone = payload.filter.clone();
 
-    // Libera o lock da coleção antes de operações assíncronas
+    // Monta perfil por fases (percentual sobre total)
+    let total = took_ms as f64;
+    let phases = vec![
+        QueryPhase {
+            name: "validation".to_string(),
+            duration_ms: validation_ms,
+            percentage: if total > 0.0 { (validation_ms as f64 / total) * 100.0 } else { 0.0 },
+        },
+        QueryPhase {
+            name: "search".to_string(),
+            duration_ms: search_ms,
+            percentage: if total > 0.0 { (search_ms as f64 / total) * 100.0 } else { 0.0 },
+        },
+        QueryPhase {
+            name: "hydrate".to_string(),
+            duration_ms: hydrate_ms,
+            percentage: if total > 0.0 { (hydrate_ms as f64 / total) * 100.0 } else { 0.0 },
+        },
+    ];
+    let profile = QueryProfile {
+        query_id: query_id.clone(),
+        total_ms: took_ms,
+        phases,
+    };
+
+    // Evict one profile if at capacity, then store
+    if app_state.query_profiles.len() >= QUERY_PROFILES_CAP {
+        if let Some(entry) = app_state.query_profiles.iter().next() {
+            let k = entry.key().clone();
+            drop(entry);
+            app_state.query_profiles.remove(&k);
+        }
+    }
+    app_state.query_profiles.insert(query_id.clone(), profile);
+
     drop(collection);
     drop(collection_arc);
 
-    // Prepara tudo que precisamos antes do await
     let query_logger = app_state.query_logger.clone();
-    
-    // Registra estatísticas da query usando entry() para evitar guards
+
     app_state.query_stats
         .entry(collection_name.clone())
         .or_insert_with(|| crate::state::QueryStats::new())
         .record_query(took_ms);
 
     app_state.global_query_stats.record(&collection_name, took_ms);
-    
-    // Registra métricas Prometheus (não precisa de guard)
+
     crate::metrics::QUERIES_TOTAL
         .with_label_values(&[&collection_name])
         .inc();
-    
     crate::metrics::QUERY_DURATION_MS
         .with_label_values(&[&collection_name])
         .observe(took_ms as f64);
 
-    // Loga a query em queries.log em background (fire-and-forget)
-    // Isso evita problemas de Send com o handler
     let query_logger_clone = query_logger.clone();
     let collection_name_for_log = collection_name.clone();
     let vector_preview_for_log = vector_preview.clone();
     let filter_for_log = filter_clone.clone();
+    let query_id_for_log = query_id.clone();
     tokio::spawn(async move {
-        query_logger_clone.log_query(
-            &collection_name_for_log,
-            &vector_preview_for_log,
-            payload.limit,
-            filter_for_log.as_ref(),
-            results_count,
-            took_ms,
-        ).await;
+        query_logger_clone
+            .log_query(
+                Some(&query_id_for_log),
+                &collection_name_for_log,
+                &vector_preview_for_log,
+                payload.limit,
+                filter_for_log.as_ref(),
+                results_count,
+                took_ms,
+            )
+            .await;
     });
 
-    Ok(Json(SearchPointsResponse { results, took_ms }))
+    Ok(Json(SearchPointsResponse {
+        results,
+        took_ms,
+        query_id: Some(query_id),
+    }))
 }
 
 /// Handler para POST /api/v1/collections/{name}/search/hybrid
@@ -376,6 +420,7 @@ pub async fn search_hybrid(
         return Err(ApiError::invalid_payload("alpha must be between 0 and 1"));
     }
 
+    let query_id = uuid::Uuid::new_v4().to_string();
     let start = Instant::now();
 
     let collection_arc = app_state.collections.get(&name)
@@ -387,6 +432,9 @@ pub async fn search_hybrid(
 
     collection.validate_dimension(&payload.query_vector)
         .map_err(ApiError::from)?;
+
+    let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let search_start = Instant::now();
 
     let hybrid_results = collection.hybrid_search(
         &payload.query_vector,
@@ -402,6 +450,9 @@ pub async fn search_hybrid(
         }
     })?;
 
+    let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let hydrate_start = Instant::now();
+
     let results: Vec<SearchResult> = hybrid_results
         .into_iter()
         .filter_map(|(id, score)| {
@@ -414,8 +465,43 @@ pub async fn search_hybrid(
         })
         .collect();
 
+    let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let collection_name = name.clone();
+    let results_count = results.len();
+
+    let total = took_ms as f64;
+    let phases = vec![
+        QueryPhase {
+            name: "validation".to_string(),
+            duration_ms: validation_ms,
+            percentage: if total > 0.0 { (validation_ms as f64 / total) * 100.0 } else { 0.0 },
+        },
+        QueryPhase {
+            name: "search".to_string(),
+            duration_ms: search_ms,
+            percentage: if total > 0.0 { (search_ms as f64 / total) * 100.0 } else { 0.0 },
+        },
+        QueryPhase {
+            name: "hydrate".to_string(),
+            duration_ms: hydrate_ms,
+            percentage: if total > 0.0 { (hydrate_ms as f64 / total) * 100.0 } else { 0.0 },
+        },
+    ];
+    let profile = QueryProfile {
+        query_id: query_id.clone(),
+        total_ms: took_ms,
+        phases,
+    };
+
+    if app_state.query_profiles.len() >= QUERY_PROFILES_CAP {
+        if let Some(entry) = app_state.query_profiles.iter().next() {
+            let k = entry.key().clone();
+            drop(entry);
+            app_state.query_profiles.remove(&k);
+        }
+    }
+    app_state.query_profiles.insert(query_id.clone(), profile);
 
     drop(collection);
     drop(collection_arc);
@@ -435,14 +521,14 @@ pub async fn search_hybrid(
     let query_logger = app_state.query_logger.clone();
     let collection_name_for_log = collection_name.clone();
     let vector_for_log = payload.query_vector.clone();
-    let limit_for_log = payload.limit;
-    let results_count = results.len();
+    let query_id_for_log = query_id.clone();
     tokio::spawn(async move {
         query_logger
             .log_query(
+                Some(&query_id_for_log),
                 &collection_name_for_log,
                 &vector_for_log,
-                limit_for_log,
+                payload.limit,
                 None,
                 results_count,
                 took_ms,
@@ -450,7 +536,11 @@ pub async fn search_hybrid(
             .await;
     });
 
-    Ok(Json(SearchPointsResponse { results, took_ms }))
+    Ok(Json(SearchPointsResponse {
+        results,
+        took_ms,
+        query_id: Some(query_id),
+    }))
 }
 
 /// Handler para GET /api/v1/collections/{name}/points/{id}

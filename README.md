@@ -171,8 +171,9 @@ Os benchmarks geram relatórios HTML em `target/criterion/`. Abra `target/criter
 
 - [docs/api.md](docs/api.md) — Referência da API HTTP (endpoints, curl, schemas JSON)
 - [docs/sdk.md](docs/sdk.md) — SDK Rust e uso da API em Python/TypeScript
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Visão geral e diagrama de componentes
 - [docs/architecture.md](docs/architecture.md) — Arquitetura interna e fluxos de dados
-- [docs/decisions.md](docs/decisions.md) — ADRs (Architecture Decision Records)
+- [docs/ADR/](docs/ADR/) — Architecture Decision Records (decisões em arquivos numerados)
 - [examples/simple_rag/README.md](examples/simple_rag/README.md) — Tutorial RAG passo a passo
 - [tests/e2e/README.md](tests/e2e/README.md) — Testes end-to-end
 
@@ -332,14 +333,7 @@ O FerresDB inclui uma CLI completa. Veja [README.md](README.md#cli-interface-de-
 
 ## 🤝 Contribuindo
 
-Contribuições são bem-vindas! Por favor:
-
-1. Abra uma issue descrevendo a mudança proposta
-2. Faça fork do repositório
-3. Crie uma branch para sua feature
-4. Adicione testes para novas funcionalidades
-5. Execute `cargo test` e `cargo clippy`
-6. Abra um Pull Request
+Contribuições são bem-vindas! Consulte o **[CONTRIBUTING.md](CONTRIBUTING.md)** para ambiente de desenvolvimento, testes, padrões de código e processo de PR.
 
 ## 📄 Licença
 

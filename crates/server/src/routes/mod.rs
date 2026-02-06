@@ -3,6 +3,7 @@
 //! Organiza as rotas do servidor em módulos separados por funcionalidade.
 
 mod collections;
+mod debug;
 mod health;
 mod metrics;
 mod points;
@@ -32,5 +33,6 @@ pub fn create_router() -> Router<AppState> {
         .merge(metrics::create_metrics_routes())
         .merge(collections::create_base_collection_routes())
         .merge(stats::create_global_stats_routes())
+        .merge(debug::create_debug_routes())
         .merge(collection_scoped)
 }

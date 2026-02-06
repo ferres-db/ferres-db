@@ -213,6 +213,27 @@ impl Default for ServerConfig {
     }
 }
 
+// ─── Query profile (debug: tempo por fase) ──────────────────────────────────
+
+/// Uma fase da execução da query (validação, busca, hydrate).
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryPhase {
+    pub name: String,
+    pub duration_ms: u64,
+    pub percentage: f64,
+}
+
+/// Perfil de execução de uma query (para GET /api/v1/debug/query-profile/:id).
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryProfile {
+    pub query_id: String,
+    pub total_ms: u64,
+    pub phases: Vec<QueryPhase>,
+}
+
+/// Capacidade máxima de perfis em memória (evição ao inserir).
+pub const QUERY_PROFILES_CAP: usize = 10_000;
+
 // ─── QueryStats ────────────────────────────────────────────────────────────
 
 /// Estatísticas de queries para uma coleção.
@@ -283,6 +304,8 @@ pub struct AppState {
     pub query_logger: Arc<QueryLogger>,
     /// Cache de analytics (leitura de queries.log, TTL 1h).
     pub query_log_cache: Arc<QueryLogCache>,
+    /// Perfis de queries recentes (debug), keyed by query_id.
+    pub query_profiles: Arc<DashMap<String, QueryProfile>>,
     /// Configuração do servidor.
     pub config: ServerConfig,
     /// Notificador para shutdown graceful.
@@ -375,6 +398,7 @@ impl AppState {
         );
 
         let query_log_cache = Arc::new(QueryLogCache::new(log_dir.join("queries.log")));
+        let query_profiles = Arc::new(DashMap::new());
 
         info!(
             collections = collections.len(),
@@ -388,6 +412,7 @@ impl AppState {
             global_query_stats,
             query_logger,
             query_log_cache,
+            query_profiles,
             config,
             shutdown_notify: Arc::new(Notify::new()),
             is_shutting_down: Arc::new(AtomicBool::new(false)),

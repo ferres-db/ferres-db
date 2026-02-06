@@ -50,7 +50,7 @@ pub mod storage;
 pub mod wal;
 
 // Re-exporta os tipos mais usados na raiz do crate para ergonomia.
-pub use collection::{Collection, CollectionConfig};
+pub use collection::{BatchInsertResult, Collection, CollectionConfig};
 pub use error::FerresError;
 pub use point::Point;
 pub use bm25::BM25Index;

@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADRs)
 
-Este documento registra as decisões arquiteturais importantes do FerresDB Core, explicando o contexto, alternativas consideradas e consequências.
+As decisões estão documentadas em arquivos individuais em **[docs/ADR/](ADR/)**. Este arquivo mantém um resumo e o histórico legado; para o conteúdo completo de cada decisão, consulte os arquivos na pasta ADR.
 
 ## ADR-001: Uso de HNSW em vez de implementação própria
 
@@ -31,6 +31,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Menos controle sobre detalhes internos
 
 **Consequências**:
+
 - Desenvolvimento mais rápido (focamos na API e storage)
 - Dependência externa (mas bem mantida)
 - Performance excelente (benchmarks confirmam)
@@ -81,6 +82,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Tamanho maior que bincode
 
 **Consequências**:
+
 - Facilita debugging e inspeção manual
 - Permite implementação futura de WAL (write-ahead log)
 - Tradeoff de performance aceitável para benefícios de flexibilidade
@@ -120,6 +122,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Heap allocation (uma vez, aceitável)
 
 **Consequências**:
+
 - Facilita testes unitários (mock `ANNIndex`)
 - Permite múltiplas implementações sem modificar `Collection`
 - Overhead de vtable é desprezível (<1% do tempo de busca)
@@ -160,6 +163,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Uso de memória ligeiramente maior
 
 **Consequências**:
+
 - Remoção é O(1) (apenas marcação)
 - Buscas filtram tombstones automaticamente
 - Rebuild periódico (ou manual) limpa completamente
@@ -196,6 +200,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Vetores normalizados armazenados (não originais)
 
 **Consequências**:
+
 - Performance melhor para Cosine (busca L2 é mais eficiente)
 - Estabilidade numérica melhorada
 - Vetores originais não são preservados (mas isso é aceitável para Cosine)
@@ -232,6 +237,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Complexidade adicional no código
 
 **Consequências**:
+
 - Reduz latência para queries repetidas (10-100x mais rápido)
 - Uso de memória configurável
 - Overhead mínimo quando desabilitado
@@ -268,6 +274,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Complexidade adicional
 
 **Consequências**:
+
 - Melhoria de ~50% no tempo de indexação para batches grandes (10k+ pontos)
 - Overhead mínimo para batches pequenos (<100 pontos)
 - Aproveita múltiplos cores da CPU
@@ -286,6 +293,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
 **Decisão**: Validar rigorosamente todos os vetores na criação do `Point` e nas operações de `Collection`.
 
 **Validações Implementadas**:
+
 - ID não pode ser vazio
 - Vetor não pode ser vazio
 - Componentes do vetor devem ser finitos (não NaN, não infinito)
@@ -305,6 +313,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Overhead mínimo de validação
 
 **Consequências**:
+
 - Erros claros facilitam debugging
 - Previne comportamento indefinido
 - Overhead de validação é desprezível (<1% do tempo total)
@@ -341,6 +350,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Requer espaço temporário em disco
 
 **Consequências**:
+
 - Garante atomicidade (arquivo completo ou não existe)
 - Previne corrupção em caso de crash
 - Performance aceitável (rename é rápido na maioria dos filesystems)
@@ -377,6 +387,7 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
    - ❌ Não é seguro criptograficamente (mas não é necessário aqui)
 
 **Consequências**:
+
 - Detecta corrupção de dados automaticamente
 - Overhead mínimo (<1% do tempo de save/load)
 - Erros claros quando corrupção é detectada
@@ -388,18 +399,18 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
 
 ## Resumo de Decisões
 
-| ADR | Decisão | Status |
-|-----|---------|--------|
+| ADR     | Decisão                                        | Status    |
+| ------- | ---------------------------------------------- | --------- |
 | ADR-001 | Usar `hnsw_rs` em vez de implementação própria | ✅ Aceito |
-| ADR-002 | Formato JSON-lines para persistência | ✅ Aceito |
-| ADR-003 | Trait Object para abstração de índice | ✅ Aceito |
-| ADR-004 | Tombstones para remoção | ✅ Aceito |
-| ADR-005 | Normalização L2 para Cosine | ✅ Aceito |
-| ADR-006 | Cache LRU opcional | ✅ Aceito |
-| ADR-007 | Paralelização condicional com Rayon | ✅ Aceito |
-| ADR-008 | Validação rigorosa de vetores | ✅ Aceito |
-| ADR-009 | Atomic writes com temp-file + rename | ✅ Aceito |
-| ADR-010 | Checksum MD5 para validação | ✅ Aceito |
+| ADR-002 | Formato JSON-lines para persistência           | ✅ Aceito |
+| ADR-003 | Trait Object para abstração de índice          | ✅ Aceito |
+| ADR-004 | Tombstones para remoção                        | ✅ Aceito |
+| ADR-005 | Normalização L2 para Cosine                    | ✅ Aceito |
+| ADR-006 | Cache LRU opcional                             | ✅ Aceito |
+| ADR-007 | Paralelização condicional com Rayon            | ✅ Aceito |
+| ADR-008 | Validação rigorosa de vetores                  | ✅ Aceito |
+| ADR-009 | Atomic writes com temp-file + rename           | ✅ Aceito |
+| ADR-010 | Checksum MD5 para validação                    | ✅ Aceito |
 
 ## Decisões Futuras (Rascunho)
 
@@ -411,11 +422,13 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
 **Proposta**: Implementar WAL para escritas incrementais, com checkpoint periódico.
 
 **Benefícios**:
+
 - Melhor throughput de escrita
 - Durabilidade garantida
 - Recuperação após crash
 
 **Tradeoffs**:
+
 - Complexidade adicional
 - Overhead de I/O para WAL
 - Necessidade de compactação periódica
@@ -430,10 +443,12 @@ Este documento registra as decisões arquiteturais importantes do FerresDB Core,
 **Proposta**: Implementar quantização (ex: int8) para reduzir uso de memória.
 
 **Benefícios**:
+
 - Redução de 4x no uso de memória (f32 → int8)
 - Performance melhor (menos cache misses)
 
 **Tradeoffs**:
+
 - Perda de precisão
 - Overhead de conversão
 - Complexidade adicional
