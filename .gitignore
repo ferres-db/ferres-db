@@ -42,3 +42,5 @@ __pycache__
 .env
 
 eval_report.json
+
+config.toml

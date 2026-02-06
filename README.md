@@ -101,6 +101,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Mais exemplos e SDK (Rust, Python, TypeScript): [docs/sdk.md](docs/sdk.md).
 
+## Autenticação
+
+O FerresDB usa API Keys para proteger endpoints de collections e points.
+
+### Configurar API Keys
+
+```bash
+export FERRESDB_API_KEYS="sk-dev-abc123,sk-prod-xyz789"
+```
+
+Ou via `config.toml`:
+
+```toml
+api_keys = "sk-dev-abc123,sk-prod-xyz789"
+```
+
+### Gerar nova API Key
+
+```bash
+echo "sk-$(openssl rand -hex 32)"
+```
+
+### Usar API Key
+
+```bash
+curl -H "Authorization: Bearer sk-dev-abc123" \
+  http://localhost:3000/api/v1/collections
+```
+
+### Endpoints públicos (sem autenticação)
+
+- `GET /health`
+- `GET /metrics`
+- `GET /dashboard`
+- `GET /api/v1/stats/global`
+
+### Endpoints protegidos (requerem API key)
+
+- Todos de `/api/v1/collections/*`
+- Todos de `/api/v1/points/*`
+- `POST /api/v1/save`
+
 ## 📊 Benchmarks
 
 O FerresDB inclui benchmarks completos usando [Criterion.rs](https://github.com/bheisler/criterion.rs).

@@ -81,6 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("FerresDB server starting...");
 
+    // Inicializa API keys para autenticação
+    ferres_db_server::auth::init_api_keys();
+    info!("API key authentication enabled");
+
     // Inicializa métricas Prometheus
     // As métricas são registradas automaticamente via lazy_static no módulo metrics
     info!("Prometheus metrics initialized");

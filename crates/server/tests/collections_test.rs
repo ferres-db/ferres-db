@@ -9,9 +9,13 @@ use std::net::SocketAddr;
 use tokio::sync::oneshot;
 use tempfile::TempDir;
 
+use ferres_db_server::auth;
 use ferres_db_server::routes;
 use ferres_db_server::state::{AppState, ServerConfig};
 use ferres_db_server::middleware;
+
+/// API key usada em todos os testes de integração.
+const TEST_API_KEY: &str = "test-key-collections";
 
 // ─── Test Helpers ───────────────────────────────────────────────────────
 
@@ -25,8 +29,12 @@ struct TestServer {
 
 /// Inicia um servidor de teste em uma porta aleatória.
 ///
-/// Retorna um cliente HTTP e um callback de cleanup.
+/// Retorna um cliente HTTP (com API key nos headers) e um callback de cleanup.
 async fn setup_server() -> TestServer {
+    // Configura API key para testes
+    std::env::set_var("FERRESDB_API_KEYS", TEST_API_KEY);
+    auth::init_api_keys();
+
     // Encontra uma porta livre
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -79,7 +87,17 @@ async fn setup_server() -> TestServer {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let base_url = format!("http://127.0.0.1:{}", port);
-    let client = reqwest::Client::new();
+
+    // Cliente com API key default em todos os requests
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        format!("Bearer {}", TEST_API_KEY).parse().unwrap(),
+    );
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap();
 
     TestServer {
         client,
