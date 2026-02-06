@@ -17,11 +17,11 @@ Referência dos endpoints REST do servidor FerresDB. Base URL de exemplo: `http:
 }
 ```
 
-| Campo     | Tipo   | Descrição                                                                                                           |
-| --------- | ------ | ------------------------------------------------------------------------------------------------------------------- |
-| `error`   | string | Tipo: `collection_not_found`, `collection_already_exists`, `invalid_payload`, `invalid_dimension`, `internal_error` |
-| `message` | string | Mensagem legível                                                                                                    |
-| `code`    | number | Código HTTP (400, 404, 409, 500)                                                                                    |
+| Campo     | Tipo   | Descrição                                                                                                                                      |
+| --------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `error`   | string | Tipo: `collection_not_found`, `collection_already_exists`, `invalid_payload`, `invalid_dimension`, `internal_error`, `query_profile_not_found` |
+| `message` | string | Mensagem legível                                                                                                                               |
+| `code`    | number | Código HTTP (400, 404, 409, 500)                                                                                                               |
 
 ---
 
@@ -345,11 +345,11 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 
 **Request body:**
 
-| Campo    | Tipo   | Obrigatório | Descrição                                                      |
-| -------- | ------ | ----------- | -------------------------------------------------------------- |
-| `vector` | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                  |
-| `limit`  | number | sim         | Número máximo de resultados (> 0)                              |
-| `filter` | object | não         | Filtro por igualdade em metadata (ex.: `{"source": "manual"}`) |
+| Campo    | Tipo   | Obrigatório | Descrição                                                                 |
+| -------- | ------ | ----------- | ------------------------------------------------------------------------- |
+| `vector` | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                             |
+| `limit`  | number | sim         | Número máximo de resultados (> 0)                                         |
+| `filter` | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo. |
 
 **Schema de request:**
 
@@ -384,6 +384,30 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search \
   -H "Content-Type: application/json" \
   -d '{"vector":[0.1,0.2,-0.1],"limit":5}'
+```
+
+#### Filtro de metadata
+
+O campo `filter` é um objeto JSON. Cada chave é um campo de metadata; o valor pode ser:
+
+- **Valor direto** — tratado como igualdade (`$eq`): `{"source": "manual"}`.
+- **Objeto com operadores** — use `$eq`, `$ne`, `$in`, `$gt`, `$lt`, `$gte`, `$lte`:
+  - `$eq`, `$ne`: valor exato (qualquer tipo JSON).
+  - `$in`: array de valores permitidos.
+  - `$gt`, `$lt`, `$gte`, `$lte`: comparação numérica (o campo no metadata deve ser número).
+
+Múltiplos campos são combinados com **AND**. Exemplo:
+
+```json
+{
+  "vector": [0.1, 0.2],
+  "limit": 10,
+  "filter": {
+    "category": "tech",
+    "price": { "$gte": 10, "$lte": 100 },
+    "status": { "$in": ["active", "pending"] }
+  }
+}
 ```
 
 ---
@@ -547,4 +571,47 @@ Retorna estatísticas de uso da coleção (pontos e queries).
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections/docs/stats
+```
+
+---
+
+## Debug (query profiling)
+
+### GET /api/v1/debug/query-profile/{query_id}
+
+Retorna o perfil de execução de uma query (tempo por fase: validação, busca, hydrate). Útil para debug de performance quando a resposta de search inclui `query_id`.
+
+**Path:** `query_id` — UUID retornado em `SearchPointsResponse.query_id`.
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "query_id": "uuid",
+  "total_ms": 12,
+  "phases": [
+    { "name": "validation", "duration_ms": 1, "percentage": 8.33 },
+    { "name": "search", "duration_ms": 8, "percentage": 66.67 },
+    { "name": "hydrate", "duration_ms": 3, "percentage": 25.0 }
+  ]
+}
+```
+
+| Campo                  | Tipo   | Descrição                                  |
+| ---------------------- | ------ | ------------------------------------------ |
+| `query_id`             | string | ID da query                                |
+| `total_ms`             | number | Tempo total em ms                          |
+| `phases`               | array  | Tempo por fase                             |
+| `phases[].name`        | string | Nome da fase (validation, search, hydrate) |
+| `phases[].duration_ms` | number | Duração da fase em ms                      |
+| `phases[].percentage`  | number | Percentual do total                        |
+
+**Erro:** `404` com `error: "query_profile_not_found"` se o `query_id` não existir (perfis são mantidos em memória com capacidade limitada).
+
+**Exemplo curl:**
+
+```bash
+curl -s http://localhost:8080/api/v1/debug/query-profile/550e8400-e29b-41d4-a716-446655440000
 ```

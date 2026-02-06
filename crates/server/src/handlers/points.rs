@@ -9,17 +9,20 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-use ferres_db_core::Point;
+use ferres_db_core::{MetadataFilter, Point};
 
+use crate::api_err;
 use crate::error::{ApiError, ApiResult};
+use crate::request_validation;
 use crate::state::{AppState, QueryPhase, QueryProfile, QUERY_PROFILES_CAP};
 
 // ─── Request/Response Types ──────────────────────────────────────────────
 
 /// Payload para upsert de pontos.
+/// Limites de batch e dimensão são aplicados em [crate::request_validation].
 #[derive(Debug, Deserialize, Validate)]
 pub struct UpsertPointsRequest {
-    #[validate(length(min = 1, max = 1000, message = "points must contain between 1 and 1000 items"))]
+    #[validate(length(min = 1, message = "points must contain at least 1 item"))]
     pub points: Vec<PointInput>,
 }
 
@@ -119,7 +122,10 @@ pub async fn upsert_points(
     Path(name): Path<String>,
     Json(payload): Json<UpsertPointsRequest>,
 ) -> ApiResult<Json<UpsertPointsResponse>> {
-    // Valida o payload
+    // Validação centralizada (limites de batch e dimensão — previne DoS/OOM)
+    request_validation::validate_upsert_request(&payload)?;
+
+    // Valida o payload (schema: min 1 point, etc.)
     payload.validate().map_err(|e| {
         let mut messages = Vec::new();
         for (field, errors) in e.field_errors() {
@@ -141,9 +147,7 @@ pub async fn upsert_points(
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     let (upserted, batch_failed) = {
-        let mut collection = collection_arc.write().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire write lock: {}", e))
-        })?;
+        let mut collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
 
         // Fase 1: validação e construção dos pontos (dentro do mesmo lock)
         let mut points = Vec::new();
@@ -226,17 +230,13 @@ pub async fn delete_points(
     Path(name): Path<String>,
     Json(payload): Json<DeletePointsRequest>,
 ) -> ApiResult<Json<DeletePointsResponse>> {
-    if payload.ids.is_empty() {
-        return Err(ApiError::invalid_payload("ids cannot be empty"));
-    }
+    request_validation::validate_delete_batch_size(payload.ids.len())?;
 
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     let deleted = {
-        let mut collection = collection_arc.write().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire write lock: {}", e))
-        })?;
+        let mut collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
         collection.delete_points_batch(&payload.ids).map_err(ApiError::from)?
     };
 
@@ -246,14 +246,19 @@ pub async fn delete_points(
 /// Handler para POST /api/v1/collections/{name}/search
 ///
 /// Busca pontos similares a um vetor de consulta.
+/// Sub-operações são instrumentadas com spans para distributed tracing (validate_query, hnsw_search, hydrate_results).
+#[tracing::instrument(
+    name = "search_points",
+    skip(app_state, payload),
+    fields(collection = %name, limit = payload.limit)
+)]
 pub async fn search_points(
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<SearchPointsRequest>,
 ) -> ApiResult<Json<SearchPointsResponse>> {
-    if payload.limit == 0 {
-        return Err(ApiError::invalid_payload("limit must be greater than 0"));
-    }
+    request_validation::validate_search_limit(payload.limit)?;
+    request_validation::validate_vector_dimension(&payload.vector)?;
 
     let query_id = uuid::Uuid::new_v4().to_string();
     let start = Instant::now();
@@ -262,24 +267,27 @@ pub async fn search_points(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    let collection = collection_arc.read().map_err(|e| {
-        ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-    })?;
+    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
+    let _span = tracing::info_span!("validate_query").entered();
     collection.validate_dimension(&payload.vector)
-        .map_err(|e| ApiError::from(e))?;
+        .map_err(ApiError::from)?;
+    drop(_span);
 
     let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let search_start = Instant::now();
 
-    // Fase: busca
+    // Fase: busca (HNSW)
+    let _span = tracing::info_span!("hnsw_search").entered();
     let results = collection.search(&payload.vector, payload.limit)
-        .map_err(|e| ApiError::from(e))?;
+        .map_err(ApiError::from)?;
+    drop(_span);
 
     let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let hydrate_start = Instant::now();
 
     // Fase: hydrate (construir SearchResults + filtro)
+    let _span = tracing::info_span!("hydrate_results").entered();
     let search_results: Vec<ferres_db_core::SearchResult> = results
         .into_iter()
         .filter_map(|(id, score)| {
@@ -293,17 +301,17 @@ pub async fn search_points(
         })
         .collect();
 
-    // Aplica filtro de metadata se fornecido (v1: apenas equality)
+    // Aplica filtro de metadata se fornecido (Eq, Ne, In, Gt, Lt, Gte, Lte)
     let mut filtered_results = search_results;
-    if let Some(filter) = &payload.filter {
-        if let Some(filter_obj) = filter.as_object() {
+    if let Some(filter_value) = &payload.filter {
+        let filter = match MetadataFilter::from_json(filter_value.clone()) {
+            Ok(f) => f,
+            Err(e) => return Err(ApiError::invalid_payload(e.to_string())),
+        };
+        if !filter.is_empty() {
             filtered_results = filtered_results
                 .into_iter()
-                .filter(|result| {
-                    filter_obj.iter().all(|(key, value)| {
-                        result.metadata.get(key) == Some(value)
-                    })
-                })
+                .filter(|result| filter.matches(&result.metadata))
                 .collect();
         }
     }
@@ -316,6 +324,7 @@ pub async fn search_points(
             metadata: r.metadata,
         })
         .collect();
+    drop(_span);
 
     let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let results_count = results.len();
@@ -408,14 +417,19 @@ pub async fn search_points(
 ///
 /// Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF.
 /// Requer que a coleção tenha sido criada com BM25 habilitado.
+/// Sub-operações instrumentadas: validate_query, hybrid_search, hydrate_results.
+#[tracing::instrument(
+    name = "search_hybrid",
+    skip(app_state, payload),
+    fields(collection = %name, limit = payload.limit, alpha = payload.alpha)
+)]
 pub async fn search_hybrid(
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<HybridSearchPointsRequest>,
 ) -> ApiResult<Json<SearchPointsResponse>> {
-    if payload.limit == 0 {
-        return Err(ApiError::invalid_payload("limit must be greater than 0"));
-    }
+    request_validation::validate_search_limit(payload.limit)?;
+    request_validation::validate_vector_dimension(&payload.query_vector)?;
     if !(0.0..=1.0).contains(&payload.alpha) {
         return Err(ApiError::invalid_payload("alpha must be between 0 and 1"));
     }
@@ -426,16 +440,17 @@ pub async fn search_hybrid(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    let collection = collection_arc.read().map_err(|e| {
-        ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-    })?;
+    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
+    let _span = tracing::info_span!("validate_query").entered();
     collection.validate_dimension(&payload.query_vector)
         .map_err(ApiError::from)?;
+    drop(_span);
 
     let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let search_start = Instant::now();
 
+    let _span = tracing::info_span!("hybrid_search").entered();
     let hybrid_results = collection.hybrid_search(
         &payload.query_vector,
         &payload.query_text,
@@ -449,10 +464,12 @@ pub async fn search_hybrid(
             ApiError::from(e)
         }
     })?;
+    drop(_span);
 
     let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let hydrate_start = Instant::now();
 
+    let _span = tracing::info_span!("hydrate_results").entered();
     let results: Vec<SearchResult> = hybrid_results
         .into_iter()
         .filter_map(|(id, score)| {
@@ -464,6 +481,7 @@ pub async fn search_hybrid(
             })
         })
         .collect();
+    drop(_span);
 
     let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -553,9 +571,7 @@ pub async fn get_point(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    let collection = collection_arc.read().map_err(|e| {
-        ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-    })?;
+    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
     // Busca o ponto
     let point = collection.get(&id)

@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::api_err;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -98,9 +99,7 @@ pub async fn get_collection_stats(
 
     // Obtém número de pontos
     let num_points = {
-        let collection = collection_arc.read().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-        })?;
+        let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
         collection.len()
     };
 

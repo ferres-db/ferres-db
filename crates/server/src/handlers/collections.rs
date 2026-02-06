@@ -13,6 +13,7 @@ use std::sync::RwLock;
 
 use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage};
 
+use crate::api_err;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -164,18 +165,14 @@ pub async fn create_collection(
     // Salva no disco
     let collection_dir = app_state.config.storage_path.join("collections").join(&payload.name);
     {
-        let collection = collection_arc.read().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-        })?;
+        let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
         FileStorage::save_collection(&collection, &collection_dir)
-            .map_err(|e| ApiError::from(e))?;
+            .map_err(ApiError::from)?;
     }
 
     // Marca como limpa após salvar
     {
-        let collection = collection_arc.write().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire write lock: {}", e))
-        })?;
+        let collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
         collection.mark_clean();
     }
 
@@ -202,9 +199,7 @@ pub async fn list_collections(
         let name = entry.key();
         let collection_arc = entry.value();
 
-        let collection = collection_arc.read().map_err(|e| {
-            ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-        })?;
+        let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
         let config = collection.config();
         let num_points = collection.len();
@@ -242,9 +237,7 @@ pub async fn get_collection(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    let collection = collection_arc.read().map_err(|e| {
-        ApiError::internal_error(format!("failed to acquire read lock: {}", e))
-    })?;
+    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
     let config = collection.config();
     let num_points = collection.len();
@@ -295,12 +288,10 @@ pub async fn delete_collection(
     // Remove do disco
     let collection_dir = app_state.config.storage_path.join("collections").join(&name);
     if collection_dir.exists() {
-        std::fs::remove_dir_all(&collection_dir).map_err(|e| {
-            ApiError::internal_error(format!(
-                "failed to delete collection directory: {}",
-                e
-            ))
-        })?;
+        api_err!(
+            std::fs::remove_dir_all(&collection_dir),
+            "failed to delete collection directory"
+        )?;
     }
 
     // Drop da coleção (libera recursos)

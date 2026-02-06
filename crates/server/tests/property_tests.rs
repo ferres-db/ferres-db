@@ -82,6 +82,75 @@ async fn setup_server() -> TestServer {
     }
 }
 
+/// Cria uma coleção via API (POST /api/v1/collections).
+async fn create_collection(
+    client: &reqwest::Client,
+    base_url: &str,
+    name: &str,
+    dimension: usize,
+) -> bool {
+    let url = format!("{}/api/v1/collections", base_url);
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "name": name,
+            "dimension": dimension,
+            "distance": "Euclidean"
+        }))
+        .send()
+        .await
+        .unwrap();
+    resp.status() == reqwest::StatusCode::CREATED
+}
+
+/// Gera um ponto determinístico para testes de propriedade (id e vetor de dimensão fixa).
+fn create_random_point(i: usize, dimension: usize) -> serde_json::Value {
+    let vector: Vec<f32> = (0..dimension)
+        .map(|j| (i * dimension + j) as f32)
+        .collect();
+    serde_json::json!({
+        "id": format!("point-{}", i),
+        "vector": vector,
+        "metadata": { "index": i }
+    })
+}
+
+/// Insere um ponto na coleção (POST /api/v1/collections/{name}/points).
+async fn upsert_point(
+    client: &reqwest::Client,
+    base_url: &str,
+    collection_name: &str,
+    point: serde_json::Value,
+) {
+    let url = format!("{}/api/v1/collections/{}/points", base_url, collection_name);
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "points": [point] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "upsert should succeed"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["upserted"], 1, "one point should be upserted");
+}
+
+/// Retorna o número de pontos da coleção (GET /api/v1/collections/{name}).
+async fn get_collection_stats(
+    client: &reqwest::Client,
+    base_url: &str,
+    name: &str,
+) -> usize {
+    let url = format!("{}/api/v1/collections/{}", base_url, name);
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["num_points"].as_u64().unwrap() as usize
+}
+
 // ─── Custom Arbitrary Types ─────────────────────────────────────────────
 
 /// Nome de coleção válido para testes de propriedade.
@@ -276,6 +345,88 @@ fn quickcheck_list_collections_count() {
     quickcheck::QuickCheck::new()
         .tests(QUICKCHECK_TESTS)
         .quickcheck(prop_list_collections_count_impl as fn(Vec<ValidCollectionName>) -> bool);
+}
+
+/// Propriedade (quickcheck): upserts concorrentes em múltiplas coleções são seguros;
+/// cada coleção termina com exatamente points_per_thread pontos.
+fn prop_concurrent_upserts_are_safe_impl(
+    collections: Vec<ValidCollectionName>,
+    points_per_thread: usize,
+) -> quickcheck::TestResult {
+    if points_per_thread > 100 {
+        return quickcheck::TestResult::discard();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let collections: Vec<String> = collections
+        .into_iter()
+        .filter(|n| seen.insert(n.0.clone()))
+        .take(12)
+        .map(|n| n.0)
+        .collect();
+    if collections.is_empty() {
+        return quickcheck::TestResult::discard();
+    }
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(prop_concurrent_upserts_are_safe_async(
+        collections,
+        points_per_thread,
+    ));
+    if result {
+        quickcheck::TestResult::passed()
+    } else {
+        quickcheck::TestResult::failed()
+    }
+}
+
+async fn prop_concurrent_upserts_are_safe_async(
+    collections: Vec<String>,
+    points_per_thread: usize,
+) -> bool {
+    let server = setup_server().await;
+    let client = Arc::new(server.client.clone());
+    let base_url = Arc::new(server.base_url.clone());
+
+    for name in &collections {
+        if !create_collection(client.as_ref(), &*base_url, name, 128).await {
+            return false;
+        }
+    }
+
+    let handles: Vec<_> = collections
+        .iter()
+        .map(|name| {
+            let client = Arc::clone(&client);
+            let base_url = Arc::clone(&base_url);
+            let name = name.clone();
+            tokio::spawn(async move {
+                for i in 0..points_per_thread {
+                    let point = create_random_point(i, 128);
+                    upsert_point(client.as_ref(), &*base_url, &name, point).await;
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        if h.await.is_err() {
+            return false;
+        }
+    }
+
+    for name in &collections {
+        let num_points = get_collection_stats(client.as_ref(), &*base_url, name).await;
+        if num_points != points_per_thread {
+            return false;
+        }
+    }
+    true
+}
+
+#[test]
+fn quickcheck_concurrent_upserts_are_safe() {
+    quickcheck::QuickCheck::new()
+        .tests(QUICKCHECK_TESTS)
+        .quickcheck(prop_concurrent_upserts_are_safe_impl as fn(Vec<ValidCollectionName>, usize) -> quickcheck::TestResult);
 }
 
 // ─── Property Tests (invariants, fixed iterations) ───────────────────────

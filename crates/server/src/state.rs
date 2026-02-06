@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -312,6 +313,8 @@ pub struct AppState {
     shutdown_notify: Arc<Notify>,
     /// Flag indicando se o servidor está em shutdown.
     pub is_shutting_down: Arc<AtomicBool>,
+    /// Instante de inicialização do servidor (para health check uptime).
+    pub started_at: Arc<Instant>,
 }
 
 impl AppState {
@@ -416,6 +419,7 @@ impl AppState {
             config,
             shutdown_notify: Arc::new(Notify::new()),
             is_shutting_down: Arc::new(AtomicBool::new(false)),
+            started_at: Arc::new(Instant::now()),
         })
     }
 

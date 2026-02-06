@@ -3,6 +3,16 @@
 //! Define tipos de erro HTTP customizados e conversões de erros do core
 //! para respostas HTTP apropriadas.
 
+/// Converte um `Result` em `ApiError::InternalError` com contexto, para uso uniforme nos handlers.
+///
+/// Uso: `let guard = api_err!(rwlock.read(), "failed to acquire read lock")?;`
+#[macro_export]
+macro_rules! api_err {
+    ($expr:expr, $context:expr) => {
+        $expr.map_err(|e| $crate::error::ApiError::internal_error(format!("{}: {}", $context, e)))
+    };
+}
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -42,6 +52,11 @@ pub enum ApiError {
     },
     /// Erro interno do servidor.
     InternalError {
+        /// Mensagem de erro.
+        message: String,
+    },
+    /// Perfil de query não encontrado (debug endpoint).
+    QueryProfileNotFound {
         /// Mensagem de erro.
         message: String,
     },
@@ -93,7 +108,9 @@ impl ApiError {
     /// Retorna o código de status HTTP correspondente.
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::CollectionNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::CollectionNotFound { .. } | Self::QueryProfileNotFound { .. } => {
+                StatusCode::NOT_FOUND
+            }
             Self::CollectionAlreadyExists { .. } => StatusCode::CONFLICT,
             Self::InvalidDimension { .. } | Self::InvalidPayload { .. } => {
                 StatusCode::BAD_REQUEST
@@ -110,6 +127,7 @@ impl ApiError {
             Self::InvalidDimension { .. } => "invalid_dimension",
             Self::InvalidPayload { .. } => "invalid_payload",
             Self::InternalError { .. } => "internal_error",
+            Self::QueryProfileNotFound { .. } => "query_profile_not_found",
         }
     }
 
@@ -121,6 +139,7 @@ impl ApiError {
             Self::InvalidDimension { message } => message,
             Self::InvalidPayload { message } => message,
             Self::InternalError { message } => message,
+            Self::QueryProfileNotFound { message } => message,
         }
     }
 }

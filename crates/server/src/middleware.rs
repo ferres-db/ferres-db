@@ -1,6 +1,9 @@
 //! # Middleware — middlewares customizados
 //!
 //! Middlewares para logging estruturado, métricas, rate limiting, etc.
+//!
+//! Validação de tamanho de payload (batch, dimensão de vetor) é centralizada em
+//! [crate::request_validation] e aplicada nos handlers de points antes do processamento.
 
 use axum::{
     extract::Request,
@@ -21,18 +24,19 @@ use uuid::Uuid;
 
 use crate::metrics::{HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_MS, normalize_endpoint};
 
-/// Middleware de logging estruturado para todas as requisições HTTP.
+/// Middleware de logging estruturado e raiz do distributed tracing para cada requisição.
+///
+/// Cria o span pai `http_request` para toda a requisição. Handlers (ex.: `search_points`)
+/// criam spans filhos (`validate_query`, `hnsw_search`, `hydrate_results`), permitindo
+/// correlacionar logs e medir latência por sub-operação. Com OpenTelemetry habilitado,
+/// o mesmo contexto propaga trace_id/span_id para backends (Jaeger, etc.).
 ///
 /// Loga em formato JSON estruturado com:
-/// - request_id: UUID único para cada requisição
-/// - método HTTP
-/// - path da requisição
-/// - collection: nome da coleção (se aplicável)
-/// - operation: tipo de operação
-/// - status code da resposta
-/// - duration_ms: latência em milissegundos
+/// - request_id: UUID único para cada requisição (correlação entre logs)
+/// - método HTTP, path, collection, operation
+/// - status code da resposta, duration_ms
 pub async fn request_logger(req: Request, next: Next) -> Response {
-    // Gera request_id único
+    // Gera request_id único para correlação entre logs e traces
     let request_id = Uuid::new_v4().to_string();
     
     // Extrai informações da requisição
@@ -43,7 +47,7 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
     // Extrai collection e operation do path
     let (collection, operation) = extract_collection_and_operation(&path);
     
-    // Adiciona request_id ao contexto do tracing
+    // Span pai: toda a requisição e sub-operações ficam como filhos (distributed tracing)
     let span = tracing::span!(
         tracing::Level::INFO,
         "http_request",

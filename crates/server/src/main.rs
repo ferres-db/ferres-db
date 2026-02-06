@@ -34,9 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&log_level));
 
-    // Layer para arquivo (JSON)
+    // Layer para arquivo (JSON); clone para poder usar também no branch OTel
     let file_layer = fmt::layer()
-        .with_writer(non_blocking_appender)
+        .with_writer(non_blocking_appender.clone())
         .json()
         .with_filter(env_filter.clone());
 
@@ -45,11 +45,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stdout)
         .with_filter(EnvFilter::new("info"));
 
-    // Inicializa o subscriber
+    // Inicializa o subscriber (com layer OTel quando feature "otel" e init ok)
+    #[cfg(not(feature = "otel"))]
     Registry::default()
         .with(file_layer)
         .with(console_layer)
         .init();
+
+    #[cfg(feature = "otel")]
+    {
+        match ferres_db_server::tracing_otel::init_otel_tracing() {
+            Ok((otel_layer, otel_provider)) => {
+                info!("OpenTelemetry tracing enabled (OTLP)");
+                let _otel_provider = otel_provider; // mantém vivo para exportar spans
+                Registry::default()
+                    .with(otel_layer)
+                    .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
+                    .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                    .init();
+            }
+            Err(e) => {
+                warn!(error = %e, "OpenTelemetry init failed, continuing without OTLP export");
+                Registry::default()
+                    .with(file_layer)
+                    .with(console_layer)
+                    .init();
+            }
+        }
+    }
 
     // Mantém o guard vivo para garantir que logs sejam escritos
     // O guard precisa ser mantido durante toda a execução do programa

@@ -55,7 +55,7 @@ pub use error::FerresError;
 pub use point::Point;
 pub use bm25::BM25Index;
 pub use search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex};
-pub use storage::{CollectionMeta, DiskStorage, FileStorage};
+pub use storage::{CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker};
 pub use wal::{Wal, WalEntry, WalOperation, recover_collection};
 
 // MetadataFilter e SearchResult já são públicos e definidos neste módulo
@@ -76,12 +76,75 @@ pub struct SearchResult {
     pub vector: Option<Vec<f32>>,
 }
 
+// ─── MetadataCondition (Fase 1: operadores) ────────────────────────────
+
+/// Condição sobre um campo de metadata.
+///
+/// Suporta igualdade, desigualdade, pertinência em lista e comparações
+/// numéricas. Múltiplas condições são combinadas com AND.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MetadataCondition {
+    /// Igualdade: campo == valor.
+    Eq(String, serde_json::Value),
+    /// Desigualdade: campo != valor (campo ausente também satisfaz).
+    Ne(String, serde_json::Value),
+    /// Pertinência: valor do campo está na lista.
+    In(String, Vec<serde_json::Value>),
+    /// Maior que (numérico).
+    Gt(String, f64),
+    /// Menor que (numérico).
+    Lt(String, f64),
+    /// Maior ou igual (numérico).
+    Gte(String, f64),
+    /// Menor ou igual (numérico).
+    Lte(String, f64),
+}
+
+impl MetadataCondition {
+    /// Avalia a condição contra o metadata de um ponto.
+    pub fn matches(&self, metadata: &serde_json::Value) -> bool {
+        match self {
+            MetadataCondition::Eq(key, expected) => {
+                metadata.get(key) == Some(expected)
+            }
+            MetadataCondition::Ne(key, expected) => {
+                metadata.get(key) != Some(expected)
+            }
+            MetadataCondition::In(key, values) => metadata
+                .get(key)
+                .map(|v| values.iter().any(|x| x == v))
+                .unwrap_or(false),
+            MetadataCondition::Gt(key, threshold) => metadata
+                .get(key)
+                .and_then(|v| v.as_f64())
+                .map(|n| n > *threshold)
+                .unwrap_or(false),
+            MetadataCondition::Lt(key, threshold) => metadata
+                .get(key)
+                .and_then(|v| v.as_f64())
+                .map(|n| n < *threshold)
+                .unwrap_or(false),
+            MetadataCondition::Gte(key, threshold) => metadata
+                .get(key)
+                .and_then(|v| v.as_f64())
+                .map(|n| n >= *threshold)
+                .unwrap_or(false),
+            MetadataCondition::Lte(key, threshold) => metadata
+                .get(key)
+                .and_then(|v| v.as_f64())
+                .map(|n| n <= *threshold)
+                .unwrap_or(false),
+        }
+    }
+}
+
 // ─── MetadataFilter ────────────────────────────────────────────────────
 
 /// Filtro de metadata para buscas vetoriais.
 ///
-/// Suporta apenas equality checks (v1). Múltiplos campos são combinados
-/// com lógica AND (todos os campos devem corresponder).
+/// Suporta operadores: `$eq`, `$ne`, `$in`, `$gt`, `$lt`, `$gte`, `$lte`.
+/// Formato simples `{"field": value}` é tratado como igualdade.
+/// Múltiplos campos são combinados com lógica AND.
 ///
 /// # Exemplo
 ///
@@ -89,60 +152,110 @@ pub struct SearchResult {
 /// use ferres_db_core::MetadataFilter;
 /// use serde_json::json;
 ///
-/// // Filtra pontos onde category == "tech" AND status == "active"
-/// let filter = MetadataFilter::from_json(json!({
-///     "category": "tech",
-///     "status": "active"
+/// // Igualdade (formato curto)
+/// let f = MetadataFilter::from_json(json!({ "category": "tech" })).unwrap();
+///
+/// // Operadores
+/// let f = MetadataFilter::from_json(json!({
+///     "price": { "$gte": 10, "$lte": 100 },
+///     "status": { "$in": ["active", "pending"] }
 /// })).unwrap();
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataFilter {
-    /// Mapa de campo -> valor esperado (equality).
-    /// Campos ausentes ou com valores diferentes são filtrados.
-    conditions: std::collections::HashMap<String, serde_json::Value>,
+    /// Condições (AND): todas devem ser satisfeitas.
+    conditions: Vec<MetadataCondition>,
 }
 
 impl MetadataFilter {
     /// Cria um filtro a partir de um objeto JSON.
     ///
-    /// O JSON deve ser um objeto onde cada chave é um campo de metadata
-    /// e o valor é o valor esperado (equality check).
-    ///
-    /// # Exemplo
-    ///
-    /// ```rust,no_run
-    /// use ferres_db_core::MetadataFilter;
-    /// use serde_json::json;
-    ///
-    /// let filter = MetadataFilter::from_json(json!({
-    ///     "category": "tech"
-    /// })).unwrap();
-    /// ```
+    /// - Objeto: cada chave é um campo; valor pode ser direto (equality) ou
+    ///   um objeto com operadores: `$eq`, `$ne`, `$in`, `$gt`, `$lt`, `$gte`, `$lte`.
+    /// - `null`: filtro vazio (não filtra).
     pub fn from_json(value: serde_json::Value) -> Result<Self, FerresError> {
         match value {
             serde_json::Value::Object(map) => {
-                let conditions: std::collections::HashMap<String, serde_json::Value> = map
-                    .into_iter()
-                    .map(|(k, v)| (k, v))
-                    .collect();
+                let mut conditions = Vec::new();
+                for (key, val) in map {
+                    Self::parse_field_conditions(&key, val, &mut conditions)?;
+                }
                 Ok(Self { conditions })
             }
-            serde_json::Value::Null => {
-                // Filtro vazio = sem filtro
-                Ok(Self {
-                    conditions: std::collections::HashMap::new(),
-                })
-            }
+            serde_json::Value::Null => Ok(Self {
+                conditions: Vec::new(),
+            }),
             _ => Err(FerresError::InvalidVector {
                 reason: "filter must be a JSON object or null".to_string(),
             }),
         }
     }
 
+    /// Parseia o valor de um campo: ou um único valor (Eq) ou um objeto com $op.
+    fn parse_field_conditions(
+        field: &str,
+        value: serde_json::Value,
+        out: &mut Vec<MetadataCondition>,
+    ) -> Result<(), FerresError> {
+        if let Some(obj) = value.as_object() {
+            for (op, v) in obj {
+                match op.as_str() {
+                    "$eq" => out.push(MetadataCondition::Eq(field.to_string(), v.clone())),
+                    "$ne" => out.push(MetadataCondition::Ne(field.to_string(), v.clone())),
+                    "$in" => {
+                        let arr = v
+                            .as_array()
+                            .ok_or_else(|| FerresError::InvalidVector {
+                                reason: format!("filter.{}: $in must be an array", field),
+                            })?
+                            .clone();
+                        out.push(MetadataCondition::In(field.to_string(), arr));
+                    }
+                    "$gt" => {
+                        let n = Self::as_f64(v).ok_or_else(|| FerresError::InvalidVector {
+                            reason: format!("filter.{}: $gt must be a number", field),
+                        })?;
+                        out.push(MetadataCondition::Gt(field.to_string(), n));
+                    }
+                    "$lt" => {
+                        let n = Self::as_f64(v).ok_or_else(|| FerresError::InvalidVector {
+                            reason: format!("filter.{}: $lt must be a number", field),
+                        })?;
+                        out.push(MetadataCondition::Lt(field.to_string(), n));
+                    }
+                    "$gte" => {
+                        let n = Self::as_f64(v).ok_or_else(|| FerresError::InvalidVector {
+                            reason: format!("filter.{}: $gte must be a number", field),
+                        })?;
+                        out.push(MetadataCondition::Gte(field.to_string(), n));
+                    }
+                    "$lte" => {
+                        let n = Self::as_f64(v).ok_or_else(|| FerresError::InvalidVector {
+                            reason: format!("filter.{}: $lte must be a number", field),
+                        })?;
+                        out.push(MetadataCondition::Lte(field.to_string(), n));
+                    }
+                    _ => {
+                        return Err(FerresError::InvalidVector {
+                            reason: format!("filter.{}: unknown operator '{}'", field, op),
+                        });
+                    }
+                }
+            }
+        } else {
+            out.push(MetadataCondition::Eq(field.to_string(), value));
+        }
+        Ok(())
+    }
+
+    fn as_f64(v: &serde_json::Value) -> Option<f64> {
+        v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+    }
+
     /// Cria um filtro vazio (sem condições, não filtra nada).
     pub fn empty() -> Self {
         Self {
-            conditions: std::collections::HashMap::new(),
+            conditions: Vec::new(),
         }
     }
 
@@ -151,22 +264,19 @@ impl MetadataFilter {
         self.conditions.is_empty()
     }
 
+    /// Retorna as condições do filtro (para inspeção em testes).
+    pub fn conditions(&self) -> &[MetadataCondition] {
+        &self.conditions
+    }
+
     /// Verifica se um ponto passa no filtro.
     ///
     /// Retorna `true` se o ponto atende a todas as condições (AND lógico).
-    /// Campos ausentes no metadata são tratados como não correspondentes.
-    fn matches(&self, metadata: &serde_json::Value) -> bool {
+    pub fn matches(&self, metadata: &serde_json::Value) -> bool {
         if self.is_empty() {
             return true;
         }
-
-        // Todos os campos do filtro devem corresponder
-        self.conditions.iter().all(|(key, expected_value)| {
-            match metadata.get(key) {
-                Some(actual_value) => actual_value == expected_value,
-                None => false, // Campo não existe = não corresponde
-            }
-        })
+        self.conditions.iter().all(|c| c.matches(metadata))
     }
 }
 
@@ -208,6 +318,7 @@ pub struct VectorDB {
     collections: HashMap<String, Collection>,
     wals: HashMap<String, wal::Wal>,
     storage_path: PathBuf,
+    storage_circuit_breaker: StorageCircuitBreaker,
 }
 
 impl VectorDB {
@@ -239,6 +350,7 @@ impl VectorDB {
             collections: HashMap::new(),
             wals: HashMap::new(),
             storage_path,
+            storage_circuit_breaker: StorageCircuitBreaker::new(),
         };
 
         // Carrega coleções existentes do disco
@@ -890,7 +1002,10 @@ impl VectorDB {
             let path = entry.path();
 
             if path.is_dir() {
-                match wal::recover_collection(&path) {
+                match self
+                    .storage_circuit_breaker
+                    .call(|| wal::recover_collection(&path))
+                {
                     Ok(Some(collection)) => {
                         let name = collection.name().to_string();
 
@@ -902,7 +1017,9 @@ impl VectorDB {
 
                         // Se o WAL tinha entradas, consolida com snapshot + truncate
                         if wal_handle.ops_since_snapshot() > 0 {
-                            FileStorage::save_collection(&collection, &path)?;
+                            self.storage_circuit_breaker.call(|| {
+                                FileStorage::save_collection(&collection, &path)
+                            })?;
                             wal_handle.truncate_after_snapshot()?;
                             info!(collection = %name, "post-recovery snapshot created");
                         }
@@ -932,7 +1049,7 @@ impl VectorDB {
         Ok(())
     }
 
-    /// Salva uma coleção no disco.
+    /// Salva uma coleção no disco (protegido por circuit breaker).
     fn save_collection(&self, name: &str) -> Result<(), FerresError> {
         let col = self
             .collections
@@ -940,7 +1057,8 @@ impl VectorDB {
             .ok_or_else(|| FerresError::CollectionNotFound(name.to_string()))?;
 
         let collection_dir = self.storage_path.join("collections").join(name);
-        FileStorage::save_collection(col, &collection_dir)?;
+        self.storage_circuit_breaker
+            .call(|| FileStorage::save_collection(col, &collection_dir))?;
 
         Ok(())
     }
@@ -981,15 +1099,9 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(filter.conditions.len(), 2);
-        assert_eq!(
-            filter.conditions.get("category"),
-            Some(&json!("tech"))
-        );
-        assert_eq!(
-            filter.conditions.get("status"),
-            Some(&json!("active"))
-        );
+        assert_eq!(filter.conditions().len(), 2);
+        assert!(filter.matches(&json!({"category": "tech", "status": "active"})));
+        assert!(!filter.matches(&json!({"category": "tech", "status": "inactive"})));
     }
 
     #[test]
@@ -1032,6 +1144,42 @@ mod tests {
         // No match: um campo não corresponde
         let metadata5 = json!({"category": "tech", "status": "inactive"});
         assert!(!filter2.matches(&metadata5));
+    }
+
+    #[test]
+    fn test_metadata_filter_operators_ne_in_gt_lt() {
+        // $ne: campo != valor (campo ausente também satisfaz)
+        let f_ne = MetadataFilter::from_json(json!({ "status": { "$ne": "inactive" } })).unwrap();
+        assert!(f_ne.matches(&json!({"status": "active"})));
+        assert!(f_ne.matches(&json!({"other": "x"}))); // ausente = não igual
+        assert!(!f_ne.matches(&json!({"status": "inactive"})));
+
+        // $in: valor na lista
+        let f_in = MetadataFilter::from_json(json!({ "cat": { "$in": ["a", "b"] } })).unwrap();
+        assert!(f_in.matches(&json!({"cat": "a"})));
+        assert!(f_in.matches(&json!({"cat": "b"})));
+        assert!(!f_in.matches(&json!({"cat": "c"})));
+        assert!(!f_in.matches(&json!({})));
+
+        // $gt, $lt, $gte, $lte
+        let f_gt = MetadataFilter::from_json(json!({ "price": { "$gt": 10 } })).unwrap();
+        assert!(f_gt.matches(&json!({"price": 11})));
+        assert!(!f_gt.matches(&json!({"price": 10})));
+        assert!(!f_gt.matches(&json!({"price": 9})));
+
+        let f_lt = MetadataFilter::from_json(json!({ "price": { "$lt": 100 } })).unwrap();
+        assert!(f_lt.matches(&json!({"price": 99})));
+        assert!(!f_lt.matches(&json!({"price": 100})));
+
+        let f_range = MetadataFilter::from_json(json!({
+            "price": { "$gte": 10, "$lte": 20 }
+        }))
+        .unwrap();
+        assert!(f_range.matches(&json!({"price": 10})));
+        assert!(f_range.matches(&json!({"price": 15})));
+        assert!(f_range.matches(&json!({"price": 20})));
+        assert!(!f_range.matches(&json!({"price": 9})));
+        assert!(!f_range.matches(&json!({"price": 21})));
     }
 
     #[test]

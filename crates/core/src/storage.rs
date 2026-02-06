@@ -14,17 +14,148 @@
 //! - **WAL (Write-Ahead Log)**: operações são registradas em `wal.log`
 //!   antes da mutação em memória. A cada 1000 operações, um snapshot
 //!   completo é criado e o WAL é truncado. Ver módulo [`crate::wal`].
+//!
+//! ## Circuit Breaker para Disk I/O
+//!
+//! [`StorageCircuitBreaker`] protege contra falhas repetidas de disco (ex.: disco cheio).
+//! Evita que saves falhem silenciosamente: após N falhas o circuito abre e retorna erro
+//! explícito até que um timeout permita nova tentativa (HalfOpen).
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::collection::{Collection, CollectionConfig};
 use crate::error::FerresError;
 use crate::point::Point;
 use crate::search::{DistanceMetric, HnswConfig};
+
+// ─── StorageCircuitBreaker ─────────────────────────────────────────────
+
+/// Estados do circuit breaker para I/O em disco.
+pub const CB_CLOSED: u8 = 0;
+pub const CB_OPEN: u8 = 1;
+pub const CB_HALF_OPEN: u8 = 2;
+
+/// Circuit breaker para operações de storage (proteção contra disco cheio e falhas repetidas).
+///
+/// - **Closed**: operações passam; falhas incrementam contador.
+/// - **Open**: após `failure_threshold` falhas, retorna erro imediato sem chamar disco.
+/// - **HalfOpen**: após `reset_timeout_secs`, permite uma tentativa; sucesso fecha, falha reabre.
+#[derive(Debug)]
+pub struct StorageCircuitBreaker {
+    failure_count: AtomicU64,
+    last_failure: AtomicU64,
+    state: AtomicU8,
+    /// Número de falhas consecutivas que abrem o circuito.
+    failure_threshold: u64,
+    /// Segundos após abertura antes de tentar novamente (HalfOpen).
+    reset_timeout_secs: u64,
+}
+
+impl StorageCircuitBreaker {
+    /// Cria um circuit breaker com limites padrão (5 falhas, 60s de timeout).
+    pub fn new() -> Self {
+        Self::with_config(5, 60)
+    }
+
+    /// Cria um circuit breaker com threshold e timeout configuráveis.
+    pub fn with_config(failure_threshold: u64, reset_timeout_secs: u64) -> Self {
+        Self {
+            failure_count: AtomicU64::new(0),
+            last_failure: AtomicU64::new(0),
+            state: AtomicU8::new(CB_CLOSED),
+            failure_threshold,
+            reset_timeout_secs,
+        }
+    }
+
+    /// Executa a operação de I/O protegida pelo circuit breaker.
+    ///
+    /// Se o circuito estiver **Open**, retorna `Err(Storage("circuit breaker open"))` sem executar `f`.
+    /// Se **Closed** ou **HalfOpen**, executa `f` e atualiza estado em caso de sucesso/falha.
+    pub fn call<F, T>(&self, f: F) -> Result<T, FerresError>
+    where
+        F: FnOnce() -> Result<T, FerresError>,
+    {
+        let state = self.state.load(Ordering::Acquire);
+
+        if state == CB_OPEN {
+            if self.should_attempt_reset() {
+                self.state.store(CB_HALF_OPEN, Ordering::Release);
+                // Continua para executar f() abaixo
+            } else {
+                warn!("storage circuit breaker open — rejecting call");
+                return Err(FerresError::Storage("circuit breaker open".into()));
+            }
+        }
+
+        match f() {
+            Ok(v) => {
+                self.on_success();
+                Ok(v)
+            }
+            Err(e) => {
+                self.on_failure();
+                Err(e)
+            }
+        }
+    }
+
+    fn should_attempt_reset(&self) -> bool {
+        let last = self.last_failure.load(Ordering::Acquire);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        last.saturating_add(self.reset_timeout_secs) <= now
+    }
+
+    fn on_success(&self) {
+        self.failure_count.store(0, Ordering::Release);
+        self.state.store(CB_CLOSED, Ordering::Release);
+    }
+
+    fn on_failure(&self) {
+        let prev = self.failure_count.fetch_add(1, Ordering::AcqRel);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.last_failure.store(now, Ordering::Release);
+
+        if prev + 1 >= self.failure_threshold {
+            self.state.store(CB_OPEN, Ordering::Release);
+            warn!(
+                failure_count = prev + 1,
+                "storage circuit breaker opened after threshold"
+            );
+        } else if self.state.load(Ordering::Acquire) == CB_HALF_OPEN {
+            self.state.store(CB_OPEN, Ordering::Release);
+            warn!("storage circuit breaker re-opened after half-open failure");
+        }
+    }
+
+    /// Estado atual (0=Closed, 1=Open, 2=HalfOpen). Útil para métricas e debug.
+    pub fn state(&self) -> u8 {
+        self.state.load(Ordering::Acquire)
+    }
+
+    /// Contador de falhas consecutivas (zerado em sucesso).
+    pub fn failure_count(&self) -> u64 {
+        self.failure_count.load(Ordering::Acquire)
+    }
+}
+
+impl Default for StorageCircuitBreaker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Metadados persistidos de uma coleção.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,5 +726,49 @@ mod tests {
         assert!(!names.contains(&"col_a".to_string()));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ─── StorageCircuitBreaker tests ───────────────────────────────────
+
+    #[test]
+    fn circuit_breaker_passes_through_ok() {
+        let cb = StorageCircuitBreaker::with_config(3, 60);
+        let r = cb.call(|| Ok::<_, FerresError>(42));
+        assert!(matches!(r, Ok(42)));
+        assert_eq!(cb.state(), CB_CLOSED);
+        assert_eq!(cb.failure_count(), 0);
+    }
+
+    #[test]
+    fn circuit_breaker_opens_after_threshold() {
+        let cb = StorageCircuitBreaker::with_config(3, 60);
+
+        for _ in 0..3 {
+            let r = cb.call(|| Err::<(), _>(FerresError::Storage("disk full".into())));
+            assert!(r.is_err());
+        }
+        assert_eq!(cb.state(), CB_OPEN);
+        assert_eq!(cb.failure_count(), 3);
+
+        // Próxima chamada não executa o closure e retorna "circuit breaker open"
+        let mut called = false;
+        let r = cb.call(|| {
+            called = true;
+            Ok(())
+        });
+        assert!(!called, "closure must not run when circuit is open");
+        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("circuit breaker open"), "got: {msg}");
+    }
+
+    #[test]
+    fn circuit_breaker_resets_on_success() {
+        let cb = StorageCircuitBreaker::with_config(2, 60);
+        cb.call(|| Err::<(), _>(FerresError::Storage("fail".into()))).ok();
+        assert_eq!(cb.failure_count(), 1);
+        cb.call(|| Ok(())).unwrap();
+        assert_eq!(cb.state(), CB_CLOSED);
+        assert_eq!(cb.failure_count(), 0);
     }
 }
