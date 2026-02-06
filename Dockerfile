@@ -1,5 +1,6 @@
 # Stage 1: Builder
-FROM rust:1.75 AS builder
+# Rust 1.78+ required for Cargo.lock v4
+FROM rust:1.83 AS builder
 
 # Instala dependências do sistema necessárias para compilar
 RUN apt-get update && apt-get install -y \
