@@ -21,7 +21,7 @@ rand = "0.8"
 bincode = "1"
 md5 = "0.7"
 clap = { version = "4", features = ["derive"] }
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 rayon = "1.8"
 lru = "0.12"
 quickcheck = "1"

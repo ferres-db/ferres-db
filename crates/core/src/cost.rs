@@ -212,31 +212,31 @@ pub fn estimate_search_cost(params: &CostEstimateParams) -> QueryCostEstimate {
 
     if limit > 100 {
         recommendations.push(
-            "Considere reduzir limit para melhor performance".to_string(),
+            "Consider reducing limit for better performance".to_string(),
         );
     }
 
     if params.has_filter && params.collection_size > 100_000 {
         recommendations.push(
-            "Filtros em coleções grandes podem ser lentos. Considere pré-filtrar ou usar índices dedicados".to_string(),
+            "Filters on large collections can be slow. Consider pre-filtering or using dedicated indexes".to_string(),
         );
     }
 
     if params.dimension > 1024 {
         recommendations.push(
-            "Vetores de alta dimensão impactam latência. Considere redução de dimensionalidade (PCA, autoencoders)".to_string(),
+            "High-dimensional vectors impact latency. Consider dimensionality reduction (PCA, autoencoders)".to_string(),
         );
     }
 
     if params.ef_search > 200 {
         recommendations.push(
-            "ef_search alto aumenta precisão mas impacta latência. Avalie se o recall atual já é suficiente".to_string(),
+            "High ef_search improves recall but impacts latency. Evaluate whether current recall is already sufficient".to_string(),
         );
     }
 
     if params.collection_size > 1_000_000 && !params.has_filter {
         recommendations.push(
-            "Coleção com mais de 1M pontos: considere adicionar filtros para reduzir o espaço de busca".to_string(),
+            "Collection with over 1M points: consider adding filters to reduce the search space".to_string(),
         );
     }
 
@@ -428,7 +428,7 @@ mod tests {
 
         let estimate = estimate_search_cost(&params);
         assert!(
-            estimate.recommendations.iter().any(|r| r.contains("Filtros")),
+            estimate.recommendations.iter().any(|r| r.contains("Filters") || r.contains("filters")),
             "should warn about filters on large collections"
         );
     }
@@ -442,7 +442,7 @@ mod tests {
 
         let estimate = estimate_search_cost(&params);
         assert!(
-            estimate.recommendations.iter().any(|r| r.contains("dimensão") || r.contains("dimensionalidade")),
+            estimate.recommendations.iter().any(|r| r.contains("dimension") || r.contains("dimensionality")),
             "should recommend reducing dimension when > 1024"
         );
     }

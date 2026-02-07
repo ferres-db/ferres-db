@@ -85,9 +85,255 @@ export interface CreateApiKeyResponse {
   created_at: number;
 }
 
+// RBAC — Permissions (match backend permissions.rs)
+export type ResourceType = "all_collections" | "collection";
+export interface ResourceAllCollections {
+  type: "all_collections";
+}
+export interface ResourceCollection {
+  type: "collection";
+  name: string;
+}
+export type Resource = ResourceAllCollections | ResourceCollection;
+
+export type Action = "read" | "write" | "create" | "delete" | "admin";
+
+export interface MetadataRestriction {
+  field: string;
+  allowed_values: unknown[];
+}
+
+export interface Permission {
+  resource: Resource;
+  actions: Action[];
+  metadata_restriction?: MetadataRestriction;
+}
+
 export interface UserInfo {
   id: number;
   username: string;
   role: string;
   created_at: number;
+  permissions?: Permission[] | null;
+}
+
+// Audit (match backend audit.rs)
+export type AuditResultType = "success" | "denied" | "error";
+
+export interface AuditEntry {
+  timestamp: string; // RFC 3339
+  user_id: string;
+  action: string;
+  resource: string;
+  details: Record<string, unknown>;
+  result: AuditResultType;
+  ip_address?: string;
+  duration_ms?: number;
+}
+
+export interface AuditQueryParams {
+  user?: string;
+  action?: string;
+  resource?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+// ─── Quantization (SQ8) ───────────────────────────────────────────────
+
+export type ScalarType = "int8";
+
+export interface ScalarQuantizationConfig {
+  type: "scalar";
+  dtype: ScalarType;
+  always_ram?: boolean;
+  quantile?: number; // 0.0 – 1.0
+}
+
+export type QuantizationConfig = "none" | ScalarQuantizationConfig;
+
+// ─── Create Collection (extended) ─────────────────────────────────────
+
+export interface CreateCollectionRequest {
+  name: string;
+  dimension: number;
+  distance: string; // "Cosine" | "Euclidean" | "DotProduct"
+  quantization?: QuantizationConfig;
+  enable_bm25?: boolean;
+  bm25_text_field?: string;
+}
+
+// ─── Hybrid Search ────────────────────────────────────────────────────
+
+export interface HybridSearchRequest {
+  query_vector: number[];
+  query_text: string; // text query for BM25
+  limit?: number;
+  alpha?: number; // 0.0 (pure BM25) – 1.0 (pure vector)
+  filter?: Record<string, unknown>;
+}
+
+export interface HybridSearchResult {
+  results: SearchResult[];
+}
+
+// ─── Search Explain ───────────────────────────────────────────────────
+
+export interface SearchExplainRequest {
+  vector: number[];
+  limit?: number;
+  filter?: Record<string, unknown>;
+}
+
+export interface ExplainedResult {
+  id: string;
+  score: number;
+  distance_metric: string;
+  raw_distance: number;
+  score_breakdown: Record<string, number>;
+  filter_evaluation?: {
+    conditions: Array<{
+      field: string;
+      operator: string;
+      expected: unknown;
+      actual: unknown;
+      passed: boolean;
+    }>;
+    passed: boolean;
+  };
+  rank_before_filter: number;
+  rank_after_filter: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SearchExplainResponse {
+  query_vector_norm: number;
+  distance_metric: string;
+  candidates_scanned: number;
+  candidates_after_filter: number;
+  results: ExplainedResult[];
+  index_stats: {
+    total_points: number;
+    hnsw_layers: number;
+    ef_search_used: number;
+    tombstones_skipped: number;
+  };
+}
+
+// ─── Search Estimate ──────────────────────────────────────────────────
+
+export interface SearchEstimateRequest {
+  vector: number[];
+  limit?: number;
+  filter?: Record<string, unknown>;
+}
+
+export interface SearchEstimateResponse {
+  estimated_ms: number;
+  confidence_range: [number, number];
+  estimated_memory_bytes: number;
+  estimated_nodes_visited: number;
+  is_expensive: boolean;
+  recommendations: string[];
+  breakdown: {
+    index_scan_cost: number;
+    filter_cost: number;
+    hydration_cost: number;
+    network_overhead: number;
+  };
+  historical_latency?: {
+    p50_ms: number;
+    p95_ms: number;
+    p99_ms: number;
+    avg_ms: number;
+    total_queries: number;
+  };
+}
+
+// ─── WebSocket Messages ───────────────────────────────────────────────
+
+export type WsClientMessageType = "upsert" | "subscribe" | "ping";
+
+export interface WsUpsertMessage {
+  type: "upsert";
+  collection: string;
+  points: Array<{ id: string; vector: number[]; metadata?: Record<string, unknown> }>;
+}
+
+export interface WsSubscribeMessage {
+  type: "subscribe";
+  collection: string;
+  events?: Array<"upsert" | "delete">;
+}
+
+export interface WsPingMessage {
+  type: "ping";
+}
+
+export type WsClientMessage = WsUpsertMessage | WsSubscribeMessage | WsPingMessage;
+
+export interface WsAckMessage {
+  type: "ack";
+  upserted: number;
+  failed: number;
+  took_ms: number;
+}
+
+export interface WsEventMessage {
+  type: "event";
+  collection: string;
+  action: "upsert" | "delete";
+  point_ids: string[];
+  timestamp: number;
+}
+
+export interface WsErrorMessage {
+  type: "error";
+  message: string;
+  code: number;
+}
+
+export interface WsPongMessage {
+  type: "pong";
+}
+
+export type WsServerMessage = WsAckMessage | WsEventMessage | WsErrorMessage | WsPongMessage;
+
+// ─── Embedding Types ──────────────────────────────────────────────────
+
+export type EmbeddingProvider = "openai" | "gemini";
+
+export interface EmbeddingModelInfo {
+  id: string;
+  name: string;
+  dimensions: number;
+  provider: EmbeddingProvider;
+}
+
+export const EMBEDDING_MODELS: EmbeddingModelInfo[] = [
+  { id: "text-embedding-3-small", name: "text-embedding-3-small", dimensions: 1536, provider: "openai" },
+  { id: "text-embedding-3-large", name: "text-embedding-3-large", dimensions: 3072, provider: "openai" },
+  { id: "text-embedding-ada-002", name: "text-embedding-ada-002", dimensions: 1536, provider: "openai" },
+  { id: "text-embedding-004", name: "text-embedding-004", dimensions: 768, provider: "gemini" },
+];
+
+export interface EmbeddingResult {
+  vector: number[];
+  dimensions: number;
+  model: string;
+  provider: EmbeddingProvider;
+  took_ms: number;
+}
+
+// ─── WebSocket Log Entry (for UI) ────────────────────────────────────
+
+export type WsDirection = "sent" | "received";
+
+export interface WsLogEntry {
+  id: string;
+  timestamp: Date;
+  direction: WsDirection;
+  message: WsClientMessage | WsServerMessage;
+  raw?: string;
 }

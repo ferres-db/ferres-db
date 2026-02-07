@@ -262,6 +262,7 @@ mod tests {
             search_cache_size: 0,
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
+            quantization: Default::default(),
         };
         db.create_collection(config).unwrap();
     }
@@ -394,6 +395,7 @@ mod tests {
             search_cache_size: 0,
             enable_bm25: true,
             bm25_text_field: "text".to_string(),
+            quantization: Default::default(),
         };
         db.create_collection(config).unwrap();
 

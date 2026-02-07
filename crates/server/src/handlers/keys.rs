@@ -4,7 +4,8 @@ use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 
-use crate::auth::RequireEditor;
+use crate::auth::{AuthenticatedUser, RequireEditor};
+use crate::audit::{self, AuditResult};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -38,6 +39,7 @@ pub struct CreateKeyResponse {
 /// POST /api/v1/keys — cria uma nova chave (Editor ou Admin).
 pub async fn create_key(
     _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<AppState>,
     Json(body): Json<CreateKeyRequest>,
 ) -> ApiResult<Json<CreateKeyResponse>> {
@@ -53,6 +55,20 @@ pub async fn create_key(
 
     let (raw_key, id, key_prefix, created_at) = store.create_key(name).map_err(ApiError::from)?;
 
+    // Audit trail
+    let audit_logger = state.audit_logger.clone();
+    let username = user.username.clone();
+    let key_name = name.to_string();
+    let prefix_for_audit = key_prefix.clone();
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &username, "create_api_key", &format!("api_key:{}", key_name),
+            serde_json::json!({"key_prefix": prefix_for_audit}),
+            AuditResult::Success, None, None,
+        );
+        audit_logger.log(&entry).await;
+    });
+
     Ok(Json(CreateKeyResponse {
         id,
         name: name.to_string(),
@@ -65,6 +81,7 @@ pub async fn create_key(
 /// DELETE /api/v1/keys/:id — remove uma chave (Editor ou Admin).
 pub async fn delete_key(
     _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -74,5 +91,18 @@ pub async fn delete_key(
         .ok_or_else(|| ApiError::api_key_store_unavailable("API key store not configured"))?;
 
     store.delete_key(id).map_err(ApiError::from)?;
+
+    // Audit trail
+    let audit_logger = state.audit_logger.clone();
+    let username = user.username.clone();
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &username, "delete_api_key", &format!("api_key:{}", id),
+            serde_json::json!({}),
+            AuditResult::Success, None, None,
+        );
+        audit_logger.log(&entry).await;
+    });
+
     Ok(Json(serde_json::json!({ "deleted": true, "id": id })))
 }

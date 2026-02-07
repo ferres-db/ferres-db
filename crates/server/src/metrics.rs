@@ -44,6 +44,28 @@ lazy_static! {
         &["collection"],
         vec![10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0]
     ).unwrap();
+
+    // ─── WebSocket Metrics ──────────────────────────────────────────────
+
+    /// Gauge de conexões WebSocket ativas.
+    pub static ref WS_CONNECTIONS_ACTIVE: Gauge = register_gauge!(
+        "ws_connections_active",
+        "Number of active WebSocket connections"
+    ).unwrap();
+
+    /// Contador de mensagens WebSocket recebidas (por tipo).
+    pub static ref WS_MESSAGES_RECEIVED_TOTAL: CounterVec = register_counter_vec!(
+        "ws_messages_received_total",
+        "Total WebSocket messages received",
+        &["message_type"]
+    ).unwrap();
+
+    /// Contador de mensagens WebSocket enviadas (por tipo).
+    pub static ref WS_MESSAGES_SENT_TOTAL: CounterVec = register_counter_vec!(
+        "ws_messages_sent_total",
+        "Total WebSocket messages sent",
+        &["message_type"]
+    ).unwrap();
 }
 
 /// Retorna as métricas em formato Prometheus.

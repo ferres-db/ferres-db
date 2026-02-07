@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { collectionsApi } from '@/api/ferresdb';
+import type { QuantizationConfig } from '@/types';
 
 export const useCollections = () => {
   return useQuery({
@@ -20,8 +21,26 @@ export const useCreateCollection = () => {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ name, vectorSize, distanceMetric }: { name: string; vectorSize: number; distanceMetric?: string }) =>
-      collectionsApi.create(name, vectorSize, distanceMetric),
+    mutationFn: ({
+      name,
+      vectorSize,
+      distanceMetric,
+      quantization,
+      enable_bm25,
+      bm25_text_field,
+    }: {
+      name: string;
+      vectorSize: number;
+      distanceMetric?: string;
+      quantization?: QuantizationConfig;
+      enable_bm25?: boolean;
+      bm25_text_field?: string;
+    }) =>
+      collectionsApi.create(name, vectorSize, distanceMetric, {
+        quantization,
+        enable_bm25,
+        bm25_text_field,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['collections'] });
     },

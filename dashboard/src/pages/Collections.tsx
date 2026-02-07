@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Plus, Trash2 } from 'lucide-react';
+import type { QuantizationConfig } from '@/types';
 
 export const Collections = () => {
   const navigate = useNavigate();
@@ -23,16 +24,44 @@ export const Collections = () => {
   const [newVectorSize, setNewVectorSize] = useState('128');
   const [newDistanceMetric, setNewDistanceMetric] = useState('cosine');
 
+  // SQ8 Quantization
+  const [enableQuantization, setEnableQuantization] = useState(false);
+  const [alwaysRam, setAlwaysRam] = useState(false);
+  const [quantile, setQuantile] = useState('0.99');
+
+  // BM25
+  const [enableBm25, setEnableBm25] = useState(false);
+  const [bm25TextField, setBm25TextField] = useState('text');
+
   const handleCreate = async () => {
     if (!newCollectionName || !newVectorSize) return;
+
+    let quantization: QuantizationConfig | undefined;
+    if (enableQuantization) {
+      quantization = {
+        type: 'scalar',
+        dtype: 'int8',
+        always_ram: alwaysRam,
+        quantile: parseFloat(quantile) || 0.99,
+      };
+    }
+
     await createCollection.mutateAsync({
       name: newCollectionName,
       vectorSize: parseInt(newVectorSize),
       distanceMetric: newDistanceMetric,
+      quantization,
+      enable_bm25: enableBm25 || undefined,
+      bm25_text_field: enableBm25 ? bm25TextField : undefined,
     });
     setIsCreateModalOpen(false);
     setNewCollectionName('');
     setNewVectorSize('128');
+    setEnableQuantization(false);
+    setAlwaysRam(false);
+    setQuantile('0.99');
+    setEnableBm25(false);
+    setBm25TextField('text');
   };
 
   const handleDelete = async (name: string) => {
@@ -75,6 +104,7 @@ export const Collections = () => {
                   <TableHead>Vector Size</TableHead>
                   <TableHead>Distance Metric</TableHead>
                   <TableHead>Points</TableHead>
+                  <TableHead>Features</TableHead>
                   <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -91,6 +121,16 @@ export const Collections = () => {
                       <Badge variant="default">{collection.distance_metric ?? collection.distance ?? 'N/A'}</Badge>
                     </TableCell>
                     <TableCell>{collection.point_count ?? collection.num_points ?? 0}</TableCell>
+                    <TableCell>
+                      <div className="flex gap-1 flex-wrap">
+                        {(collection as any).quantization && (collection as any).quantization !== 'None' && (
+                          <Badge variant="warning" className="text-[10px]">SQ8</Badge>
+                        )}
+                        {(collection as any).bm25_enabled && (
+                          <Badge variant="success" className="text-[10px]">BM25</Badge>
+                        )}
+                      </div>
+                    </TableCell>
                     <TableCell>
                         {canEdit && (
                           <Button
@@ -109,7 +149,7 @@ export const Collections = () => {
                 ))}
                 {(!collections || !Array.isArray(collections) || collections.length === 0) && (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center text-gray-500">
+                    <TableCell colSpan={6} className="text-center text-gray-500">
                       No collections found
                     </TableCell>
                   </TableRow>
@@ -125,7 +165,7 @@ export const Collections = () => {
         onClose={() => setIsCreateModalOpen(false)}
         title="Create New Collection"
       >
-        <div className="space-y-4">
+        <div className="space-y-4 max-h-[70vh] overflow-y-auto">
           <div>
             <label className="block text-sm font-medium mb-1">Collection Name</label>
             <Input
@@ -155,7 +195,84 @@ export const Collections = () => {
               <option value="dot">Dot Product</option>
             </select>
           </div>
-          <div className="flex justify-end gap-2">
+
+          {/* ─── SQ8 Quantization ─────────────────────────────── */}
+          <div className="border-t border-bg-tertiary pt-4">
+            <label className="flex items-center gap-2 text-sm font-medium mb-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={enableQuantization}
+                onChange={(e) => setEnableQuantization(e.target.checked)}
+                className="rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+              />
+              Enable Scalar Quantization (SQ8)
+            </label>
+            {enableQuantization && (
+              <div className="ml-6 space-y-3 p-3 bg-bg-tertiary/50 rounded-md">
+                <p className="text-xs text-gray-400">
+                  Compresses f32 vectors to u8 (~4x memory savings) with minimal recall loss.
+                </p>
+                <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={alwaysRam}
+                    onChange={(e) => setAlwaysRam(e.target.checked)}
+                    className="rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+                  />
+                  Always keep original vectors in RAM (re-rank with f32)
+                </label>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    Quantile ({quantile})
+                  </label>
+                  <input
+                    type="range"
+                    min="0.9"
+                    max="1.0"
+                    step="0.01"
+                    value={quantile}
+                    onChange={(e) => setQuantile(e.target.value)}
+                    className="w-full accent-orange-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-gray-500">
+                    <span>0.90</span>
+                    <span>1.00</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ─── BM25 ─────────────────────────────────────────── */}
+          <div className="border-t border-bg-tertiary pt-4">
+            <label className="flex items-center gap-2 text-sm font-medium mb-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={enableBm25}
+                onChange={(e) => setEnableBm25(e.target.checked)}
+                className="rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+              />
+              Enable BM25 Full-Text Search
+            </label>
+            {enableBm25 && (
+              <div className="ml-6 space-y-3 p-3 bg-bg-tertiary/50 rounded-md">
+                <p className="text-xs text-gray-400">
+                  Enables hybrid search (vector + keyword) via BM25 ranking.
+                </p>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Text Metadata Field</label>
+                  <Input
+                    value={bm25TextField}
+                    onChange={(e) => setBm25TextField(e.target.value)}
+                    placeholder="text"
+                    className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2">
             <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>
               Cancel
             </Button>

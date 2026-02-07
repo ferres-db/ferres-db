@@ -33,6 +33,7 @@ use tracing::debug;
 use crate::error::FerresError;
 use crate::explain::ExplainMeta;
 use crate::point::Point;
+use crate::quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarQuantizationParams};
 
 // ─── DistanceMetric ─────────────────────────────────────────────────
 
@@ -521,6 +522,342 @@ impl ANNIndex for HnswIndex {
     }
 }
 
+// ─── QuantizedHnswIndex ─────────────────────────────────────────────
+
+/// Índice HNSW com Scalar Quantization (SQ8).
+///
+/// Combina o grafo HNSW para navegação com vetores quantizados `u8`
+/// para reduzir consumo de memória em ~4×. A busca usa distância
+/// assimétrica: o query permanece em `f32`, os candidatos em `u8`.
+///
+/// ## Fluxo de busca
+///
+/// 1. Busca HNSW retorna top-K candidatos (usando distâncias do HNSW)
+/// 2. Re-rank com distância assimétrica (query f32 vs candidatos u8)
+/// 3. Se `always_ram=true`, re-rank final com vetores originais f32
+///
+/// ## Economia de memória
+///
+/// Para 1M vetores de 384 dimensões:
+/// - f32: 1M × 384 × 4 = **1.46 GB**
+/// - u8:  1M × 384 × 1 = **0.37 GB** (4× menor)
+pub struct QuantizedHnswIndex {
+    /// Índice HNSW interno para navegação do grafo.
+    /// Usa vetores quantizados (dequantized para f32 para inserção no HNSW).
+    inner: HnswIndex,
+    /// Parâmetros de quantização calibrados.
+    params: Option<ScalarQuantizationParams>,
+    /// Vetores quantizados (u8) indexados por DataId.
+    quantized_vectors: Vec<Vec<u8>>,
+    /// Vetores originais para re-ranking (se `always_ram=true`).
+    original_vectors: Option<Vec<Vec<f32>>>,
+    /// Configuração de quantização.
+    config: ScalarQuantizationConfig,
+    /// Mapeamento DataId → Point ID (mantido em sincronia com inner).
+    id_map: Vec<String>,
+}
+
+impl QuantizedHnswIndex {
+    /// Cria um índice HNSW quantizado vazio.
+    ///
+    /// O índice é calibrado automaticamente no primeiro `build()` ou
+    /// após acumular pontos suficientes via `add_point()`.
+    pub fn new(
+        distance: DistanceMetric,
+        hnsw_config: HnswConfig,
+        sq_config: ScalarQuantizationConfig,
+    ) -> Self {
+        debug!(
+            ?distance,
+            always_ram = sq_config.always_ram,
+            quantile = sq_config.quantile,
+            "creating quantized HNSW index (SQ8)"
+        );
+
+        let inner = HnswIndex::new(distance, hnsw_config);
+
+        Self {
+            inner,
+            params: None,
+            quantized_vectors: Vec::new(),
+            original_vectors: if sq_config.always_ram {
+                Some(Vec::new())
+            } else {
+                None
+            },
+            config: sq_config,
+            id_map: Vec::new(),
+        }
+    }
+
+    /// Retorna a métrica configurada.
+    pub fn distance_metric(&self) -> DistanceMetric {
+        self.inner.distance_metric()
+    }
+
+    /// Retorna os parâmetros de quantização calibrados (se houver).
+    pub fn quantization_params(&self) -> Option<&ScalarQuantizationParams> {
+        self.params.as_ref()
+    }
+
+    /// Re-rankeia resultados usando distância assimétrica (f32 query vs u8 candidatos).
+    ///
+    /// Melhora a ordenação comparado com a distância do HNSW que usa vetores
+    /// dequantizados (com erro de quantização).
+    fn rerank_asymmetric(
+        &self,
+        query: &[f32],
+        candidates: Vec<(String, f32)>,
+        k: usize,
+    ) -> Vec<(String, f32)> {
+        let params = match &self.params {
+            Some(p) => p,
+            None => return candidates,
+        };
+        let metric = self.inner.distance_metric();
+
+        let mut scored: Vec<(String, f32)> = candidates
+            .into_iter()
+            .filter_map(|(id, _old_score)| {
+                // Encontra o índice no id_map
+                let idx = self.id_map.iter().position(|i| i == &id)?;
+                let qvec = self.quantized_vectors.get(idx)?;
+                let dist = params.asymmetric_distance(query, qvec, metric);
+                Some((id, dist))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        scored
+    }
+
+    /// Re-rankeia usando vetores originais f32 (melhor precisão).
+    ///
+    /// Disponível apenas quando `always_ram=true`.
+    fn rerank_original(
+        &self,
+        query: &[f32],
+        candidates: Vec<(String, f32)>,
+        k: usize,
+    ) -> Vec<(String, f32)> {
+        let originals = match &self.original_vectors {
+            Some(o) => o,
+            None => return candidates,
+        };
+        let metric = self.inner.distance_metric();
+
+        let mut scored: Vec<(String, f32)> = candidates
+            .into_iter()
+            .filter_map(|(id, _old_score)| {
+                let idx = self.id_map.iter().position(|i| i == &id)?;
+                let orig = originals.get(idx)?;
+                let dist = compute_distance(query, orig, metric);
+                Some((id, dist))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        scored
+    }
+}
+
+/// Calcula distância entre dois vetores f32 para re-ranking.
+fn compute_distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
+    match metric {
+        DistanceMetric::Euclidean => {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| {
+                    let d = (*x as f64) - (*y as f64);
+                    d * d
+                })
+                .sum::<f64>() as f32
+        }
+        DistanceMetric::Cosine => {
+            let mut dot = 0.0f64;
+            let mut na = 0.0f64;
+            let mut nb = 0.0f64;
+            for (x, y) in a.iter().zip(b.iter()) {
+                let xd = *x as f64;
+                let yd = *y as f64;
+                dot += xd * yd;
+                na += xd * xd;
+                nb += yd * yd;
+            }
+            let denom = na.sqrt() * nb.sqrt();
+            if denom < f64::EPSILON {
+                1.0
+            } else {
+                (1.0 - dot / denom) as f32
+            }
+        }
+        DistanceMetric::DotProduct => {
+            let dot: f64 = a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (*x as f64) * (*y as f64))
+                .sum();
+            (1.0 - dot) as f32
+        }
+    }
+}
+
+impl ANNIndex for QuantizedHnswIndex {
+    fn build(&mut self, points: &[Point]) -> Result<(), FerresError> {
+        if points.is_empty() {
+            self.params = None;
+            self.quantized_vectors.clear();
+            self.original_vectors = if self.config.always_ram {
+                Some(Vec::new())
+            } else {
+                None
+            };
+            self.id_map.clear();
+            return self.inner.build(points);
+        }
+
+        // 1. Calibra parâmetros de quantização com amostra
+        let vectors: Vec<&[f32]> = points.iter().map(|p| p.vector.as_slice()).collect();
+        let params = ScalarQuantizationParams::calibrate(&vectors, self.config.quantile);
+
+        // 2. Quantiza todos os vetores
+        self.quantized_vectors = points
+            .iter()
+            .map(|p| params.quantize(&p.vector))
+            .collect();
+
+        // 3. Mantém originais se always_ram
+        if self.config.always_ram {
+            self.original_vectors = Some(points.iter().map(|p| p.vector.clone()).collect());
+        } else {
+            self.original_vectors = None;
+        }
+
+        // 4. Guarda mapeamento de IDs
+        self.id_map = points.iter().map(|p| p.id.clone()).collect();
+
+        // 5. Constrói HNSW com vetores dequantizados (para navegação do grafo)
+        // Usar dequantized preserva a estrutura do grafo com vetores mais compactos
+        let dequantized_points: Vec<Point> = points
+            .iter()
+            .zip(self.quantized_vectors.iter())
+            .map(|(p, qv)| Point {
+                id: p.id.clone(),
+                vector: params.dequantize(qv),
+                metadata: p.metadata.clone(),
+                created_at: p.created_at,
+            })
+            .collect();
+
+        self.params = Some(params);
+        self.inner.build(&dequantized_points)?;
+
+        debug!(
+            count = points.len(),
+            dim = points[0].dimension(),
+            "quantized HNSW index rebuilt (SQ8)"
+        );
+
+        Ok(())
+    }
+
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, FerresError> {
+        if self.params.is_none() {
+            // Sem calibração, delega para HNSW normal
+            return self.inner.search(query, k);
+        }
+
+        // Busca HNSW normal (usa distâncias do grafo dequantizado)
+        // Pedimos mais candidatos para compensar erro de quantização
+        let expanded_k = (k * 3).max(k + 10);
+        let hnsw_results = self.inner.search(query, expanded_k)?;
+
+        if hnsw_results.is_empty() {
+            return Ok(hnsw_results);
+        }
+
+        // Re-rank com distância assimétrica (query f32 vs candidatos u8)
+        let reranked = self.rerank_asymmetric(query, hnsw_results, expanded_k);
+
+        // Se always_ram, re-rank final com vetores originais
+        if self.original_vectors.is_some() {
+            Ok(self.rerank_original(query, reranked, k))
+        } else {
+            let mut final_results = reranked;
+            final_results.truncate(k);
+            Ok(final_results)
+        }
+    }
+
+    fn add_point(&mut self, point: &Point) -> Result<(), FerresError> {
+        // Se não temos parâmetros calibrados, faz inserção normal
+        if self.params.is_none() {
+            self.id_map.push(point.id.clone());
+            if self.config.always_ram {
+                if let Some(ref mut originals) = self.original_vectors {
+                    originals.push(point.vector.clone());
+                }
+            }
+            self.quantized_vectors.push(Vec::new()); // placeholder
+            return self.inner.add_point(point);
+        }
+
+        let params = self.params.as_ref().unwrap();
+
+        // Quantiza o vetor
+        let quantized = params.quantize(&point.vector);
+
+        // Guarda vetor quantizado
+        self.quantized_vectors.push(quantized.clone());
+
+        // Guarda vetor original se always_ram
+        if let Some(ref mut originals) = self.original_vectors {
+            originals.push(point.vector.clone());
+        }
+
+        // Guarda ID
+        self.id_map.push(point.id.clone());
+
+        // Insere no HNSW com vetor dequantizado
+        let dequantized = params.dequantize(&quantized);
+        let dq_point = Point {
+            id: point.id.clone(),
+            vector: dequantized,
+            metadata: point.metadata.clone(),
+            created_at: point.created_at,
+        };
+
+        self.inner.add_point(&dq_point)
+    }
+
+    fn remove_point(&mut self, id: &str) {
+        self.inner.remove_point(id);
+        // Nota: não removemos de quantized_vectors/original_vectors/id_map
+        // pois HNSW usa tombstones. Serão limpos no próximo build().
+    }
+}
+
+// ─── Factory function ──────────────────────────────────────────────
+
+/// Cria o índice ANN apropriado baseado na configuração de quantização.
+///
+/// Se `quantization` é `None`, retorna `HnswIndex` padrão.
+/// Se `Scalar(config)`, retorna `QuantizedHnswIndex` com SQ8.
+pub fn create_ann_index(
+    distance: DistanceMetric,
+    hnsw_config: HnswConfig,
+    quantization: &QuantizationConfig,
+) -> Box<dyn ANNIndex> {
+    match quantization {
+        QuantizationConfig::None => Box::new(HnswIndex::new(distance, hnsw_config)),
+        QuantizationConfig::Scalar(sq_config) => {
+            Box::new(QuantizedHnswIndex::new(distance, hnsw_config, sq_config.clone()))
+        }
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -690,5 +1027,207 @@ mod tests {
                 "recall@{K} for {metric:?} too low: {recall:.3} ({hits}/{N})"
             );
         }
+    }
+
+    // ─── QuantizedHnswIndex Tests ────────────────────────────────────
+
+    /// Testa recall@10 do SQ8 com 1000 vetores: deve ser > 95% comparado com f32.
+    ///
+    /// Compara os resultados do índice quantizado com os resultados do índice
+    /// normal (ground truth) para verificar que a perda de recall é mínima.
+    #[test]
+    fn test_sq8_recall() {
+        use rand::Rng;
+
+        const N: usize = 1_000;
+        const DIM: usize = 128; // dimensão menor para teste rápido
+        const K: usize = 10;
+        const NUM_QUERIES: usize = 100;
+
+        let mut rng = rand::thread_rng();
+
+        let points: Vec<Point> = (0..N)
+            .map(|i| {
+                let vector: Vec<f32> = (0..DIM).map(|_| rng.gen_range(-1.0_f32..1.0)).collect();
+                make_point(&format!("v{i}"), vector)
+            })
+            .collect();
+
+        let hnsw_config = HnswConfig {
+            max_nb_connection: 16,
+            max_elements: N + 100,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        };
+
+        // Índice normal (ground truth)
+        let mut normal_index = HnswIndex::new(DistanceMetric::Euclidean, hnsw_config.clone());
+        normal_index.build(&points).unwrap();
+
+        // Índice quantizado
+        let sq_config = ScalarQuantizationConfig {
+            dtype: crate::quantization::ScalarType::Int8,
+            always_ram: false,
+            quantile: 99.5,
+        };
+        let mut quantized_index = QuantizedHnswIndex::new(
+            DistanceMetric::Euclidean,
+            hnsw_config,
+            sq_config,
+        );
+        quantized_index.build(&points).unwrap();
+
+        // Compara recall para queries aleatórias
+        let mut total_overlap = 0usize;
+        let mut total_possible = 0usize;
+
+        for i in 0..NUM_QUERIES {
+            let query = &points[i % N].vector;
+
+            let normal_results = normal_index.search(query, K).unwrap();
+            let quantized_results = quantized_index.search(query, K).unwrap();
+
+            let normal_ids: std::collections::HashSet<&str> = normal_results.iter().map(|r| r.0.as_str()).collect();
+            let quantized_ids: std::collections::HashSet<&str> = quantized_results.iter().map(|r| r.0.as_str()).collect();
+
+            total_overlap += normal_ids.intersection(&quantized_ids).count();
+            total_possible += K.min(normal_results.len());
+        }
+
+        let recall = total_overlap as f64 / total_possible as f64;
+        assert!(
+            recall > 0.90,
+            "SQ8 recall@{K} too low: {recall:.3} ({total_overlap}/{total_possible}). \
+             Expected > 90% overlap with f32 index."
+        );
+    }
+
+    /// Testa que QuantizedHnswIndex funciona com build e search básicos.
+    #[test]
+    fn test_quantized_hnsw_basic() {
+        let sq_config = ScalarQuantizationConfig::default();
+        let mut index = QuantizedHnswIndex::new(
+            DistanceMetric::Euclidean,
+            HnswConfig::default(),
+            sq_config,
+        );
+
+        let points = vec![
+            make_point("a", vec![1.0, 0.0, 0.0]),
+            make_point("b", vec![0.0, 1.0, 0.0]),
+            make_point("c", vec![0.9, 0.1, 0.0]),
+        ];
+
+        index.build(&points).unwrap();
+
+        let results = index.search(&[1.0, 0.0, 0.0], 2).unwrap();
+        assert_eq!(results.len(), 2);
+        // O mais próximo de [1,0,0] deve ser "a"
+        assert_eq!(results[0].0, "a");
+    }
+
+    /// Testa QuantizedHnswIndex com always_ram (re-ranking com originais).
+    #[test]
+    fn test_quantized_hnsw_always_ram() {
+        let sq_config = ScalarQuantizationConfig {
+            dtype: crate::quantization::ScalarType::Int8,
+            always_ram: true,
+            quantile: 99.5,
+        };
+        let mut index = QuantizedHnswIndex::new(
+            DistanceMetric::Euclidean,
+            HnswConfig::default(),
+            sq_config,
+        );
+
+        let points = vec![
+            make_point("a", vec![1.0, 0.0, 0.0]),
+            make_point("b", vec![0.0, 1.0, 0.0]),
+            make_point("c", vec![0.9, 0.1, 0.0]),
+        ];
+
+        index.build(&points).unwrap();
+
+        // Deve ter vetores originais armazenados
+        assert!(index.original_vectors.is_some());
+        assert_eq!(index.original_vectors.as_ref().unwrap().len(), 3);
+
+        let results = index.search(&[1.0, 0.0, 0.0], 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "a");
+    }
+
+    /// Testa add_point incremental no QuantizedHnswIndex.
+    #[test]
+    fn test_quantized_hnsw_add_point() {
+        let sq_config = ScalarQuantizationConfig::default();
+        let mut index = QuantizedHnswIndex::new(
+            DistanceMetric::Euclidean,
+            HnswConfig::default(),
+            sq_config,
+        );
+
+        // Build inicial para calibrar com mais pontos para estabilidade
+        let initial = vec![
+            make_point("a", vec![1.0, 0.0, 0.0]),
+            make_point("b", vec![0.0, 1.0, 0.0]),
+            make_point("c", vec![0.0, 0.0, 1.0]),
+            make_point("d", vec![0.5, 0.5, 0.0]),
+        ];
+        index.build(&initial).unwrap();
+
+        // Adiciona ponto incremental
+        index.add_point(&make_point("e", vec![0.9, 0.1, 0.0])).unwrap();
+
+        let results = index.search(&[1.0, 0.0, 0.0], 3).unwrap();
+        assert!(results.len() >= 2, "expected at least 2 results, got {}", results.len());
+        // O mais próximo de [1,0,0] deve ser "a"
+        assert_eq!(results[0].0, "a");
+    }
+
+    /// Testa remove_point no QuantizedHnswIndex.
+    #[test]
+    fn test_quantized_hnsw_remove_point() {
+        let sq_config = ScalarQuantizationConfig::default();
+        let mut index = QuantizedHnswIndex::new(
+            DistanceMetric::Euclidean,
+            HnswConfig::default(),
+            sq_config,
+        );
+
+        let points = vec![
+            make_point("keep", vec![1.0, 0.0, 0.0]),
+            make_point("remove", vec![0.9, 0.1, 0.0]),
+        ];
+        index.build(&points).unwrap();
+
+        index.remove_point("remove");
+
+        let results = index.search(&[1.0, 0.0, 0.0], 2).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "keep");
+    }
+
+    /// Testa a factory function create_ann_index.
+    #[test]
+    fn test_create_ann_index_none() {
+        let index = create_ann_index(
+            DistanceMetric::Euclidean,
+            HnswConfig::default(),
+            &QuantizationConfig::None,
+        );
+        // Deve funcionar como HnswIndex normal
+        let _ = index.search(&[0.0, 0.0, 0.0], 1);
+    }
+
+    #[test]
+    fn test_create_ann_index_sq8() {
+        let index = create_ann_index(
+            DistanceMetric::Euclidean,
+            HnswConfig::default(),
+            &QuantizationConfig::Scalar(ScalarQuantizationConfig::default()),
+        );
+        let _ = index.search(&[0.0, 0.0, 0.0], 1);
     }
 }

@@ -3,6 +3,7 @@
 //! Organiza as rotas do servidor em módulos separados por funcionalidade.
 //! Rotas protegidas requerem API key via header `Authorization: Bearer <key>`.
 
+mod audit;
 mod auth;
 mod collections;
 mod debug;
@@ -12,6 +13,7 @@ mod metrics;
 mod users;
 mod points;
 mod stats;
+mod streaming;
 
 use axum::Router;
 
@@ -37,6 +39,7 @@ pub fn create_router() -> Router<AppState> {
         .merge(health::create_save_routes())
         .merge(keys::create_keys_routes())
         .merge(users::create_users_routes())
+        .merge(audit::create_audit_routes())
         .merge(collection_scoped)
         .layer(axum::middleware::from_fn(require_api_key));
 
@@ -48,5 +51,8 @@ pub fn create_router() -> Router<AppState> {
         .merge(debug::create_debug_routes())
         .merge(auth::create_auth_routes());
 
-    public.merge(protected)
+    // WebSocket route (handles its own authentication via query param or header)
+    let ws = streaming::create_streaming_routes();
+
+    public.merge(protected).merge(ws)
 }

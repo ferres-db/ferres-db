@@ -11,11 +11,13 @@ use validator::{Validate, ValidationError};
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage};
+use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage, QuantizationConfig};
 
 use crate::api_err;
-use crate::auth::RequireEditor;
+use crate::auth::{AuthenticatedUser, check_user_permission};
+use crate::audit::{self, AuditResult};
 use crate::error::{ApiError, ApiResult};
+use crate::permissions::Action;
 use crate::state::AppState;
 
 // ─── Request/Response Types ──────────────────────────────────────────────
@@ -52,6 +54,10 @@ pub struct CreateCollectionRequest {
     /// Chave em metadata usada como texto para BM25. Padrão: "text".
     #[serde(default = "default_bm25_text_field")]
     pub bm25_text_field: String,
+    /// Configuração de quantização de vetores. Padrão: None (sem quantização).
+    /// Use `{"Scalar": {"dtype": "Int8"}}` para ativar SQ8.
+    #[serde(default)]
+    pub quantization: QuantizationConfig,
 }
 
 fn default_bm25_text_field() -> String {
@@ -104,12 +110,27 @@ pub struct CollectionStatsResponse {
 
 /// Handler para POST /api/v1/collections
 ///
-/// Cria uma nova coleção (Editor ou Admin).
+/// Cria uma nova coleção (Editor ou Admin, com verificação granular de permissão Create).
 pub async fn create_collection(
-    _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Json(payload): Json<CreateCollectionRequest>,
 ) -> ApiResult<(StatusCode, Json<CreateCollectionResponse>)> {
+    // Verificação de permissão granular (Create)
+    let perm_result = check_user_permission(&user, &payload.name, &Action::Create);
+    if !perm_result.is_allowed() {
+        let audit_logger = app_state.audit_logger.clone();
+        let entry = audit::audit_entry(
+            &user.username, "create_collection", &format!("collection:{}", payload.name),
+            serde_json::json!({"denied": true}),
+            AuditResult::Denied, None, None,
+        );
+        tokio::spawn(async move { audit_logger.log(&entry).await });
+        return Err(ApiError::forbidden(format!(
+            "permission denied: create collection '{}'", payload.name
+        )));
+    }
+
     // Valida o payload usando validator crate
     payload.validate().map_err(|e| {
         let mut messages = Vec::new();
@@ -135,6 +156,7 @@ pub async fn create_collection(
         search_cache_size: 0,
         enable_bm25: payload.enable_bm25,
         bm25_text_field: payload.bm25_text_field.clone(),
+        quantization: payload.quantization.clone(),
     };
 
     // Cria a coleção
@@ -179,6 +201,20 @@ pub async fn create_collection(
         let collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
         collection.mark_clean();
     }
+
+    // Audit trail
+    let audit_logger = app_state.audit_logger.clone();
+    let username = user.username.clone();
+    let coll_name = config.name.clone();
+    let dim = config.dimension;
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &username, "create_collection", &format!("collection:{}", coll_name),
+            serde_json::json!({"dimension": dim}),
+            AuditResult::Success, None, None,
+        );
+        audit_logger.log(&entry).await;
+    });
 
     Ok((
         StatusCode::CREATED,
@@ -276,12 +312,27 @@ pub async fn get_collection(
 
 /// Handler para DELETE /api/v1/collections/{name}
 ///
-/// Remove uma coleção (Editor ou Admin).
+/// Remove uma coleção (Editor ou Admin, com verificação granular de permissão Delete).
 pub async fn delete_collection(
-    _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<StatusCode> {
+    // Verificação de permissão granular (Delete)
+    let perm_result = check_user_permission(&user, &name, &Action::Delete);
+    if !perm_result.is_allowed() {
+        let audit_logger = app_state.audit_logger.clone();
+        let entry = audit::audit_entry(
+            &user.username, "delete_collection", &format!("collection:{}", name),
+            serde_json::json!({"denied": true}),
+            AuditResult::Denied, None, None,
+        );
+        tokio::spawn(async move { audit_logger.log(&entry).await });
+        return Err(ApiError::forbidden(format!(
+            "permission denied: delete collection '{}'", name
+        )));
+    }
+
     // Remove do mapa de coleções
     let collection_arc = app_state.collections.remove(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
@@ -303,6 +354,19 @@ pub async fn delete_collection(
 
     // Drop da coleção (libera recursos)
     drop(collection_arc);
+
+    // Audit trail
+    let audit_logger = app_state.audit_logger.clone();
+    let username = user.username.clone();
+    let coll_name = name.clone();
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &username, "delete_collection", &format!("collection:{}", coll_name),
+            serde_json::json!({}),
+            AuditResult::Success, None, None,
+        );
+        audit_logger.log(&entry).await;
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }

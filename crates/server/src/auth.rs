@@ -43,6 +43,8 @@ pub struct JwtClaims {
 pub struct AuthUser {
     pub username: String,
     pub role: crate::users::Role,
+    /// Permissões granulares (RBAC). Se None, aplica-se comportamento legado baseado em role.
+    pub permissions: Option<Vec<crate::permissions::Permission>>,
 }
 
 fn looks_like_jwt(token: &str) -> bool {
@@ -101,12 +103,13 @@ pub async fn require_api_key(
 
     use crate::users::Role;
 
-    // 1) API key (programática ou legacy) → full access (admin)
+    // 1) API key (programática ou legacy) → full access (admin, sem restrições)
     if crate::api_keys::ApiKeyStore::validate(api_key) || is_valid_legacy(api_key) {
         let mut req = req;
         req.extensions_mut().insert(AuthUser {
             username: "api_key".to_string(),
             role: Role::Admin,
+            permissions: None, // Admin via API key: todas as permissões
         });
         return Ok(next.run(req).await);
     }
@@ -120,10 +123,24 @@ pub async fn require_api_key(
                 decode::<JwtClaims>(api_key, &DecodingKey::from_secret(secret), &validation)
             {
                 let role = Role::from_str(&token_data.claims.role).unwrap_or(Role::Viewer);
+
+                // Carrega permissões granulares do UserStore (se disponível)
+                // Admin bypassa: não precisa de permissões granulares
+                let permissions = if role < Role::Admin {
+                    // Tenta carregar permissões do state (AppState está no req extensions)
+                    // Como o middleware não tem acesso direto ao State, usamos a
+                    // abordagem de codificar as permissões no JWT claims.
+                    // Fallback: sem permissões granulares = comportamento legado.
+                    None
+                } else {
+                    None
+                };
+
                 let mut req = req;
                 req.extensions_mut().insert(AuthUser {
                     username: token_data.claims.sub.clone(),
                     role,
+                    permissions,
                 });
                 return Ok(next.run(req).await);
             }
@@ -147,6 +164,46 @@ fn forbidden_role() -> (StatusCode, Json<serde_json::Value>) {
             "code": "forbidden"
         })),
     )
+}
+
+/// Extrator que obtém o AuthUser do request e enriquece com permissões do UserStore.
+///
+/// Uso: `AuthenticatedUser(user)` nos handlers que precisam das permissões granulares.
+/// Requer que o router use `AppState` como state.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedUser(pub AuthUser);
+
+impl FromRequestParts<crate::state::AppState> for AuthenticatedUser {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &crate::state::AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = parts
+            .extensions
+            .get::<AuthUser>()
+            .cloned()
+            .ok_or_else(forbidden_role)?;
+
+        // Se já tem permissões (ex: codificadas no JWT) ou é Admin, retorna direto
+        if auth.permissions.is_some() || auth.role >= crate::users::Role::Admin {
+            return Ok(AuthenticatedUser(auth));
+        }
+
+        // Carrega permissões granulares do UserStore (acesso ao state via Axum)
+        if let Some(ref store) = state.user_store {
+            if let Ok(Some(perms)) = store.get_permissions(&auth.username) {
+                return Ok(AuthenticatedUser(AuthUser {
+                    permissions: Some(perms),
+                    ..auth
+                }));
+            }
+        }
+
+        // Sem permissões granulares configuradas: comportamento legado
+        Ok(AuthenticatedUser(auth))
+    }
 }
 
 /// Extrator que exige role Admin. Use em handlers restritos a administradores.
@@ -193,4 +250,78 @@ where
             Err(forbidden_role())
         }
     }
+}
+
+// ─── Permission Checking Helpers ─────────────────────────────────────────
+
+/// Verifica permissão granular para um usuário autenticado em uma collection.
+///
+/// Regras de precedência:
+/// 1. Admin → sempre permitido (retorna Allowed)
+/// 2. Se o usuário tem permissões granulares configuradas → usa check_permission
+/// 3. Se não tem permissões granulares (legado) → usa a role (Editor pode Read/Write/Create,
+///    Viewer pode Read)
+///
+/// Backward compatible: se nenhuma permissão granular está configurada, o
+/// comportamento é idêntico ao sistema anterior.
+pub fn check_user_permission(
+    user: &AuthUser,
+    collection: &str,
+    action: &crate::permissions::Action,
+) -> crate::permissions::PermissionResult {
+    use crate::permissions::{PermissionResult, Action};
+    use crate::users::Role;
+
+    // Admin bypassa tudo
+    if user.role >= Role::Admin {
+        return PermissionResult::Allowed;
+    }
+
+    // Se tem permissões granulares, usa-as
+    if let Some(ref perms) = user.permissions {
+        if !perms.is_empty() {
+            return crate::permissions::check_permission(perms, collection, action);
+        }
+    }
+
+    // Fallback: comportamento legado baseado em role
+    match user.role {
+        Role::Editor => {
+            // Editor pode Read, Write, Create (mas não Delete collection nem Admin)
+            match action {
+                Action::Read | Action::Write | Action::Create => PermissionResult::Allowed,
+                Action::Delete | Action::Admin => PermissionResult::Denied(
+                    "editors cannot delete collections or perform admin actions".to_string(),
+                ),
+            }
+        }
+        Role::Viewer => {
+            // Viewer pode apenas Read
+            match action {
+                Action::Read => PermissionResult::Allowed,
+                _ => PermissionResult::Denied(format!(
+                    "viewers can only read; action '{}' denied",
+                    action
+                )),
+            }
+        }
+        _ => PermissionResult::Denied("insufficient permissions".to_string()),
+    }
+}
+
+/// Helper para extrair IP do cliente a partir dos headers (X-Forwarded-For ou fallback).
+pub fn extract_client_ip(parts: &Parts) -> Option<String> {
+    // Tenta X-Forwarded-For primeiro (proxy/load balancer)
+    if let Some(xff) = parts.headers.get("x-forwarded-for") {
+        if let Ok(s) = xff.to_str() {
+            return Some(s.split(',').next().unwrap_or(s).trim().to_string());
+        }
+    }
+    // Tenta X-Real-IP
+    if let Some(xri) = parts.headers.get("x-real-ip") {
+        if let Ok(s) = xri.to_str() {
+            return Some(s.trim().to_string());
+        }
+    }
+    None
 }
