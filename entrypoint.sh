@@ -1,9 +1,12 @@
 #!/bin/sh
 set -e
 
-# Cria diretório de dados se STORAGE_PATH for definido (ex.: docker run -e STORAGE_PATH=/data)
-if [ -n "$STORAGE_PATH" ]; then
-  mkdir -p "$STORAGE_PATH"
-fi
+# Se STORAGE_PATH parecer path Windows (C:, C:\...) vindo do host, usar /data no container.
+# Evita "mkdir: cannot create directory 'C:'" e path inválido no Linux.
+case "$STORAGE_PATH" in
+  ""|*\\*|*:*) export STORAGE_PATH=/data ;;
+esac
+
+mkdir -p "$STORAGE_PATH"
 
 exec /app/ferres-db-server "$@"
