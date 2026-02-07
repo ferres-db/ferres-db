@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Notify};
 use tracing::{info, warn};
 
-use ferres_db_core::{Collection, FileStorage, SearchResult};
+use ferres_db_core::{Collection, FileStorage, ReindexJob, SearchResult};
 
 use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
@@ -355,6 +355,8 @@ pub struct AppState {
     pub ws_connections_active: Arc<AtomicU64>,
     /// Máximo de conexões WebSocket simultâneas (configurável).
     pub max_ws_connections: u64,
+    /// Active and completed reindex jobs, keyed by job ID.
+    pub reindex_jobs: Arc<DashMap<String, Arc<RwLock<ReindexJob>>>>,
 }
 
 impl AppState {
@@ -489,6 +491,7 @@ impl AppState {
             event_channels,
             ws_connections_active: Arc::new(AtomicU64::new(0)),
             max_ws_connections: 100,
+            reindex_jobs: Arc::new(DashMap::new()),
         })
     }
 

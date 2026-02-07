@@ -146,6 +146,7 @@ fn create_collection(
         enable_bm25: false,
         bm25_text_field: "text".to_string(),
         quantization: Default::default(),
+        tiered_storage: Default::default(),
     };
 
     db.create_collection(config)?;

@@ -110,6 +110,15 @@ pub trait ANNIndex: Send + Sync {
     /// mas continua no grafo até o próximo `build`.
     fn remove_point(&mut self, id: &str);
 
+    /// Returns the number of tombstoned (logically deleted) points in the index.
+    ///
+    /// Tombstones accumulate from `remove_point` calls and degrade search
+    /// performance over time. A background reindex cleans them.
+    /// Default: 0 (backends with native deletion).
+    fn tombstone_count(&self) -> usize {
+        0
+    }
+
     /// Busca os `k` vizinhos mais próximos com metadados de explicação.
     ///
     /// Retorna tuplas `(point_id, distância, ExplainMeta)` com informações
@@ -363,6 +372,10 @@ impl Drop for HnswIndex {
 }
 
 impl ANNIndex for HnswIndex {
+    fn tombstone_count(&self) -> usize {
+        self.tombstones.len()
+    }
+
     fn build(&mut self, points: &[Point]) -> Result<(), FerresError> {
         // Recria o grafo do zero — limpa tombstones e mapeamentos.
         self.inner = Self::create_variant(self.distance, &self.config);
@@ -705,6 +718,10 @@ fn compute_distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
 }
 
 impl ANNIndex for QuantizedHnswIndex {
+    fn tombstone_count(&self) -> usize {
+        self.inner.tombstone_count()
+    }
+
     fn build(&mut self, points: &[Point]) -> Result<(), FerresError> {
         if points.is_empty() {
             self.params = None;

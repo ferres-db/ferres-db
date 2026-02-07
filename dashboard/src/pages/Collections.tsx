@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Plus, Trash2 } from 'lucide-react';
-import type { QuantizationConfig } from '@/types';
+import type { QuantizationConfig, TieredStorageConfig } from '@/types';
 
 export const Collections = () => {
   const navigate = useNavigate();
@@ -33,6 +33,12 @@ export const Collections = () => {
   const [enableBm25, setEnableBm25] = useState(false);
   const [bm25TextField, setBm25TextField] = useState('text');
 
+  // Tiered Storage
+  const [enableTiered, setEnableTiered] = useState(false);
+  const [hotThreshold, setHotThreshold] = useState('24');
+  const [warmThreshold, setWarmThreshold] = useState('168');
+  const [compactionInterval, setCompactionInterval] = useState('3600');
+
   const handleCreate = async () => {
     if (!newCollectionName || !newVectorSize) return;
 
@@ -46,6 +52,16 @@ export const Collections = () => {
       };
     }
 
+    let tiered_storage: TieredStorageConfig | undefined;
+    if (enableTiered) {
+      tiered_storage = {
+        enabled: true,
+        hot_threshold_hours: parseInt(hotThreshold) || 24,
+        warm_threshold_hours: parseInt(warmThreshold) || 168,
+        compaction_interval_secs: parseInt(compactionInterval) || 3600,
+      };
+    }
+
     await createCollection.mutateAsync({
       name: newCollectionName,
       vectorSize: parseInt(newVectorSize),
@@ -53,6 +69,7 @@ export const Collections = () => {
       quantization,
       enable_bm25: enableBm25 || undefined,
       bm25_text_field: enableBm25 ? bm25TextField : undefined,
+      tiered_storage,
     });
     setIsCreateModalOpen(false);
     setNewCollectionName('');
@@ -62,6 +79,10 @@ export const Collections = () => {
     setQuantile('0.99');
     setEnableBm25(false);
     setBm25TextField('text');
+    setEnableTiered(false);
+    setHotThreshold('24');
+    setWarmThreshold('168');
+    setCompactionInterval('3600');
   };
 
   const handleDelete = async (name: string) => {
@@ -267,6 +288,61 @@ export const Collections = () => {
                     placeholder="text"
                     className="bg-bg-secondary border-bg-tertiary text-gray-50"
                   />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ─── Tiered Storage ─────────────────────────────── */}
+          <div className="border-t border-bg-tertiary pt-4">
+            <label className="flex items-center gap-2 text-sm font-medium mb-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={enableTiered}
+                onChange={(e) => setEnableTiered(e.target.checked)}
+                className="rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+              />
+              Enable Tiered Storage
+            </label>
+            {enableTiered && (
+              <div className="ml-6 space-y-3 p-3 bg-bg-tertiary/50 rounded-md">
+                <p className="text-xs text-gray-400">
+                  Automatically moves vectors between Hot (RAM), Warm (mmap), and Cold (disk) tiers based on access frequency.
+                </p>
+                <div className="grid grid-cols-1 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Hot Threshold (hours)</label>
+                    <Input
+                      type="number"
+                      value={hotThreshold}
+                      onChange={(e) => setHotThreshold(e.target.value)}
+                      placeholder="24"
+                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1">Points accessed within this time stay in RAM</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Warm Threshold (hours)</label>
+                    <Input
+                      type="number"
+                      value={warmThreshold}
+                      onChange={(e) => setWarmThreshold(e.target.value)}
+                      placeholder="168"
+                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1">Points accessed within this time use memory-mapped files</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Compaction Interval (seconds)</label>
+                    <Input
+                      type="number"
+                      value={compactionInterval}
+                      onChange={(e) => setCompactionInterval(e.target.value)}
+                      placeholder="3600"
+                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1">How often the background task checks for tier demotions</p>
+                  </div>
                 </div>
               </div>
             )}

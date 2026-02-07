@@ -153,6 +153,24 @@ export interface ScalarQuantizationConfig {
 
 export type QuantizationConfig = "none" | ScalarQuantizationConfig;
 
+// ─── Tiered Storage ──────────────────────────────────────────────────
+
+export interface TieredStorageConfig {
+  enabled: boolean;
+  hot_threshold_hours?: number; // default: 24
+  warm_threshold_hours?: number; // default: 168
+  compaction_interval_secs?: number; // default: 3600
+}
+
+export interface TierDistribution {
+  hot: number;
+  warm: number;
+  cold: number;
+  hot_memory_bytes: number;
+  warm_memory_bytes: number;
+  cold_memory_bytes: number;
+}
+
 // ─── Create Collection (extended) ─────────────────────────────────────
 
 export interface CreateCollectionRequest {
@@ -162,6 +180,7 @@ export interface CreateCollectionRequest {
   quantization?: QuantizationConfig;
   enable_bm25?: boolean;
   bm25_text_field?: string;
+  tiered_storage?: TieredStorageConfig;
 }
 
 // ─── Hybrid Search ────────────────────────────────────────────────────
@@ -170,7 +189,9 @@ export interface HybridSearchRequest {
   query_vector: number[];
   query_text: string; // text query for BM25
   limit?: number;
-  alpha?: number; // 0.0 (pure BM25) – 1.0 (pure vector)
+  alpha?: number; // 0.0 (pure BM25) – 1.0 (pure vector). Used with fusion: "weighted"
+  fusion?: "weighted" | "rrf"; // fusion strategy (default: "weighted")
+  rrf_k?: number; // RRF constant k (default: 60). Only used with fusion: "rrf"
   filter?: Record<string, unknown>;
 }
 
@@ -258,7 +279,11 @@ export type WsClientMessageType = "upsert" | "subscribe" | "ping";
 export interface WsUpsertMessage {
   type: "upsert";
   collection: string;
-  points: Array<{ id: string; vector: number[]; metadata?: Record<string, unknown> }>;
+  points: Array<{
+    id: string;
+    vector: number[];
+    metadata?: Record<string, unknown>;
+  }>;
 }
 
 export interface WsSubscribeMessage {
@@ -271,7 +296,10 @@ export interface WsPingMessage {
   type: "ping";
 }
 
-export type WsClientMessage = WsUpsertMessage | WsSubscribeMessage | WsPingMessage;
+export type WsClientMessage =
+  | WsUpsertMessage
+  | WsSubscribeMessage
+  | WsPingMessage;
 
 export interface WsAckMessage {
   type: "ack";
@@ -298,7 +326,11 @@ export interface WsPongMessage {
   type: "pong";
 }
 
-export type WsServerMessage = WsAckMessage | WsEventMessage | WsErrorMessage | WsPongMessage;
+export type WsServerMessage =
+  | WsAckMessage
+  | WsEventMessage
+  | WsErrorMessage
+  | WsPongMessage;
 
 // ─── Embedding Types ──────────────────────────────────────────────────
 
@@ -312,10 +344,30 @@ export interface EmbeddingModelInfo {
 }
 
 export const EMBEDDING_MODELS: EmbeddingModelInfo[] = [
-  { id: "text-embedding-3-small", name: "text-embedding-3-small", dimensions: 1536, provider: "openai" },
-  { id: "text-embedding-3-large", name: "text-embedding-3-large", dimensions: 3072, provider: "openai" },
-  { id: "text-embedding-ada-002", name: "text-embedding-ada-002", dimensions: 1536, provider: "openai" },
-  { id: "text-embedding-004", name: "text-embedding-004", dimensions: 768, provider: "gemini" },
+  {
+    id: "text-embedding-3-small",
+    name: "text-embedding-3-small",
+    dimensions: 1536,
+    provider: "openai",
+  },
+  {
+    id: "text-embedding-3-large",
+    name: "text-embedding-3-large",
+    dimensions: 3072,
+    provider: "openai",
+  },
+  {
+    id: "text-embedding-ada-002",
+    name: "text-embedding-ada-002",
+    dimensions: 1536,
+    provider: "openai",
+  },
+  {
+    id: "text-embedding-004",
+    name: "text-embedding-004",
+    dimensions: 768,
+    provider: "gemini",
+  },
 ];
 
 export interface EmbeddingResult {
@@ -324,6 +376,41 @@ export interface EmbeddingResult {
   model: string;
   provider: EmbeddingProvider;
   took_ms: number;
+}
+
+// ─── Reindex ──────────────────────────────────────────────────────────
+
+export type ReindexStatus =
+  | "Queued"
+  | "Building"
+  | "Swapping"
+  | "Completed"
+  | "Failed";
+
+export interface ReindexStats {
+  points_processed: number;
+  points_total: number;
+  tombstones_cleaned: number;
+  old_index_size_bytes: number;
+  new_index_size_bytes: number;
+}
+
+export interface ReindexJob {
+  id: string;
+  collection: string;
+  status: ReindexStatus;
+  progress: number;
+  started_at: number;
+  completed_at?: number | null;
+  error?: string | null;
+  stats: ReindexStats;
+}
+
+export interface StartReindexResponse {
+  job_id: string;
+  collection: string;
+  status: ReindexStatus;
+  message: string;
 }
 
 // ─── WebSocket Log Entry (for UI) ────────────────────────────────────

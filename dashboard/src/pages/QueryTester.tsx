@@ -154,6 +154,8 @@ function QueryTesterContent() {
   // Hybrid search
   const [hybridAlpha, setHybridAlpha] = useState('0.5');
   const [hybridTextQuery, setHybridTextQuery] = useState('');
+  const [hybridFusion, setHybridFusion] = useState<'weighted' | 'rrf'>('weighted');
+  const [hybridRrfK, setHybridRrfK] = useState('60');
   const [hybridResults, setHybridResults] = useState<SearchResult[]>([]);
   const [hybridLoading, setHybridLoading] = useState(false);
   const [hybridError, setHybridError] = useState<string | null>(null);
@@ -247,12 +249,18 @@ function QueryTesterContent() {
     setHybridResults([]);
     try {
       const embedding = await getEmbedding();
-      const res = await pointsApi.hybridSearch(selectedCollection, {
+      const params: Record<string, unknown> = {
         query_vector: embedding,
         query_text: hybridTextQuery || query,
         limit,
-        alpha: parseFloat(hybridAlpha) || 0.5,
-      });
+        fusion: hybridFusion,
+      };
+      if (hybridFusion === 'weighted') {
+        params.alpha = parseFloat(hybridAlpha) || 0.5;
+      } else {
+        params.rrf_k = parseInt(hybridRrfK, 10) || 60;
+      }
+      const res = await pointsApi.hybridSearch(selectedCollection, params as any);
       setHybridResults(res);
     } catch (err) {
       setHybridError(err instanceof Error ? err.message : 'Hybrid search failed');
@@ -585,24 +593,81 @@ function QueryTesterContent() {
                       className="bg-bg-secondary border-bg-tertiary text-gray-50"
                     />
                   </div>
+
+                  {/* Fusion Strategy Selector */}
                   <div>
                     <label className="block text-sm font-medium text-gray-400 mb-2">
-                      Alpha ({hybridAlpha}) — 0 = pure BM25, 1 = pure vector
+                      Fusion Strategy
                     </label>
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      value={hybridAlpha}
-                      onChange={(e) => setHybridAlpha(e.target.value)}
-                      className="w-full accent-orange-500"
-                    />
-                    <div className="flex justify-between text-[10px] text-gray-500">
-                      <span>BM25</span>
-                      <span>Vector</span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setHybridFusion('weighted')}
+                        className={`flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                          hybridFusion === 'weighted'
+                            ? 'bg-orange-500/20 text-orange-400 border border-orange-500/50'
+                            : 'bg-bg-secondary text-gray-400 border border-bg-tertiary hover:border-gray-500'
+                        }`}
+                      >
+                        Weighted
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setHybridFusion('rrf')}
+                        className={`flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                          hybridFusion === 'rrf'
+                            ? 'bg-orange-500/20 text-orange-400 border border-orange-500/50'
+                            : 'bg-bg-secondary text-gray-400 border border-bg-tertiary hover:border-gray-500'
+                        }`}
+                      >
+                        RRF
+                      </button>
                     </div>
+                    <p className="text-[10px] text-gray-500 mt-1">
+                      {hybridFusion === 'weighted'
+                        ? 'Weighted: control vector vs keyword balance with alpha'
+                        : 'RRF: stable rank-based fusion, treats all rankers equally'}
+                    </p>
                   </div>
+
+                  {/* Alpha slider — only shown for weighted */}
+                  {hybridFusion === 'weighted' && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-400 mb-2">
+                        Alpha ({hybridAlpha}) — 0 = pure BM25, 1 = pure vector
+                      </label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={hybridAlpha}
+                        onChange={(e) => setHybridAlpha(e.target.value)}
+                        className="w-full accent-orange-500"
+                      />
+                      <div className="flex justify-between text-[10px] text-gray-500">
+                        <span>BM25</span>
+                        <span>Vector</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* RRF k input — only shown for rrf */}
+                  {hybridFusion === 'rrf' && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-400 mb-2">
+                        RRF k ({hybridRrfK}) — higher values smooth rank differences
+                      </label>
+                      <Input
+                        type="number"
+                        min="1"
+                        value={hybridRrfK}
+                        onChange={(e) => setHybridRrfK(e.target.value)}
+                        placeholder="60"
+                        className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                      />
+                    </div>
+                  )}
 
                   <Button
                     onClick={handleHybridSearch}
