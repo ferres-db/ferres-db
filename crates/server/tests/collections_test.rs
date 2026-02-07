@@ -419,3 +419,379 @@ async fn test_delete_collection_not_found() {
     assert_eq!(body["error"], "collection_not_found");
 }
 
+// ─── Explain Search E2E Tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_explain_search_endpoint() {
+    let server = setup_server().await;
+
+    // 1. Cria coleção
+    let create_url = format!("{}/api/v1/collections", server.base_url);
+    let response = server
+        .client
+        .post(&create_url)
+        .json(&create_collection_request("explain-test", 3, "euclidean"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // 2. Insere pontos com metadata
+    let upsert_url = format!("{}/api/v1/collections/explain-test/points", server.base_url);
+    let upsert_body = serde_json::json!({
+        "points": [
+            {"id": "p1", "vector": [1.0, 0.0, 0.0], "metadata": {"category": "tech", "price": 50}},
+            {"id": "p2", "vector": [0.0, 1.0, 0.0], "metadata": {"category": "science", "price": 200}},
+            {"id": "p3", "vector": [0.9, 0.1, 0.0], "metadata": {"category": "tech", "price": 30}}
+        ]
+    });
+    let response = server
+        .client
+        .post(&upsert_url)
+        .json(&upsert_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    // 3. Faz POST /search/explain sem filtro
+    let explain_url = format!(
+        "{}/api/v1/collections/explain-test/search/explain",
+        server.base_url
+    );
+    let explain_body = serde_json::json!({
+        "vector": [1.0, 0.0, 0.0],
+        "limit": 5
+    });
+    let response = server
+        .client
+        .post(&explain_url)
+        .json(&explain_body)
+        .send()
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    assert_eq!(status, reqwest::StatusCode::OK, "body: {:?}", body);
+
+    // Verifica schema da resposta
+    assert!(body["query_vector_norm"].is_number());
+    assert!(body["distance_metric"].is_string());
+    assert!(body["candidates_scanned"].is_number());
+    assert!(body["candidates_after_filter"].is_number());
+    assert!(body["results"].is_array());
+    assert!(body["index_stats"].is_object());
+
+    // Verifica resultados
+    let results = body["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+
+    // Verifica schema de cada resultado
+    for result in results {
+        assert!(result["id"].is_string());
+        assert!(result["score"].is_number());
+        assert!(result["distance_metric"].is_string());
+        assert!(result["raw_distance"].is_number());
+        assert!(result["score_breakdown"].is_object());
+        assert!(result["score_breakdown"]["vector_score"].is_number());
+        assert!(result["rank_before_filter"].is_number());
+    }
+
+    // Verifica index_stats
+    assert!(body["index_stats"]["total_points"].is_number());
+    assert!(body["index_stats"]["hnsw_layers"].is_number());
+    assert!(body["index_stats"]["ef_search_used"].is_number());
+    assert!(body["index_stats"]["tombstones_skipped"].is_number());
+
+    // 4. Faz POST /search/explain COM filtro
+    let explain_body_filtered = serde_json::json!({
+        "vector": [1.0, 0.0, 0.0],
+        "limit": 5,
+        "filter": {
+            "category": "tech",
+            "price": { "$lte": 100 }
+        }
+    });
+    let response = server
+        .client
+        .post(&explain_url)
+        .json(&explain_body_filtered)
+        .send()
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    assert_eq!(status, reqwest::StatusCode::OK, "body: {:?}", body);
+
+    // Com filtro, cada resultado deve ter filter_evaluation
+    let results = body["results"].as_array().unwrap();
+    for result in results {
+        assert!(
+            result["filter_evaluation"].is_object(),
+            "filter_evaluation deve estar presente quando filtro é aplicado"
+        );
+        let eval = &result["filter_evaluation"];
+        assert!(eval["conditions"].is_array());
+        assert!(eval["passed"].is_boolean());
+    }
+
+    // candidates_after_filter deve ser <= candidates_scanned
+    let scanned = body["candidates_scanned"].as_u64().unwrap();
+    let after_filter = body["candidates_after_filter"].as_u64().unwrap();
+    assert!(after_filter <= scanned);
+}
+
+// ─── Estimate Search Cost E2E Tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_estimate_search_endpoint() {
+    let server = setup_server().await;
+
+    // 1. Cria coleção
+    let create_url = format!("{}/api/v1/collections", server.base_url);
+    let response = server
+        .client
+        .post(&create_url)
+        .json(&create_collection_request("estimate-test", 3, "euclidean"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // 2. Insere pontos
+    let upsert_url = format!(
+        "{}/api/v1/collections/estimate-test/points",
+        server.base_url
+    );
+    let upsert_body = serde_json::json!({
+        "points": [
+            {"id": "p1", "vector": [1.0, 0.0, 0.0], "metadata": {"category": "tech"}},
+            {"id": "p2", "vector": [0.0, 1.0, 0.0], "metadata": {"category": "science"}},
+            {"id": "p3", "vector": [0.9, 0.1, 0.0], "metadata": {"category": "tech"}}
+        ]
+    });
+    let response = server
+        .client
+        .post(&upsert_url)
+        .json(&upsert_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    // 3. Estima custo sem filtro
+    let estimate_url = format!(
+        "{}/api/v1/collections/estimate-test/search/estimate",
+        server.base_url
+    );
+    let estimate_body = serde_json::json!({
+        "limit": 5
+    });
+    let response = server
+        .client
+        .post(&estimate_url)
+        .json(&estimate_body)
+        .send()
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "body: {:?}", body);
+
+    // Verifica schema
+    assert!(body["estimated_ms"].is_number());
+    assert!(body["confidence_range"].is_array());
+    assert!(body["estimated_memory_bytes"].is_number());
+    assert!(body["estimated_nodes_visited"].is_number());
+    assert!(body["is_expensive"].is_boolean());
+    assert!(body["recommendations"].is_array());
+    assert!(body["breakdown"].is_object());
+    assert!(body["breakdown"]["index_scan_cost"].is_number());
+    assert!(body["breakdown"]["filter_cost"].is_number());
+    assert!(body["breakdown"]["hydration_cost"].is_number());
+    assert!(body["breakdown"]["network_overhead"].is_number());
+
+    // historical_latency não deve estar presente (não solicitado)
+    assert!(body["historical_latency"].is_null());
+
+    // 4. Estima custo com filtro e include_history
+    let estimate_body_with_filter = serde_json::json!({
+        "limit": 10,
+        "filter": { "category": "tech" },
+        "include_history": true
+    });
+    let response = server
+        .client
+        .post(&estimate_url)
+        .json(&estimate_body_with_filter)
+        .send()
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "body: {:?}", body);
+
+    // Com filtro, filter_cost deve ser > 0
+    assert!(
+        body["breakdown"]["filter_cost"].as_f64().unwrap() > 0.0,
+        "filter_cost should be > 0 when filter is present"
+    );
+
+    // Com include_history, historical_latency deve estar presente
+    assert!(body["historical_latency"].is_object());
+    assert!(body["historical_latency"]["p50_ms"].is_number());
+    assert!(body["historical_latency"]["p95_ms"].is_number());
+    assert!(body["historical_latency"]["p99_ms"].is_number());
+    assert!(body["historical_latency"]["avg_ms"].is_number());
+    assert!(body["historical_latency"]["total_queries"].is_number());
+}
+
+#[tokio::test]
+async fn test_estimate_search_collection_not_found() {
+    let server = setup_server().await;
+
+    let estimate_url = format!(
+        "{}/api/v1/collections/nonexistent/search/estimate",
+        server.base_url
+    );
+    let estimate_body = serde_json::json!({ "limit": 5 });
+    let response = server
+        .client
+        .post(&estimate_url)
+        .json(&estimate_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_budget_ms_search_rejected() {
+    let server = setup_server().await;
+
+    // 1. Cria coleção
+    let create_url = format!("{}/api/v1/collections", server.base_url);
+    let response = server
+        .client
+        .post(&create_url)
+        .json(&create_collection_request("budget-test", 3, "euclidean"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // 2. Insere pontos
+    let upsert_url = format!(
+        "{}/api/v1/collections/budget-test/points",
+        server.base_url
+    );
+    let upsert_body = serde_json::json!({
+        "points": [
+            {"id": "p1", "vector": [1.0, 0.0, 0.0], "metadata": {}},
+            {"id": "p2", "vector": [0.0, 1.0, 0.0], "metadata": {}}
+        ]
+    });
+    let response = server
+        .client
+        .post(&upsert_url)
+        .json(&upsert_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    // 3. Busca com budget_ms muito baixo (0ms) — deve ser rejeitada
+    let search_url = format!(
+        "{}/api/v1/collections/budget-test/search",
+        server.base_url
+    );
+    let search_body = serde_json::json!({
+        "vector": [1.0, 0.0, 0.0],
+        "limit": 5,
+        "budget_ms": 0
+    });
+    let response = server
+        .client
+        .post(&search_url)
+        .json(&search_body)
+        .send()
+        .await
+        .unwrap();
+
+    // Deve retornar 422 com estimate no body
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+        "budget_ms=0 should always be rejected"
+    );
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "budget_exceeded");
+    assert!(body["estimate"].is_object());
+    assert!(body["estimate"]["estimated_ms"].is_number());
+    assert!(body["estimate"]["breakdown"].is_object());
+}
+
+#[tokio::test]
+async fn test_budget_ms_search_accepted() {
+    let server = setup_server().await;
+
+    // 1. Cria coleção
+    let create_url = format!("{}/api/v1/collections", server.base_url);
+    let response = server
+        .client
+        .post(&create_url)
+        .json(&create_collection_request("budget-accept-test", 3, "euclidean"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // 2. Insere pontos
+    let upsert_url = format!(
+        "{}/api/v1/collections/budget-accept-test/points",
+        server.base_url
+    );
+    let upsert_body = serde_json::json!({
+        "points": [
+            {"id": "p1", "vector": [1.0, 0.0, 0.0], "metadata": {}}
+        ]
+    });
+    let response = server
+        .client
+        .post(&upsert_url)
+        .json(&upsert_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    // 3. Busca com budget_ms muito alto (10 segundos) — deve funcionar
+    let search_url = format!(
+        "{}/api/v1/collections/budget-accept-test/search",
+        server.base_url
+    );
+    let search_body = serde_json::json!({
+        "vector": [1.0, 0.0, 0.0],
+        "limit": 1,
+        "budget_ms": 10000
+    });
+    let response = server
+        .client
+        .post(&search_url)
+        .json(&search_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["results"].is_array());
+}

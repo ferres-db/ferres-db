@@ -58,14 +58,32 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
         operation = ?operation
     );
     let _guard = span.enter();
-    
+
+    // OTel: propaga W3C trace context (traceparent/tracestate) para o span atual
+    #[cfg(feature = "otel")]
+    {
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        let parent_cx = extract_otel_context(req.headers());
+        span.set_parent(parent_cx);
+    }
+
     let start = Instant::now();
 
-    // Adiciona request_id como header na resposta (opcional, para debugging)
-    let response = next.run(req).await;
+    #[allow(unused_mut)]
+    let mut response = next.run(req).await;
     let latency_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let status = response.status();
     let status_str = status.as_u16().to_string();
+
+    // OTel: adiciona trace_id no header de resposta para correlação/debugging
+    #[cfg(feature = "otel")]
+    {
+        if let Some(trace_id) = otel_trace_id(&span) {
+            if let Ok(v) = trace_id.parse() {
+                response.headers_mut().insert("x-trace-id", v);
+            }
+        }
+    }
 
     // Registra métricas Prometheus
     HTTP_REQUESTS_TOTAL
@@ -146,6 +164,45 @@ fn extract_collection_and_operation(path: &str) -> (Option<String>, Option<Strin
     };
     
     (None, operation)
+}
+
+// ─── OTel Trace Propagation ──────────────────────────────────────────────
+
+/// Extrai o contexto W3C Trace Context dos headers da requisição (traceparent, tracestate).
+#[cfg(feature = "otel")]
+fn extract_otel_context(headers: &axum::http::HeaderMap) -> opentelemetry::Context {
+    use opentelemetry::propagation::Extractor as OtelExtractor;
+
+    struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
+
+    impl<'a> OtelExtractor for HeaderExtractor<'a> {
+        fn get(&self, key: &str) -> Option<&str> {
+            self.0.get(key).and_then(|v| v.to_str().ok())
+        }
+        fn keys(&self) -> Vec<&str> {
+            self.0.keys().map(|k| k.as_str()).collect()
+        }
+    }
+
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(headers))
+    })
+}
+
+/// Obtém o trace_id do span OTel atual para incluir na resposta HTTP.
+#[cfg(feature = "otel")]
+fn otel_trace_id(span: &tracing::Span) -> Option<String> {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let otel_ctx = span.context();
+    let otel_span = otel_ctx.span();
+    let sc = otel_span.span_context();
+    if sc.is_valid() {
+        Some(sc.trace_id().to_string())
+    } else {
+        None
+    }
 }
 
 // ─── Rate Limiting por Coleção ────────────────────────────────────────────

@@ -65,6 +65,13 @@ pub enum ApiError {
         /// Mensagem de erro.
         message: String,
     },
+    /// Query excede o orçamento de latência (budget_ms).
+    BudgetExceeded {
+        /// Mensagem de erro.
+        message: String,
+        /// Estimativa de custo detalhada.
+        estimate: serde_json::Value,
+    },
 }
 
 impl ApiError {
@@ -117,6 +124,14 @@ impl ApiError {
         }
     }
 
+    /// Cria um erro de orçamento excedido (422 Unprocessable Entity).
+    pub fn budget_exceeded(message: impl Into<String>, estimate: serde_json::Value) -> Self {
+        Self::BudgetExceeded {
+            message: message.into(),
+            estimate,
+        }
+    }
+
     /// Retorna o código de status HTTP correspondente.
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -129,6 +144,7 @@ impl ApiError {
             }
             Self::InternalError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ApiKeyStoreUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            Self::BudgetExceeded { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 
@@ -142,6 +158,7 @@ impl ApiError {
             Self::InternalError { .. } => "internal_error",
             Self::QueryProfileNotFound { .. } => "query_profile_not_found",
             Self::ApiKeyStoreUnavailable { .. } => "api_key_store_unavailable",
+            Self::BudgetExceeded { .. } => "budget_exceeded",
         }
     }
 
@@ -155,6 +172,7 @@ impl ApiError {
             Self::InternalError { message } => message,
             Self::QueryProfileNotFound { message } => message,
             Self::ApiKeyStoreUnavailable { message } => message,
+            Self::BudgetExceeded { message, .. } => message,
         }
     }
 }
@@ -173,12 +191,24 @@ impl IntoResponse for ApiError {
             "API error"
         );
 
-        // Formato JSON estruturado: {error: tipo, message: descrição, code: HTTP status}
-        let body = json!({
-            "error": error_type,
-            "message": message,
-            "code": status.as_u16(),
-        });
+        // Para BudgetExceeded, inclui a estimativa no body para que o cliente possa analisar
+        let body = match &self {
+            Self::BudgetExceeded { estimate, .. } => {
+                json!({
+                    "error": error_type,
+                    "message": message,
+                    "code": status.as_u16(),
+                    "estimate": estimate,
+                })
+            }
+            _ => {
+                json!({
+                    "error": error_type,
+                    "message": message,
+                    "code": status.as_u16(),
+                })
+            }
+        };
 
         (status, Json(body)).into_response()
     }

@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::error::FerresError;
+use crate::explain::ExplainMeta;
 use crate::point::Point;
 
 // ─── DistanceMetric ─────────────────────────────────────────────────
@@ -107,6 +108,35 @@ pub trait ANNIndex: Send + Sync {
     /// isso marca o ponto como tombstone — ele é ignorado nas buscas
     /// mas continua no grafo até o próximo `build`.
     fn remove_point(&mut self, id: &str);
+
+    /// Busca os `k` vizinhos mais próximos com metadados de explicação.
+    ///
+    /// Retorna tuplas `(point_id, distância, ExplainMeta)` com informações
+    /// adicionais sobre o processo de busca (candidatos visitados, camadas
+    /// percorridas, tombstones ignorados).
+    ///
+    /// A implementação padrão delega para [`search`] sem metadata extra.
+    fn search_explain(
+        &self,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(String, f32, ExplainMeta)>, FerresError> {
+        let results = self.search(query, k)?;
+        Ok(results
+            .into_iter()
+            .map(|(id, score)| {
+                (
+                    id,
+                    score,
+                    ExplainMeta {
+                        candidates_visited: 0,
+                        layers_traversed: 0,
+                        tombstones_skipped: 0,
+                    },
+                )
+            })
+            .collect())
+    }
 }
 
 // ─── HnswConfig ─────────────────────────────────────────────────────
@@ -388,6 +418,12 @@ impl ANNIndex for HnswIndex {
         let extra = k.saturating_add(self.tombstones.len()).min(max_points);
         let ef = self.config.ef_search.max(extra);
 
+        let _search_span = tracing::info_span!("hnsw.search",
+            candidates = max_points,
+            ef = ef,
+            tombstones = self.tombstones.len(),
+        ).entered();
+
         let neighbours = match &self.inner {
             IndexVariant::Cosine(hnsw) => hnsw.search(&prepared, extra, ef),
             IndexVariant::DotProduct(hnsw) => hnsw.search(&prepared, extra, ef),
@@ -430,6 +466,58 @@ impl ANNIndex for HnswIndex {
             self.tombstones.insert(id.to_string());
             debug!(id, "point tombstoned in HNSW index");
         }
+    }
+
+    fn search_explain(
+        &self,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(String, f32, ExplainMeta)>, FerresError> {
+        // Normaliza o query se a métrica for Cosine.
+        let prepared = prepare_vector(query, self.distance)?;
+
+        let max_points = self.id_map.len();
+        let k = k.min(max_points);
+
+        if k == 0 || max_points == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Pedimos mais resultados para compensar tombstones filtrados.
+        let extra = k.saturating_add(self.tombstones.len()).min(max_points);
+        let ef = self.config.ef_search.max(extra);
+
+        let neighbours = match &self.inner {
+            IndexVariant::Cosine(hnsw) => hnsw.search(&prepared, extra, ef),
+            IndexVariant::DotProduct(hnsw) => hnsw.search(&prepared, extra, ef),
+            IndexVariant::Euclidean(hnsw) => hnsw.search(&prepared, extra, ef),
+        };
+
+        let candidates_visited = neighbours.len();
+        let mut tombstones_skipped = 0;
+
+        let results: Vec<(String, f32, ExplainMeta)> = neighbours
+            .into_iter()
+            .filter_map(|n| {
+                let id = self.id_map.get(n.d_id)?;
+                if self.tombstones.contains(id) {
+                    tombstones_skipped += 1;
+                    return None;
+                }
+                Some((
+                    id.clone(),
+                    n.distance,
+                    ExplainMeta {
+                        candidates_visited,
+                        layers_traversed: self.config.max_layer,
+                        tombstones_skipped,
+                    },
+                ))
+            })
+            .take(k)
+            .collect();
+
+        Ok(results)
     }
 }
 
