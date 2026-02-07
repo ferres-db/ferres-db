@@ -3,11 +3,13 @@
 //! Servidor HTTP do FerresDB usando Axum.
 
 pub mod api_keys;
+pub mod audit;
 pub mod auth;
 pub mod users;
 pub mod error;
 pub mod handlers;
 pub mod middleware;
+pub mod permissions;
 pub mod request_validation;
 pub mod metrics;
 pub mod query_logger;

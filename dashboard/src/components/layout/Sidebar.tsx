@@ -1,14 +1,17 @@
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Database, Sparkles, Key, Users as UsersIcon } from 'lucide-react';
+import { LayoutDashboard, Database, Sparkles, Key, Users as UsersIcon, ShieldCheck, Cpu, Radio } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { getStoredRole, type Role } from '@/api/ferresdb';
 
 const allNav = [
   { name: 'Overview', href: '/', icon: LayoutDashboard, roles: ['admin', 'editor', 'viewer'] as Role[] },
   { name: 'Collections', href: '/collections', icon: Database, roles: ['admin', 'editor', 'viewer'] as Role[] },
+  { name: 'Embeddings', href: '/embeddings', icon: Cpu, roles: ['admin', 'editor'] as Role[] },
+  { name: 'Streaming', href: '/streaming', icon: Radio, roles: ['admin', 'editor'] as Role[] },
   { name: 'Query Tester', href: '/query-tester', icon: Sparkles, roles: ['admin', 'editor'] as Role[] },
   { name: 'API Keys', href: '/api-keys', icon: Key, roles: ['admin', 'editor'] as Role[] },
-  { name: 'Usuários', href: '/users', icon: UsersIcon, roles: ['admin'] as Role[] },
+  { name: 'Users', href: '/users', icon: UsersIcon, roles: ['admin'] as Role[] },
+  { name: 'Audit', href: '/audit', icon: ShieldCheck, roles: ['admin'] as Role[] },
 ];
 
 export const Sidebar = () => {

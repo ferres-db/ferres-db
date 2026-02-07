@@ -115,6 +115,7 @@ fn benchmark_indexing(c: &mut Criterion) {
                         search_cache_size: 0,
                         enable_bm25: false,
                         bm25_text_field: "text".to_string(),
+                        quantization: Default::default(),
                     };
                     
                     db.create_collection(config).unwrap();
@@ -170,6 +171,7 @@ fn benchmark_search(c: &mut Criterion) {
         search_cache_size: 0,
         enable_bm25: false,
         bm25_text_field: "text".to_string(),
+        quantization: Default::default(),
     };
     db.create_collection(config).unwrap();
     db.upsert_points("search_bench", points.clone()).unwrap();
@@ -287,6 +289,7 @@ fn benchmark_upsert(c: &mut Criterion) {
                 search_cache_size: 0,
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
+                quantization: Default::default(),
             };
             db.create_collection(config).unwrap();
 
@@ -306,6 +309,155 @@ fn benchmark_upsert(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_indexing, benchmark_search, benchmark_upsert);
+// ─── Benchmark de SQ8 Quantization ──────────────────────────────────────
+
+fn benchmark_sq8(c: &mut Criterion) {
+    use rand::Rng;
+
+    let mut rng = rand::thread_rng();
+    let mut group = c.benchmark_group("sq8_quantization");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(15));
+
+    for n in [10_000usize, 100_000] {
+        let dim = 384;
+        let k = 10;
+
+        // Gera vetores aleatórios
+        let points: Vec<ferres_db_core::Point> = (0..n)
+            .map(|i| {
+                let vector: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0_f32..1.0)).collect();
+                ferres_db_core::Point {
+                    id: format!("v{i}"),
+                    vector,
+                    metadata: serde_json::Value::Null,
+                    created_at: 0,
+                }
+            })
+            .collect();
+
+        let queries: Vec<Vec<f32>> = (0..100)
+            .map(|_| (0..dim).map(|_| rng.gen_range(-1.0_f32..1.0)).collect())
+            .collect();
+
+        // Benchmark SQ8 build + search
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("sq8_build_{n}")),
+            &points,
+            |b, points| {
+                b.iter(|| {
+                    let sq_config = ferres_db_core::ScalarQuantizationConfig {
+                        dtype: ferres_db_core::ScalarType::Int8,
+                        always_ram: false,
+                        quantile: 99.5,
+                    };
+                    let mut index = ferres_db_core::QuantizedHnswIndex::new(
+                        ferres_db_core::DistanceMetric::Euclidean,
+                        ferres_db_core::HnswConfig {
+                            max_nb_connection: 16,
+                            max_elements: n + 100,
+                            max_layer: 16,
+                            ef_construction: 200,
+                            ef_search: 50,
+                        },
+                        sq_config,
+                    );
+                    index.build(black_box(points)).unwrap();
+                });
+            },
+        );
+
+        // Compare recall: f32 vs SQ8
+        // Build indices once for search benchmarks
+        let hnsw_config = ferres_db_core::HnswConfig {
+            max_nb_connection: 16,
+            max_elements: n + 100,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 50,
+        };
+
+        let mut normal_index = ferres_db_core::HnswIndex::new(
+            ferres_db_core::DistanceMetric::Euclidean,
+            hnsw_config.clone(),
+        );
+        normal_index.build(&points).unwrap();
+
+        let sq_config = ferres_db_core::ScalarQuantizationConfig {
+            dtype: ferres_db_core::ScalarType::Int8,
+            always_ram: false,
+            quantile: 99.5,
+        };
+        let mut sq_index = ferres_db_core::QuantizedHnswIndex::new(
+            ferres_db_core::DistanceMetric::Euclidean,
+            hnsw_config,
+            sq_config,
+        );
+        sq_index.build(&points).unwrap();
+
+        // Benchmark f32 search
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("f32_search_{n}")),
+            &queries,
+            |b, queries| {
+                b.iter(|| {
+                    for q in queries {
+                        let _ = black_box(normal_index.search(q, k).unwrap());
+                    }
+                });
+            },
+        );
+
+        // Benchmark SQ8 search
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("sq8_search_{n}")),
+            &queries,
+            |b, queries| {
+                b.iter(|| {
+                    for q in queries {
+                        let _ = black_box(sq_index.search(q, k).unwrap());
+                    }
+                });
+            },
+        );
+
+        // Print recall comparison
+        println!("\n📊 SQ8 Recall@{k} comparison ({n} vectors, dim={dim}):");
+        let mut total_overlap = 0usize;
+        let mut total_possible = 0usize;
+        for q in &queries {
+            let normal_results = normal_index.search(q, k).unwrap();
+            let sq_results = sq_index.search(q, k).unwrap();
+
+            let normal_ids: std::collections::HashSet<&str> =
+                normal_results.iter().map(|r| r.0.as_str()).collect();
+            let sq_ids: std::collections::HashSet<&str> =
+                sq_results.iter().map(|r| r.0.as_str()).collect();
+
+            total_overlap += normal_ids.intersection(&sq_ids).count();
+            total_possible += k.min(normal_results.len());
+        }
+        let recall = if total_possible > 0 {
+            total_overlap as f64 / total_possible as f64
+        } else {
+            0.0
+        };
+        println!("   Recall@{k}: {recall:.3} ({total_overlap}/{total_possible})");
+
+        // Print memory comparison
+        let f32_mem = n * dim * 4;
+        let u8_mem = n * dim * 1;
+        println!(
+            "   Memory: f32={:.1}MB, SQ8={:.1}MB ({:.1}x compression)",
+            f32_mem as f64 / 1024.0 / 1024.0,
+            u8_mem as f64 / 1024.0 / 1024.0,
+            f32_mem as f64 / u8_mem as f64
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, benchmark_indexing, benchmark_search, benchmark_upsert, benchmark_sq8);
 criterion_main!(benches);
 

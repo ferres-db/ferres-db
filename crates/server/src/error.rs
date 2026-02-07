@@ -72,6 +72,11 @@ pub enum ApiError {
         /// Estimativa de custo detalhada.
         estimate: serde_json::Value,
     },
+    /// Permissão negada (RBAC).
+    Forbidden {
+        /// Mensagem de erro.
+        message: String,
+    },
 }
 
 impl ApiError {
@@ -132,6 +137,13 @@ impl ApiError {
         }
     }
 
+    /// Cria um erro de permissão negada (403 Forbidden).
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::Forbidden {
+            message: message.into(),
+        }
+    }
+
     /// Retorna o código de status HTTP correspondente.
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -145,6 +157,7 @@ impl ApiError {
             Self::InternalError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ApiKeyStoreUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::BudgetExceeded { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Forbidden { .. } => StatusCode::FORBIDDEN,
         }
     }
 
@@ -159,6 +172,7 @@ impl ApiError {
             Self::QueryProfileNotFound { .. } => "query_profile_not_found",
             Self::ApiKeyStoreUnavailable { .. } => "api_key_store_unavailable",
             Self::BudgetExceeded { .. } => "budget_exceeded",
+            Self::Forbidden { .. } => "forbidden",
         }
     }
 
@@ -173,6 +187,7 @@ impl ApiError {
             Self::QueryProfileNotFound { message } => message,
             Self::ApiKeyStoreUnavailable { message } => message,
             Self::BudgetExceeded { message, .. } => message,
+            Self::Forbidden { message } => message,
         }
     }
 }

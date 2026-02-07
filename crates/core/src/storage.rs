@@ -32,6 +32,7 @@ use tracing::{debug, info, warn};
 use crate::collection::{Collection, CollectionConfig};
 use crate::error::FerresError;
 use crate::point::Point;
+use crate::quantization::QuantizationConfig;
 use crate::search::{DistanceMetric, HnswConfig};
 
 // ─── StorageCircuitBreaker ─────────────────────────────────────────────
@@ -164,6 +165,9 @@ pub struct CollectionMeta {
     pub dimension: usize,
     pub distance: DistanceMetric,
     pub hnsw_config: HnswConfig,
+    /// Configuração de quantização (default: None para backward compat).
+    #[serde(default)]
+    pub quantization: QuantizationConfig,
 }
 
 /// Engine de armazenamento em disco baseado em arquivos.
@@ -553,6 +557,7 @@ mod tests {
             dimension: 3,
             distance: DistanceMetric::Cosine,
             hnsw_config: HnswConfig::default(),
+            quantization: QuantizationConfig::default(),
         };
 
         let points = vec![
@@ -587,6 +592,7 @@ mod tests {
             search_cache_size: 0,
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
+            quantization: Default::default(),
         };
 
         let mut collection = Collection::new(config);
@@ -648,6 +654,7 @@ mod tests {
             search_cache_size: 0,
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
+            quantization: Default::default(),
         };
         let mut collection = Collection::new(config);
         collection
@@ -715,6 +722,7 @@ mod tests {
             dimension: 2,
             distance: DistanceMetric::Euclidean,
             hnsw_config: HnswConfig::default(),
+            quantization: QuantizationConfig::default(),
         };
         storage.save_collection(&meta, &[]).unwrap();
 

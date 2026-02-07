@@ -1,5 +1,24 @@
-import axios from 'axios';
-import type { Collection, Point, SearchResult, GlobalStats, QueryEntry, CollectionStats, ApiKeyInfo, CreateApiKeyResponse, UserInfo } from '@/types';
+import axios from "axios";
+import type {
+  Collection,
+  Point,
+  SearchResult,
+  GlobalStats,
+  QueryEntry,
+  CollectionStats,
+  ApiKeyInfo,
+  CreateApiKeyResponse,
+  UserInfo,
+  Permission,
+  AuditEntry,
+  AuditQueryParams,
+  QuantizationConfig,
+  HybridSearchRequest,
+  SearchExplainRequest,
+  SearchExplainResponse,
+  SearchEstimateRequest,
+  SearchEstimateResponse,
+} from "@/types";
 
 // Runtime (Docker): window.__RUNTIME_CONFIG__ é preenchido pelo entrypoint.
 // Build-time (Vite): import.meta.env. Fallback para dev com proxy.
@@ -8,23 +27,24 @@ declare global {
     __RUNTIME_CONFIG__?: { apiBaseUrl?: string; apiKey?: string };
   }
 }
-const runtime = typeof window !== 'undefined' ? window.__RUNTIME_CONFIG__ : undefined;
+const runtime =
+  typeof window !== "undefined" ? window.__RUNTIME_CONFIG__ : undefined;
 const API_BASE_URL =
   runtime?.apiBaseUrl ||
   (import.meta.env.DEV
-    ? (import.meta.env.VITE_API_BASE_URL ?? '')
-    : (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'));
+    ? (import.meta.env.VITE_API_BASE_URL ?? "")
+    : import.meta.env.VITE_API_BASE_URL || "http://localhost:8080");
 
 /** API key (env ou runtime). Usada quando o usuário não está logado. */
 function getApiKey(): string | null {
   const key = runtime?.apiKey || import.meta.env.VITE_API_KEY;
-  return (typeof key === 'string' && key.trim()) ? key.trim() : null;
+  return typeof key === "string" && key.trim() ? key.trim() : null;
 }
 
-const TOKEN_KEY = 'ferresdb_token';
-const ROLE_KEY = 'ferresdb_role';
+const TOKEN_KEY = "ferresdb_token";
+const ROLE_KEY = "ferresdb_role";
 
-export type Role = 'admin' | 'editor' | 'viewer';
+export type Role = "admin" | "editor" | "viewer";
 
 /** Token do login do dashboard (localStorage). */
 export function getStoredToken(): string | null {
@@ -38,7 +58,7 @@ export function setStoredToken(token: string): void {
 /** Role do usuário logado (admin, editor, viewer). */
 export function getStoredRole(): Role | null {
   const r = localStorage.getItem(ROLE_KEY);
-  if (r === 'admin' || r === 'editor' || r === 'viewer') return r;
+  if (r === "admin" || r === "editor" || r === "viewer") return r;
   return null;
 }
 
@@ -53,7 +73,7 @@ export function clearStoredToken(): void {
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  headers: { 'Content-Type': 'application/json' },
+  headers: { "Content-Type": "application/json" },
 });
 
 // Interceptor: Bearer = token de login (se houver) ou API key (VITE_API_KEY / runtime)
@@ -75,15 +95,15 @@ apiClient.interceptors.response.use(
     if (error.response?.status === 401) {
       clearStoredToken();
     }
-    console.error('API Error:', error.response?.data || error.message);
+    console.error("API Error:", error.response?.data || error.message);
     return Promise.reject(error);
-  }
+  },
 );
 
 // Collections API
 export const collectionsApi = {
   list: async (): Promise<Collection[]> => {
-    const response = await apiClient.get('/api/v1/collections');
+    const response = await apiClient.get("/api/v1/collections");
     // A API retorna { collections: [...] }
     const collections = response.data.collections || [];
     // Mapeia para o formato esperado pelo frontend
@@ -111,21 +131,49 @@ export const collectionsApi = {
     };
   },
 
-  create: async (name: string, vectorSize: number, distanceMetric: string = 'cosine'): Promise<void> => {
+  create: async (
+    name: string,
+    vectorSize: number,
+    distanceMetric: string = "cosine",
+    options?: {
+      quantization?: QuantizationConfig;
+      enable_bm25?: boolean;
+      bm25_text_field?: string;
+    },
+  ): Promise<void> => {
     // Backend expects "dimension" and "distance" (PascalCase: Cosine, Euclidean, DotProduct)
     const distance =
-      distanceMetric === 'cosine'
-        ? 'Cosine'
-        : distanceMetric === 'euclidean'
-          ? 'Euclidean'
-          : distanceMetric === 'dot'
-            ? 'DotProduct'
-            : 'Cosine';
-    await apiClient.post('/api/v1/collections', {
+      distanceMetric === "cosine"
+        ? "Cosine"
+        : distanceMetric === "euclidean"
+          ? "Euclidean"
+          : distanceMetric === "dot"
+            ? "DotProduct"
+            : "Cosine";
+
+    const body: Record<string, unknown> = {
       name,
       dimension: vectorSize,
       distance,
-    });
+    };
+
+    if (options?.quantization && options.quantization !== "none") {
+      body.quantization = {
+        Scalar: {
+          dtype: "Int8",
+          always_ram: (options.quantization as any).always_ram ?? false,
+          quantile: (options.quantization as any).quantile ?? 0.99,
+        },
+      };
+    }
+    if (options?.enable_bm25) {
+      body.enable_bm25 = true;
+      if (options.bm25_text_field) {
+        body.bm25_text_field = options.bm25_text_field;
+      }
+    }
+
+    await apiClient.post("/api/v1/collections", body);
   },
 
   delete: async (name: string): Promise<void> => {
@@ -141,25 +189,36 @@ export const pointsApi = {
       limit?: number;
       offset?: number;
       filter?: Record<string, unknown>;
-    }
-  ): Promise<{ points: Point[]; total: number; limit: number; offset: number; has_more: boolean }> => {
+    },
+  ): Promise<{
+    points: Point[];
+    total: number;
+    limit: number;
+    offset: number;
+    has_more: boolean;
+  }> => {
     const params = new URLSearchParams();
-    if (options?.limit) params.append('limit', options.limit.toString());
-    if (options?.offset) params.append('offset', options.offset.toString());
-    if (options?.filter) params.append('filter', JSON.stringify(options.filter));
-    
+    if (options?.limit) params.append("limit", options.limit.toString());
+    if (options?.offset) params.append("offset", options.offset.toString());
+    if (options?.filter)
+      params.append("filter", JSON.stringify(options.filter));
+
     const queryString = params.toString();
-    const url = `/api/v1/collections/${collection}/points${queryString ? `?${queryString}` : ''}`;
+    const url = `/api/v1/collections/${collection}/points${queryString ? `?${queryString}` : ""}`;
     const response = await apiClient.get(url);
     return response.data;
   },
 
   upsert: async (collection: string, points: Point[]): Promise<void> => {
-    await apiClient.post(`/api/v1/collections/${collection}/points`, { points });
+    await apiClient.post(`/api/v1/collections/${collection}/points`, {
+      points,
+    });
   },
 
   get: async (collection: string, id: string): Promise<Point> => {
-    const response = await apiClient.get(`/api/v1/collections/${collection}/points/${id}`);
+    const response = await apiClient.get(
+      `/api/v1/collections/${collection}/points/${id}`,
+    );
     return response.data;
   },
 
@@ -173,32 +232,68 @@ export const pointsApi = {
     collection: string,
     vector: number[],
     limit: number = 10,
-    filter?: Record<string, unknown>
+    filter?: Record<string, unknown>,
   ): Promise<SearchResult[]> => {
-    const response = await apiClient.post(`/api/v1/collections/${collection}/search`, {
-      vector,
-      limit,
-      filter,
-    });
+    const response = await apiClient.post(
+      `/api/v1/collections/${collection}/search`,
+      {
+        vector,
+        limit,
+        filter,
+      },
+    );
     return response.data.results || [];
+  },
+
+  hybridSearch: async (
+    collection: string,
+    params: HybridSearchRequest,
+  ): Promise<SearchResult[]> => {
+    const response = await apiClient.post(
+      `/api/v1/collections/${collection}/search/hybrid`,
+      params,
+    );
+    return response.data.results || [];
+  },
+
+  explain: async (
+    collection: string,
+    params: SearchExplainRequest,
+  ): Promise<SearchExplainResponse> => {
+    const response = await apiClient.post(
+      `/api/v1/collections/${collection}/search/explain`,
+      params,
+    );
+    return response.data;
+  },
+
+  estimate: async (
+    collection: string,
+    params: SearchEstimateRequest,
+  ): Promise<SearchEstimateResponse> => {
+    const response = await apiClient.post(
+      `/api/v1/collections/${collection}/search/estimate`,
+      params,
+    );
+    return response.data;
   },
 };
 
 // Stats API
 export const statsApi = {
   global: async (): Promise<GlobalStats> => {
-    const response = await apiClient.get('/api/v1/stats/global');
+    const response = await apiClient.get("/api/v1/stats/global");
     return response.data;
   },
 
   queries: async (collection?: string): Promise<QueryEntry[]> => {
     const params = collection ? { collection } : {};
-    const response = await apiClient.get('/api/v1/stats/queries', { params });
+    const response = await apiClient.get("/api/v1/stats/queries", { params });
     return response.data;
   },
 
   slowQueries: async (): Promise<QueryEntry[]> => {
-    const response = await apiClient.get('/api/v1/stats/slow-queries');
+    const response = await apiClient.get("/api/v1/stats/slow-queries");
     return response.data;
   },
 
@@ -211,7 +306,7 @@ export const statsApi = {
 // Health API
 export const healthApi = {
   check: async (): Promise<{ status: string }> => {
-    const response = await apiClient.get('/health');
+    const response = await apiClient.get("/health");
     return response.data;
   },
 };
@@ -220,13 +315,13 @@ export const healthApi = {
 export const authApi = {
   login: async (
     username: string,
-    password: string
+    password: string,
   ): Promise<{ token: string; username: string; role: string }> => {
     const response = await apiClient.post<{
       token: string;
       username: string;
       role: string;
-    }>('/api/v1/auth/login', { username, password });
+    }>("/api/v1/auth/login", { username, password });
     return response.data;
   },
 };
@@ -234,12 +329,15 @@ export const authApi = {
 // API Keys API (requires valid token or API key)
 export const keysApi = {
   list: async (): Promise<ApiKeyInfo[]> => {
-    const response = await apiClient.get<ApiKeyInfo[]>('/api/v1/keys');
+    const response = await apiClient.get<ApiKeyInfo[]>("/api/v1/keys");
     return Array.isArray(response.data) ? response.data : [];
   },
 
   create: async (name: string): Promise<CreateApiKeyResponse> => {
-    const response = await apiClient.post<CreateApiKeyResponse>('/api/v1/keys', { name: name.trim() });
+    const response = await apiClient.post<CreateApiKeyResponse>(
+      "/api/v1/keys",
+      { name: name.trim() },
+    );
     return response.data;
   },
 
@@ -248,22 +346,24 @@ export const keysApi = {
   },
 };
 
-// Users API (dashboard users — list and create)
+// Users API (dashboard users — list, create, permissions)
 export const usersApi = {
   list: async (): Promise<UserInfo[]> => {
-    const response = await apiClient.get<UserInfo[]>('/api/v1/users');
+    const response = await apiClient.get<UserInfo[]>("/api/v1/users");
     return Array.isArray(response.data) ? response.data : [];
   },
 
   create: async (
     username: string,
     password: string,
-    role?: string
+    role?: string,
+    permissions?: Permission[] | null,
   ): Promise<UserInfo> => {
-    const response = await apiClient.post<UserInfo>('/api/v1/users', {
+    const response = await apiClient.post<UserInfo>("/api/v1/users", {
       username: username.trim(),
       password,
       ...(role && { role }),
+      ...(permissions !== undefined && { permissions: permissions ?? null }),
     });
     return response.data;
   },
@@ -273,8 +373,43 @@ export const usersApi = {
   },
 
   updatePassword: async (username: string, password: string): Promise<void> => {
-    await apiClient.put(`/api/v1/users/${encodeURIComponent(username)}/password`, {
-      password,
-    });
+    await apiClient.put(
+      `/api/v1/users/${encodeURIComponent(username)}/password`,
+      {
+        password,
+      },
+    );
+  },
+
+  updatePermissions: async (
+    username: string,
+    permissions: Permission[] | null,
+  ): Promise<{ updated: boolean; username: string }> => {
+    const response = await apiClient.put(
+      `/api/v1/users/${encodeURIComponent(username)}/permissions`,
+      {
+        permissions,
+      },
+    );
+    return response.data;
   },
 };
+
+// Audit API (Admin only)
+export const auditApi = {
+  list: async (params?: AuditQueryParams): Promise<AuditEntry[]> => {
+    const response = await apiClient.get<AuditEntry[]>("/api/v1/audit", {
+      params: params ?? {},
+    });
+    return Array.isArray(response.data) ? response.data : [];
+  },
+};
+
+// WebSocket URL helper
+export function getWsUrl(token?: string): string {
+  const base = API_BASE_URL || window.location.origin;
+  const wsProtocol = base.startsWith("https") ? "wss" : "ws";
+  const httpStripped = base.replace(/^https?:\/\//, "");
+  const authToken = token || getStoredToken() || getApiKey() || "";
+  return `${wsProtocol}://${httpStripped}/api/v1/ws?token=${encodeURIComponent(authToken)}`;
+}

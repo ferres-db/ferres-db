@@ -25,6 +25,7 @@
 //!     search_cache_size: 0,
 //!     enable_bm25: false,
 //!     bm25_text_field: "text".to_string(),
+//!     quantization: Default::default(),
 //! };
 //!
 //! db.create_collection(config).unwrap();
@@ -47,6 +48,7 @@ pub mod cost;
 pub mod error;
 pub mod explain;
 pub mod point;
+pub mod quantization;
 pub mod search;
 pub mod storage;
 pub mod wal;
@@ -56,7 +58,8 @@ pub use collection::{BatchInsertResult, Collection, CollectionConfig};
 pub use error::FerresError;
 pub use point::Point;
 pub use bm25::BM25Index;
-pub use search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex};
+pub use quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarType};
+pub use search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex, QuantizedHnswIndex, create_ann_index};
 pub use storage::{CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker};
 pub use wal::{Wal, WalEntry, WalOperation, recover_collection};
 pub use cost::{CostBreakdown, CostEstimateParams, QueryCostEstimate, estimate_search_cost};
@@ -388,6 +391,7 @@ impl VectorDB {
     ///     search_cache_size: 100,
     ///     enable_bm25: false,
     ///     bm25_text_field: "text".to_string(),
+    ///     quantization: Default::default(),
     /// };
     ///
     /// db.create_collection(config)?;
@@ -1305,6 +1309,7 @@ mod tests {
             search_cache_size: 0,
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
+            quantization: QuantizationConfig::default(),
         };
         db.create_collection(config).unwrap();
     }

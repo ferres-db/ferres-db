@@ -7,8 +7,11 @@ import { Collections } from '@/pages/Collections';
 import { CollectionDetails } from '@/pages/CollectionDetails';
 import { CollectionPoints } from '@/pages/CollectionPoints';
 import { QueryTester } from '@/pages/QueryTester';
+import { Embeddings } from '@/pages/Embeddings';
+import { Streaming } from '@/pages/Streaming';
 import { ApiKeys } from '@/pages/ApiKeys';
 import { Users } from '@/pages/Users';
+import { Audit } from '@/pages/Audit';
 import { Login } from '@/pages/Login';
 
 const queryClient = new QueryClient({
@@ -32,9 +35,12 @@ function App() {
               <Route path="/collections" element={<Collections />} />
               <Route path="/collections/:name" element={<CollectionDetails />} />
               <Route path="/collections/:name/points" element={<CollectionPoints />} />
+              <Route path="/embeddings" element={<Embeddings />} />
+              <Route path="/streaming" element={<Streaming />} />
               <Route path="/query-tester" element={<QueryTester />} />
               <Route path="/api-keys" element={<ApiKeys />} />
               <Route path="/users" element={<Users />} />
+              <Route path="/audit" element={<Audit />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

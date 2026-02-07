@@ -59,12 +59,15 @@ pub enum UserError {
 }
 
 /// Informação de um usuário (sem senha).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserInfo {
     pub id: i64,
     pub username: String,
     pub role: String,
     pub created_at: i64,
+    /// Permissões granulares (RBAC). Se None/vazio, aplica-se o comportamento legado baseado em role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<crate::permissions::Permission>>,
 }
 
 fn hash_password(password: &str) -> Result<String, UserError> {
@@ -107,6 +110,8 @@ impl UserStore {
         )?;
         // Migração: adicionar coluna role se a tabela já existia sem ela
         let _ = conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'", []);
+        // Migração: adicionar coluna permissions (JSON) para RBAC granular
+        let _ = conn.execute("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT NULL", []);
         let _ = conn.execute("UPDATE users SET role = 'admin' WHERE username = ?1", [DEFAULT_USERNAME]);
         Ok(Self {
             conn: Mutex::new(conn),
@@ -175,18 +180,22 @@ impl UserStore {
         verify_password(password, &hash)
     }
 
-    /// Lista todos os usuários (id, username, role, created_at).
+    /// Lista todos os usuários (id, username, role, created_at, permissions).
     pub fn list(&self) -> Result<Vec<UserInfo>, UserError> {
         let conn = self.conn.lock().map_err(|_| UserError::LockPoisoned)?;
         let mut stmt = conn.prepare(
-            "SELECT id, username, role, created_at FROM users ORDER BY created_at ASC",
+            "SELECT id, username, role, created_at, permissions FROM users ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
+            let permissions_json: Option<String> = row.get(4).unwrap_or(None);
+            let permissions = permissions_json
+                .and_then(|j| serde_json::from_str(&j).ok());
             Ok(UserInfo {
                 id: row.get(0)?,
                 username: row.get(1)?,
                 role: row.get::<_, String>(2).unwrap_or_else(|_| "viewer".to_string()),
                 created_at: row.get(3)?,
+                permissions,
             })
         })?;
         let mut out = Vec::new();
@@ -203,6 +212,17 @@ impl UserStore {
         password: &str,
         role: Option<Role>,
     ) -> Result<UserInfo, UserError> {
+        self.create_with_permissions(username, password, role, None)
+    }
+
+    /// Cria um novo usuário com permissões opcionais. Retorna erro se o username já existir.
+    pub fn create_with_permissions(
+        &self,
+        username: &str,
+        password: &str,
+        role: Option<Role>,
+        permissions: Option<Vec<crate::permissions::Permission>>,
+    ) -> Result<UserInfo, UserError> {
         let username = username.trim();
         if username.is_empty() {
             return Err(UserError::InvalidUsername);
@@ -217,10 +237,14 @@ impl UserStore {
             .unwrap()
             .as_secs() as i64;
 
+        let permissions_json = permissions
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_default());
+
         let conn = self.conn.lock().map_err(|_| UserError::LockPoisoned)?;
         let id = match conn.execute(
-            "INSERT INTO users (username, password_hash, role, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![username, hash, role.as_str(), created_at],
+            "INSERT INTO users (username, password_hash, role, created_at, permissions) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![username, hash, role.as_str(), created_at, permissions_json],
         ) {
             Ok(1) => conn.last_insert_rowid(),
             Ok(_) => return Err(UserError::Db(rusqlite::Error::ExecuteReturnedResults)),
@@ -234,6 +258,7 @@ impl UserStore {
             username: username.to_string(),
             role: role.as_str().to_string(),
             created_at,
+            permissions,
         })
     }
 
@@ -241,6 +266,47 @@ impl UserStore {
     pub fn delete_by_id(&self, id: i64) -> Result<(), UserError> {
         let conn = self.conn.lock().map_err(|_| UserError::LockPoisoned)?;
         conn.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![id])?;
+        Ok(())
+    }
+
+    /// Retorna as permissões granulares de um usuário, ou None se não configuradas.
+    pub fn get_permissions(
+        &self,
+        username: &str,
+    ) -> Result<Option<Vec<crate::permissions::Permission>>, UserError> {
+        let conn = self.conn.lock().map_err(|_| UserError::LockPoisoned)?;
+        let json: Option<String> = match conn.query_row(
+            "SELECT permissions FROM users WHERE username = ?1",
+            [username],
+            |row| row.get(0),
+        ) {
+            Ok(j) => j,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        drop(conn);
+        match json {
+            Some(j) if !j.is_empty() => {
+                Ok(serde_json::from_str(&j).ok())
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Atualiza as permissões de um usuário.
+    pub fn update_permissions(
+        &self,
+        username: &str,
+        permissions: Option<Vec<crate::permissions::Permission>>,
+    ) -> Result<(), UserError> {
+        let json = permissions
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_default());
+        let conn = self.conn.lock().map_err(|_| UserError::LockPoisoned)?;
+        conn.execute(
+            "UPDATE users SET permissions = ?1 WHERE username = ?2",
+            rusqlite::params![json, username],
+        )?;
         Ok(())
     }
 

@@ -6,6 +6,65 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 
 ### Added
 
+- **Real-time Streaming via WebSocket — ingestão e subscrição de eventos em tempo real**
+  - Novo endpoint `GET /api/v1/ws` para upgrade HTTP → WebSocket.
+  - Protocolo JSON sobre WebSocket com mensagens tipadas:
+    - `upsert`: ingestão de pontos em tempo real com batch automático (debounce 10ms).
+    - `subscribe`: subscrição para eventos de uma coleção (`upsert`, `delete`).
+    - `ping`/`pong`: heartbeat aplicacional.
+    - `ack`: confirmação de operação com `upserted`, `failed`, `took_ms`.
+    - `event`: notificação de mudanças (collection, action, point_ids, timestamp).
+    - `error`: erro com mensagem e código HTTP.
+  - Novo `handlers/streaming.rs` com `ws_handler` e `handle_ws_connection`.
+  - Batch automático: acumula mensagens por 10ms antes de flush (debounce) para melhor throughput.
+  - Heartbeat: ping a cada 30s, desconexão se pong não chegar em 10s.
+  - Timeout de inatividade: 5 minutos sem atividade fecha a conexão.
+  - Autenticação: aceita API key como query param (`?token=sk-xxx`) ou header `Authorization: Bearer <key>`.
+  - Limite configurável de 100 conexões WebSocket simultâneas.
+  - Mensagens > 10MB rejeitadas automaticamente.
+  - Novo `CollectionEvent` e `event_channels` (broadcast) no `AppState` para propagação de eventos.
+  - Handlers REST `upsert_points` e `delete_points` agora emitem eventos no broadcast channel para subscribers WebSocket.
+  - Métricas Prometheus: `ws_connections_active` (gauge), `ws_messages_received_total` (counter por tipo), `ws_messages_sent_total` (counter por tipo).
+  - Testes E2E: upsert de 10 pontos via WS, ping/pong, subscribe + evento via REST, rejeição sem auth, mensagem inválida, coleção inexistente.
+  - Dependências: `axum` com feature `ws`, `tokio-tungstenite`.
+
+- **Scalar Quantization (SQ8) — compressão de vetores f32 para u8 com ~4× economia de memória**
+  - Novo módulo `crates/core/src/quantization.rs`: `QuantizationConfig` (enum `None | Scalar`), `ScalarQuantizationConfig` (dtype, always_ram, quantile), `ScalarType::Int8`, `ScalarQuantizationParams` (mins, maxs, scales por dimensão).
+  - `ScalarQuantizationParams::calibrate()`: calibra min/max/scale por dimensão com percentis para robustez contra outliers. Amostra limitada a 10K vetores para performance.
+  - `ScalarQuantizationParams::quantize()`: mapeia `f32` → `u8` por dimensão (`[min,max]` → `[0,255]`).
+  - `ScalarQuantizationParams::dequantize()`: operação inversa (aproximada) para reconstrução.
+  - `ScalarQuantizationParams::asymmetric_distance()`: distância assimétrica (query f32 vs candidato u8) para Euclidean, Cosine e DotProduct — preserva mais precisão que quantizar ambos.
+  - Novo `QuantizedHnswIndex` em `search.rs`: implementa `ANNIndex` combinando HNSW (para navegação do grafo) com vetores quantizados u8.
+    - `build()`: calibra params, quantiza vetores, constrói HNSW com vetores dequantizados.
+    - `search()`: busca HNSW expandida → re-rank com distância assimétrica → re-rank opcional com originais f32 (se `always_ram=true`).
+    - `add_point()`: quantiza vetor, insere no HNSW com dequantizado.
+    - `remove_point()`: delega tombstone para HNSW interno.
+  - Factory function `create_ann_index()`: seleciona `HnswIndex` ou `QuantizedHnswIndex` baseado na config.
+  - `CollectionConfig` estendido com campo `quantization: QuantizationConfig` (`#[serde(default)]` para backward compatibility).
+  - `Collection::new()` agora usa `create_ann_index()` para criar o índice adequado.
+  - `CreateCollectionRequest` no server aceita campo `quantization` (opt-in via API).
+  - `CollectionMeta` em `storage.rs` inclui `quantization` para persistência.
+  - Benchmarks em `crates/core/benches/performance.rs`: recall@10 SQ8 vs f32, latência de busca, uso de memória para 10K e 100K vetores.
+  - Testes: `test_sq8_calibration`, `test_sq8_roundtrip` (erro < 1%), `test_sq8_recall` (recall@10 > 90% vs f32), `test_sq8_memory` (4× compressão), `test_quantized_hnsw_basic`, `test_quantized_hnsw_always_ram`, `test_quantized_hnsw_add_point`, `test_quantized_hnsw_remove_point`, `test_create_ann_index_*`, testes de serialização/desserialização, testes com outliers.
+  - Coleções existentes sem quantização continuam funcionando sem mudança (default: `QuantizationConfig::None`).
+
+- **RBAC (Role-Based Access Control) granular com audit trail**
+  - Novo módulo `crates/server/src/permissions.rs`: `Resource` (AllCollections, Collection(name)), `Action` (Read, Write, Create, Delete, Admin), `MetadataRestriction`, `Permission`, `PermissionResult`, `check_permission`, `merge_restriction_filter`.
+  - Novo módulo `crates/server/src/audit.rs`: `AuditEntry`, `AuditResult`, `AuditLogger` (append-only JSONL, rotação diária `audit-YYYY-MM-DD.jsonl`), escrita assíncrona via `tokio::spawn`.
+  - UserStore estendido: coluna `permissions TEXT` (JSON) em SQLite, migração `ALTER TABLE`, `get_permissions`, `update_permissions`, `create_with_permissions`; `UserInfo` com campo opcional `permissions`.
+  - Auth: `AuthUser` com `permissions: Option<Vec<Permission>>`; extractor `AuthenticatedUser` carrega permissões do UserStore via state; helper `check_user_permission` (Admin bypassa, fallback legado por role).
+  - Enforcement: handlers de points (search, search_hybrid, upsert, delete_points, explain_search, estimate_search), collections (create, delete), save, keys, users usam `AuthenticatedUser` e verificam permissão granular; em `search_points` a `MetadataRestriction` é injetada no filtro (AND com request).
+  - Novo erro `ApiError::Forbidden` (403).
+  - Endpoint `GET /api/v1/audit` (Admin only): query params `user`, `action`, `resource`, `from`, `to`, `limit`; retorna entradas de auditoria filtradas.
+  - Endpoint `PUT /api/v1/users/{username}/permissions` para atualizar permissões granulares (Admin).
+  - Instrumentação de todos os handlers com audit trail (login, search, upsert, delete_points, create/delete collection, save, create/delete API key, create/delete user, update password/permissions).
+  - Documentação em `docs/api.md`: modelo RBAC, endpoints de permissões e audit, enforcement por endpoint.
+  - Testes em `crates/server/tests/rbac_test.rs`: viewer não pode upsert, viewer pode search, admin bypassa restrições, MetadataRestriction filtra resultados, permissões por coleção, write granular, audit registra ações e negações, audit requer Admin; testes unitários em `permissions` e `audit`, persistência de permissões no UserStore.
+
+## [Released] - 07/02/2026 - 11:00 - 0.1.1
+
+### Added
+
 - **Query Cost Estimation — estimativa de custo de queries antes da execução**
   - Novo módulo `crates/core/src/cost.rs` com tipos: `QueryCostEstimate`, `CostBreakdown`, `CostEstimateParams`.
   - Função `estimate_search_cost` com heurísticas baseadas em HNSW (O(log n × ef_search × dimension)), custo de filtro pós-busca, hidratação e overhead de rede.

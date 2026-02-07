@@ -145,6 +145,7 @@ fn create_collection(
         search_cache_size: 100, // Cache padrão de 100 queries
         enable_bm25: false,
         bm25_text_field: "text".to_string(),
+        quantization: Default::default(),
     };
 
     db.create_collection(config)?;

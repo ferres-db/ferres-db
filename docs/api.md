@@ -800,3 +800,571 @@ Retorna o perfil de execução de uma query (tempo por fase: validação, busca,
 ```bash
 curl -s http://localhost:8080/api/v1/debug/query-profile/550e8400-e29b-41d4-a716-446655440000
 ```
+
+---
+
+## RBAC — Controle de Acesso Granular
+
+O FerresDB suporta controle de acesso baseado em roles (RBAC) com permissões granulares por coleção e restrições de metadata.
+
+### Modelo de Permissões
+
+Cada usuário possui um `role` (Admin, Editor, Viewer) e opcionalmente `permissions` granulares. Se `permissions` estiver configurado, tem precedência sobre o role legado.
+
+**Recursos:**
+
+| Tipo              | Descrição                     |
+| ----------------- | ----------------------------- |
+| `all_collections` | Wildcard: todas as coleções   |
+| `collection`      | Coleção específica (por nome) |
+
+**Ações:**
+
+| Ação     | Descrição                      |
+| -------- | ------------------------------ |
+| `read`   | search, get, list              |
+| `write`  | upsert, delete pontos          |
+| `create` | criar coleção                  |
+| `delete` | deletar coleção                |
+| `admin`  | gerenciar usuários, save, etc. |
+
+**Restrição de Metadata:**
+
+Opcional. Quando presente, resultados de busca são filtrados automaticamente (AND com filtros do request). Garante isolamento de dados por equipe/departamento.
+
+### POST /api/v1/users (com permissões)
+
+Cria um usuário com permissões granulares.
+
+**Request body (exemplo com permissões):**
+
+```json
+{
+  "username": "analyst",
+  "password": "secret123",
+  "role": "viewer",
+  "permissions": [
+    {
+      "resource": { "type": "collection", "name": "sales-data" },
+      "actions": ["read"],
+      "metadata_restriction": {
+        "field": "department",
+        "allowed_values": ["sales"]
+      }
+    },
+    {
+      "resource": { "type": "collection", "name": "public-docs" },
+      "actions": ["read", "write"]
+    }
+  ]
+}
+```
+
+**Exemplo curl:**
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/users \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <admin-key>" \
+  -d '{"username":"analyst","password":"secret","role":"viewer","permissions":[{"resource":{"type":"all_collections"},"actions":["read"]}]}'
+```
+
+---
+
+### PUT /api/v1/users/{username}/permissions
+
+Atualiza permissões granulares de um usuário (apenas Admin).
+
+**Path:** `username` — nome do usuário.
+
+**Request body:**
+
+```json
+{
+  "permissions": [
+    {
+      "resource": { "type": "all_collections" },
+      "actions": ["read"]
+    }
+  ]
+}
+```
+
+Para remover permissões granulares (voltar ao comportamento legado de role):
+
+```json
+{
+  "permissions": null
+}
+```
+
+**Resposta:** `200 OK`
+
+```json
+{
+  "updated": true,
+  "username": "analyst"
+}
+```
+
+**Exemplo curl:**
+
+```bash
+curl -s -X PUT http://localhost:8080/api/v1/users/analyst/permissions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <admin-key>" \
+  -d '{"permissions":[{"resource":{"type":"collection","name":"docs"},"actions":["read","write"]}]}'
+```
+
+---
+
+### Enforcement de Permissões
+
+| Endpoint                                 | Permissão Necessária |
+| ---------------------------------------- | -------------------- |
+| POST /collections                        | `create`             |
+| DELETE /collections/{name}               | `delete`             |
+| POST /collections/{name}/points          | `write`              |
+| DELETE /collections/{name}/points        | `write`              |
+| POST /collections/{name}/search          | `read`               |
+| POST /collections/{name}/search/hybrid   | `read`               |
+| POST /collections/{name}/search/explain  | `read`               |
+| POST /collections/{name}/search/estimate | `read`               |
+| GET /api/v1/audit                        | Admin only           |
+
+**Regras de precedência:**
+
+1. **Admin** → sempre permitido
+2. **Permissões granulares** → verificadas se configuradas
+3. **Role legado** → Editor pode read/write/create; Viewer pode read
+
+**MetadataRestriction:** Se o usuário tem uma `metadata_restriction` na permissão de Read, o filtro é injetado automaticamente (AND com filtros do request). Exemplo: um usuário com `department=sales` só verá resultados com `department=sales`.
+
+---
+
+## Audit Trail
+
+O FerresDB registra todas as ações em um audit trail persistente (arquivos JSONL com rotação diária).
+
+### GET /api/v1/audit
+
+Consulta entradas de auditoria filtradas (apenas Admin).
+
+**Query params:**
+
+| Param      | Tipo   | Default | Descrição                                              |
+| ---------- | ------ | ------- | ------------------------------------------------------ |
+| `user`     | string | —       | Filtrar por user_id                                    |
+| `action`   | string | —       | Filtrar por ação (ex: "search", "upsert", "login")     |
+| `resource` | string | —       | Filtrar por recurso (substring, ex: "collection:docs") |
+| `from`     | string | 7d ago  | Data/hora de início (RFC 3339)                         |
+| `to`       | string | now     | Data/hora de fim (RFC 3339)                            |
+| `limit`    | number | 100     | Máximo de entradas (max: 1000)                         |
+
+**Resposta:** `200 OK`
+
+```json
+[
+  {
+    "timestamp": "2026-02-07T14:30:00Z",
+    "user_id": "analyst",
+    "action": "search",
+    "resource": "collection:sales-data",
+    "details": { "query_id": "...", "limit": 10, "results_count": 5 },
+    "result": "success",
+    "ip_address": "192.168.1.100",
+    "duration_ms": 3
+  },
+  {
+    "timestamp": "2026-02-07T14:29:00Z",
+    "user_id": "viewer_user",
+    "action": "upsert",
+    "resource": "collection:docs",
+    "details": { "denied": true },
+    "result": "denied"
+  }
+]
+```
+
+| Campo         | Tipo   | Descrição                                                                                           |
+| ------------- | ------ | --------------------------------------------------------------------------------------------------- |
+| `timestamp`   | string | Data/hora UTC (RFC 3339)                                                                            |
+| `user_id`     | string | Usuário que executou a ação                                                                         |
+| `action`      | string | Ação: search, upsert, delete_points, create_collection, delete_collection, login, create_user, etc. |
+| `resource`    | string | Recurso: collection:nome, user:nome, api_key:nome, system:collections                               |
+| `details`     | object | Detalhes resumidos (sem vetores)                                                                    |
+| `result`      | string | success, denied, error                                                                              |
+| `ip_address`  | string | IP do cliente (se disponível)                                                                       |
+| `duration_ms` | number | Duração em ms (se disponível)                                                                       |
+
+**Ações auditadas:**
+
+- `login` (sucesso e falha)
+- `search`, `search_hybrid`
+- `upsert`, `delete_points`
+- `create_collection`, `delete_collection`
+- `create_user`, `delete_user`, `update_password`, `update_permissions`
+- `create_api_key`, `delete_api_key`
+- `save`
+
+**Exemplo curl:**
+
+```bash
+# Todas as ações das últimas 24h
+curl -s http://localhost:8080/api/v1/audit?limit=50 \
+  -H "Authorization: Bearer <admin-key>"
+
+# Ações de um usuário específico
+curl -s "http://localhost:8080/api/v1/audit?user=analyst&action=search" \
+  -H "Authorization: Bearer <admin-key>"
+
+# Ações negadas
+curl -s "http://localhost:8080/api/v1/audit?from=2026-02-07T00:00:00Z&to=2026-02-08T00:00:00Z" \
+  -H "Authorization: Bearer <admin-key>"
+```
+
+### Armazenamento
+
+Os logs de auditoria são escritos em arquivos JSONL no diretório de dados:
+
+```
+data/logs/audit-2026-02-07.jsonl
+data/logs/audit-2026-02-08.jsonl
+```
+
+- Rotação diária (novo arquivo por dia)
+- Append-only (como o WAL)
+- Escrita assíncrona (não impacta latência dos handlers)
+
+---
+
+## WebSocket Streaming
+
+O FerresDB suporta ingestão e subscrição de eventos em tempo real via WebSocket. O protocolo é JSON sobre WebSocket com mensagens tipadas.
+
+### GET /api/v1/ws
+
+Endpoint para upgrade HTTP → WebSocket.
+
+**Autenticação:** Obrigatória. Aceita API key de duas formas:
+
+- **Query param:** `?token=sk-xxx`
+- **Header:** `Authorization: Bearer <key>`
+
+**Limites:**
+
+| Parâmetro                 | Valor    |
+| ------------------------- | -------- |
+| Máximo de conexões        | 100 (configurável) |
+| Tamanho máximo de mensagem | 10 MB   |
+| Heartbeat (ping)          | a cada 30s |
+| Timeout de pong           | 10s (se não chegar, conexão é fechada) |
+| Timeout de inatividade    | 5 minutos |
+| Debounce de batch (upsert) | 10ms   |
+
+**Exemplo de conexão (JavaScript):**
+
+```javascript
+const ws = new WebSocket("ws://localhost:8080/api/v1/ws?token=sk-xxx");
+ws.onopen = () => console.log("Connected");
+ws.onmessage = (event) => console.log(JSON.parse(event.data));
+```
+
+**Exemplo com wscat:**
+
+```bash
+wscat -c "ws://localhost:8080/api/v1/ws?token=sk-xxx"
+```
+
+**Erros de conexão:**
+
+| Status | Descrição                                    |
+| ------ | -------------------------------------------- |
+| `401`  | API key inválida ou ausente                  |
+| `503`  | Limite de conexões simultâneas atingido      |
+
+---
+
+### Protocolo de Mensagens
+
+Todas as mensagens são objetos JSON com campo `type` discriminador.
+
+#### Mensagens do Cliente → Servidor
+
+##### `upsert` — Ingestão de pontos em tempo real
+
+Insere ou atualiza pontos numa coleção. Mensagens de upsert são acumuladas internamente por 10ms (debounce) antes do flush para melhor throughput em alta frequência.
+
+```json
+{
+  "type": "upsert",
+  "collection": "my_collection",
+  "points": [
+    {
+      "id": "doc-1",
+      "vector": [0.1, 0.2, -0.1],
+      "metadata": { "text": "conteúdo do documento" }
+    },
+    {
+      "id": "doc-2",
+      "vector": [0.3, -0.1, 0.5],
+      "metadata": { "text": "outro documento" }
+    }
+  ]
+}
+```
+
+| Campo        | Tipo   | Obrigatório | Descrição                                     |
+| ------------ | ------ | ----------- | --------------------------------------------- |
+| `type`       | string | sim         | Sempre `"upsert"`                             |
+| `collection` | string | sim         | Nome da coleção alvo                          |
+| `points`     | array  | sim         | Array de pontos (id, vector, metadata)        |
+
+Cada ponto:
+
+| Campo      | Tipo   | Obrigatório | Descrição                                             |
+| ---------- | ------ | ----------- | ----------------------------------------------------- |
+| `id`       | string | sim         | ID único do ponto                                     |
+| `vector`   | array  | sim         | Array de floats (mesma dimensão da coleção)           |
+| `metadata` | object | não         | JSON arbitrário (default: `{}`)                       |
+
+**Resposta:** mensagem `ack` (ver abaixo).
+
+##### `subscribe` — Subscrição a eventos de uma coleção
+
+Inscreve a conexão para receber notificações em tempo real quando pontos são inseridos ou deletados numa coleção.
+
+```json
+{
+  "type": "subscribe",
+  "collection": "my_collection",
+  "events": ["upsert", "delete"]
+}
+```
+
+| Campo        | Tipo   | Obrigatório | Descrição                                                             |
+| ------------ | ------ | ----------- | --------------------------------------------------------------------- |
+| `type`       | string | sim         | Sempre `"subscribe"`                                                  |
+| `collection` | string | sim         | Nome da coleção para subscrever                                       |
+| `events`     | array  | não         | Filtro de tipos de evento: `["upsert"]`, `["delete"]`, ou ambos. Se vazio/ausente, recebe todos. |
+
+**Resposta:** mensagem `ack` confirmando a subscrição (com `upserted: 0, failed: 0, took_ms: 0`).
+
+**Erros:**
+
+- `404` — coleção não encontrada
+- `409` — já está subscrito nesta coleção
+
+##### `ping` — Heartbeat aplicacional
+
+```json
+{
+  "type": "ping"
+}
+```
+
+**Resposta:** mensagem `pong`.
+
+---
+
+#### Mensagens do Servidor → Cliente
+
+##### `ack` — Confirmação de operação
+
+Enviada após um `upsert` ou `subscribe` bem-sucedido.
+
+```json
+{
+  "type": "ack",
+  "upserted": 10,
+  "failed": 0,
+  "took_ms": 5
+}
+```
+
+| Campo      | Tipo   | Descrição                                |
+| ---------- | ------ | ---------------------------------------- |
+| `type`     | string | Sempre `"ack"`                           |
+| `upserted` | number | Pontos inseridos/atualizados com sucesso |
+| `failed`   | number | Pontos que falharam (dimensão inválida, etc.) |
+| `took_ms`  | number | Tempo de processamento em ms             |
+
+##### `event` — Notificação de mudança em coleção
+
+Enviada para subscribers quando pontos são inseridos ou deletados (via REST ou WebSocket).
+
+```json
+{
+  "type": "event",
+  "collection": "my_collection",
+  "action": "upsert",
+  "point_ids": ["doc-1", "doc-2"],
+  "timestamp": 1707123456
+}
+```
+
+| Campo        | Tipo   | Descrição                                   |
+| ------------ | ------ | ------------------------------------------- |
+| `type`       | string | Sempre `"event"`                            |
+| `collection` | string | Nome da coleção                             |
+| `action`     | string | Tipo de operação: `"upsert"` ou `"delete"` |
+| `point_ids`  | array  | IDs dos pontos afetados                     |
+| `timestamp`  | number | Timestamp UNIX (segundos) da operação       |
+
+**Nota:** Eventos são emitidos tanto por operações REST (`POST /points`, `DELETE /points`) quanto por upserts via WebSocket. Todos os subscribers ativos recebem a notificação.
+
+##### `error` — Erro
+
+```json
+{
+  "type": "error",
+  "message": "collection not found",
+  "code": 404
+}
+```
+
+| Campo     | Tipo   | Descrição                                    |
+| --------- | ------ | -------------------------------------------- |
+| `type`    | string | Sempre `"error"`                             |
+| `message` | string | Mensagem legível do erro                     |
+| `code`    | number | Código HTTP semântico (400, 404, 408, 409, 500) |
+
+Códigos de erro comuns:
+
+| Code | Descrição                               |
+| ---- | --------------------------------------- |
+| 400  | Mensagem JSON inválida ou malformada    |
+| 404  | Coleção não encontrada                  |
+| 408  | Timeout (inatividade ou pong)           |
+| 409  | Já subscrito nesta coleção              |
+| 500  | Erro interno (lock, insert, etc.)       |
+
+##### `pong` — Resposta a ping
+
+```json
+{
+  "type": "pong"
+}
+```
+
+---
+
+### Comportamento de Batch (Debounce)
+
+Mensagens `upsert` enviadas em rápida sucessão são acumuladas automaticamente por **10ms** antes de serem processadas. Isso melhora significativamente o throughput em cenários de alta frequência de ingestão:
+
+1. O cliente envia múltiplas mensagens `upsert` rapidamente
+2. O servidor acumula todas durante a janela de 10ms
+3. Pontos são agrupados por coleção
+4. Cada grupo é inserido em batch único
+5. Um `ack` é enviado por coleção com o total consolidado
+
+---
+
+### Heartbeat e Timeouts
+
+O servidor mantém a conexão saudável com heartbeat bidirecional:
+
+1. **Ping do servidor** (a cada 30s): o servidor envia `{"type":"ping"}` ao cliente
+2. **Pong do cliente**: o cliente deve responder com `{"type":"ping"}` (que recebe `{"type":"pong"}`)
+3. **Timeout de pong**: se o pong não chegar dentro de um intervalo de heartbeat (~30s), a conexão é fechada com `{"type":"error","message":"pong timeout","code":408}`
+4. **Timeout de inatividade**: se não houver atividade (nenhuma mensagem recebida) por 5 minutos, a conexão é fechada com `{"type":"error","message":"inactivity timeout","code":408}`
+
+---
+
+### Métricas Prometheus
+
+O WebSocket expõe métricas para observabilidade:
+
+| Métrica                         | Tipo    | Labels | Descrição                           |
+| ------------------------------- | ------- | ------ | ----------------------------------- |
+| `ws_connections_active`         | Gauge   | —      | Conexões WebSocket ativas no momento |
+| `ws_messages_received_total`    | Counter | `type` | Mensagens recebidas (text, upsert, subscribe, ping) |
+| `ws_messages_sent_total`        | Counter | `type` | Mensagens enviadas (outgoing, event) |
+
+---
+
+### Exemplo Completo: Ingestão + Subscrição
+
+```javascript
+// Conectar
+const ws = new WebSocket("ws://localhost:8080/api/v1/ws?token=sk-xxx");
+
+ws.onopen = () => {
+  // 1. Subscrever a eventos da coleção "docs"
+  ws.send(JSON.stringify({
+    type: "subscribe",
+    collection: "docs",
+    events: ["upsert", "delete"]
+  }));
+
+  // 2. Inserir pontos via WebSocket
+  ws.send(JSON.stringify({
+    type: "upsert",
+    collection: "docs",
+    points: [
+      { id: "ws-1", vector: [0.1, 0.2, 0.3], metadata: { text: "real-time data" } },
+      { id: "ws-2", vector: [0.4, 0.5, 0.6], metadata: { text: "streaming insert" } }
+    ]
+  }));
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  switch (msg.type) {
+    case "ack":
+      console.log(`Upserted: ${msg.upserted}, Failed: ${msg.failed}, Took: ${msg.took_ms}ms`);
+      break;
+    case "event":
+      console.log(`Event: ${msg.action} on ${msg.collection}, IDs: ${msg.point_ids}`);
+      break;
+    case "pong":
+      console.log("Pong received");
+      break;
+    case "error":
+      console.error(`Error ${msg.code}: ${msg.message}`);
+      break;
+  }
+};
+
+// Heartbeat: responder pings do servidor
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === "ping") {
+    ws.send(JSON.stringify({ type: "ping" }));
+  }
+};
+```
+
+**Exemplo Python (websockets):**
+
+```python
+import asyncio
+import json
+import websockets
+
+async def main():
+    uri = "ws://localhost:8080/api/v1/ws?token=sk-xxx"
+    async with websockets.connect(uri) as ws:
+        # Subscrever
+        await ws.send(json.dumps({
+            "type": "subscribe",
+            "collection": "docs"
+        }))
+
+        # Upsert
+        await ws.send(json.dumps({
+            "type": "upsert",
+            "collection": "docs",
+            "points": [
+                {"id": "py-1", "vector": [0.1, 0.2, 0.3], "metadata": {"source": "python"}}
+            ]
+        }))
+
+        # Receber mensagens
+        async for message in ws:
+            msg = json.loads(message)
+            print(f"[{msg['type']}] {msg}")
+
+asyncio.run(main())
+```

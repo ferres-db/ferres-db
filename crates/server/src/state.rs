@@ -12,12 +12,13 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{broadcast, Notify};
 use tracing::{info, warn};
 
 use ferres_db_core::{Collection, FileStorage, SearchResult};
 
 use crate::api_keys::ApiKeyStore;
+use crate::audit::AuditLogger;
 use crate::users::UserStore;
 use crate::query_logger::QueryLogger;
 use crate::query_log_analytics::QueryLogCache;
@@ -125,6 +126,24 @@ impl GlobalQueryStats {
         labels.iter().copied().zip(counts).collect()
     }
 }
+
+// ─── CollectionEvent (streaming / WebSocket) ────────────────────────────
+
+/// Evento de uma coleção, propagado para subscribers WebSocket.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionEvent {
+    /// Nome da coleção.
+    pub collection: String,
+    /// Ação que originou o evento ("upsert" ou "delete").
+    pub action: String,
+    /// IDs dos pontos afetados.
+    pub point_ids: Vec<String>,
+    /// Timestamp UNIX (segundos).
+    pub timestamp: u64,
+}
+
+/// Capacidade padrão do broadcast channel por coleção.
+pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 // ─── ServerConfig ──────────────────────────────────────────────────────
 
@@ -328,6 +347,14 @@ pub struct AppState {
     pub api_key_store: Option<Arc<ApiKeyStore>>,
     /// Store de usuários do dashboard (SQLite). Usado para login.
     pub user_store: Option<Arc<UserStore>>,
+    /// Logger de auditoria (append-only JSONL, rotação diária).
+    pub audit_logger: Arc<AuditLogger>,
+    /// Broadcast channels para eventos de collection (streaming subscribers).
+    pub event_channels: Arc<DashMap<String, broadcast::Sender<CollectionEvent>>>,
+    /// Contador de conexões WebSocket ativas.
+    pub ws_connections_active: Arc<AtomicU64>,
+    /// Máximo de conexões WebSocket simultâneas (configurável).
+    pub max_ws_connections: u64,
 }
 
 impl AppState {
@@ -422,11 +449,28 @@ impl AppState {
         let query_log_cache = Arc::new(QueryLogCache::new(log_dir.join("queries.log")));
         let query_profiles = Arc::new(DashMap::new());
 
+        // Inicializa audit logger (rotação diária, append-only)
+        let audit_logger = Arc::new(
+            AuditLogger::new(log_dir.clone()).map_err(|e| {
+                ferres_db_core::FerresError::Storage(format!(
+                    "failed to initialize audit logger: {e}"
+                ))
+            })?
+        );
+
         info!(
             collections = collections.len(),
             log_dir = %log_dir.display(),
             "collections initialized"
         );
+
+        // Inicializa broadcast channels para coleções existentes
+        let event_channels: Arc<DashMap<String, broadcast::Sender<CollectionEvent>>> =
+            Arc::new(DashMap::new());
+        for name in collections.iter().map(|e| e.key().clone()) {
+            let (tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+            event_channels.insert(name, tx);
+        }
 
         Ok(Self {
             collections,
@@ -441,6 +485,10 @@ impl AppState {
             started_at: Arc::new(Instant::now()),
             api_key_store,
             user_store,
+            audit_logger,
+            event_channels,
+            ws_connections_active: Arc::new(AtomicU64::new(0)),
+            max_ws_connections: 100,
         })
     }
 
@@ -457,6 +505,28 @@ impl AppState {
     /// Verifica se o servidor está em shutdown.
     pub fn is_shutting_down(&self) -> bool {
         self.is_shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Retorna o broadcast::Sender para uma coleção, criando o canal se não existir.
+    pub fn get_or_create_event_channel(
+        &self,
+        collection: &str,
+    ) -> broadcast::Sender<CollectionEvent> {
+        self.event_channels
+            .entry(collection.to_string())
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+                tx
+            })
+            .clone()
+    }
+
+    /// Emite um evento no broadcast channel de uma coleção (se houver subscribers).
+    pub fn emit_event(&self, event: CollectionEvent) {
+        if let Some(tx) = self.event_channels.get(&event.collection) {
+            // Ignora erro se não há receivers — é normal quando não há subscribers
+            let _ = tx.send(event);
+        }
     }
 
     /// Busca em todas as coleções em paralelo.

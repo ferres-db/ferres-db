@@ -34,7 +34,8 @@ use crate::bm25::BM25Index;
 use crate::error::FerresError;
 use crate::explain::ExplainMeta;
 use crate::point::Point;
-use crate::search::{normalize_vectors_parallel, ANNIndex, DistanceMetric, HnswConfig, HnswIndex};
+use crate::quantization::QuantizationConfig;
+use crate::search::{normalize_vectors_parallel, ANNIndex, DistanceMetric, HnswConfig, create_ann_index};
 
 // ─── CollectionConfig ───────────────────────────────────────────────
 
@@ -59,6 +60,10 @@ pub struct CollectionConfig {
     /// Chave em `metadata` usada como texto para BM25. Padrão: "text".
     #[serde(default = "default_bm25_text_field")]
     pub bm25_text_field: String,
+    /// Configuração de quantização de vetores (default: None = sem quantização).
+    /// SQ8 comprime vetores f32 para u8 com ~4× economia de memória.
+    #[serde(default)]
+    pub quantization: QuantizationConfig,
 }
 
 fn default_cache_size() -> usize {
@@ -137,9 +142,12 @@ pub struct Collection {
 }
 
 impl Collection {
-    /// Cria uma coleção vazia usando `HnswIndex` como backend padrão.
+    /// Cria uma coleção vazia usando o backend de índice apropriado.
+    ///
+    /// Se `quantization` é `None`, usa `HnswIndex` padrão.
+    /// Se `Scalar(...)`, usa `QuantizedHnswIndex` com SQ8.
     pub fn new(config: CollectionConfig) -> Self {
-        let index = Box::new(HnswIndex::new(config.distance, config.hnsw.clone()));
+        let index = create_ann_index(config.distance, config.hnsw.clone(), &config.quantization);
         let search_cache = if config.search_cache_size > 0 {
             Some(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(config.search_cache_size).unwrap(),
@@ -263,6 +271,7 @@ impl Collection {
     ///     search_cache_size: 0,
     ///     enable_bm25: false,
     ///     bm25_text_field: "text".to_string(),
+    ///     quantization: Default::default(),
     /// });
     ///
     /// let point = Point::new("p1", vec![1.0, 2.0, 3.0], serde_json::json!(null))?;
@@ -313,6 +322,7 @@ impl Collection {
     ///     search_cache_size: 0,
     ///     enable_bm25: false,
     ///     bm25_text_field: "text".to_string(),
+    ///     quantization: Default::default(),
     /// });
     ///
     /// let points = vec![
@@ -425,6 +435,7 @@ impl Collection {
     ///     search_cache_size: 0,
     ///     enable_bm25: false,
     ///     bm25_text_field: "text".to_string(),
+    ///     quantization: Default::default(),
     /// });
     ///
     /// collection.insert(Point::new("p1", vec![1.0, 0.0, 0.0], serde_json::json!(null))?)?;
@@ -661,6 +672,7 @@ mod tests {
             search_cache_size: 0,
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
+            quantization: QuantizationConfig::default(),
         }
     }
 
@@ -783,6 +795,7 @@ mod tests {
             search_cache_size: 0,
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
+            quantization: QuantizationConfig::default(),
         };
         let mut col = Collection::new(config);
 
@@ -883,6 +896,7 @@ mod tests {
             search_cache_size: 0,
             enable_bm25: true,
             bm25_text_field: "text".to_string(),
+            quantization: QuantizationConfig::default(),
         };
         let mut col = Collection::new(config);
         col.insert(
@@ -947,6 +961,7 @@ mod tests {
                 search_cache_size: 0, // Desabilita cache para testes determinísticos
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
+                quantization: QuantizationConfig::default(),
             };
 
             let mut col = Collection::new(config);
@@ -998,6 +1013,7 @@ mod tests {
                 search_cache_size: 0,
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
+                quantization: QuantizationConfig::default(),
             };
 
             let mut col = Collection::new(config);
@@ -1050,6 +1066,7 @@ mod tests {
                 search_cache_size: 0,
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
+                quantization: QuantizationConfig::default(),
             };
 
             let mut col = Collection::new(config);
@@ -1112,6 +1129,7 @@ mod tests {
                 search_cache_size: 0,
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
+                quantization: QuantizationConfig::default(),
             };
 
             let mut col = Collection::new(config);

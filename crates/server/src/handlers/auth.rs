@@ -6,6 +6,7 @@ use serde::Deserialize;
 use jsonwebtoken::{encode, EncodingKey, Header};
 
 use crate::auth::{get_jwt_secret, JwtClaims};
+use crate::audit::{self, AuditResult};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -40,6 +41,17 @@ pub async fn login(
 
     let valid = store.validate(username, password).map_err(ApiError::from)?;
     if !valid {
+        // Audit: failed login attempt
+        let audit_logger = state.audit_logger.clone();
+        let uname = username.to_string();
+        tokio::spawn(async move {
+            let entry = audit::audit_entry(
+                &uname, "login", &format!("user:{}", uname),
+                serde_json::json!({"reason": "invalid credentials"}),
+                AuditResult::Denied, None, None,
+            );
+            audit_logger.log(&entry).await;
+        });
         return Err(ApiError::invalid_payload("Invalid username or password"));
     }
 
@@ -66,6 +78,19 @@ pub async fn login(
         &EncodingKey::from_secret(secret),
     )
     .map_err(|_| ApiError::internal_error("Failed to create token"))?;
+
+    // Audit: successful login
+    let audit_logger = state.audit_logger.clone();
+    let uname = username.to_string();
+    let role_str = role.as_str().to_string();
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &uname, "login", &format!("user:{}", uname),
+            serde_json::json!({"role": role_str}),
+            AuditResult::Success, None, None,
+        );
+        audit_logger.log(&entry).await;
+    });
 
     Ok(Json(LoginResponse {
         token,

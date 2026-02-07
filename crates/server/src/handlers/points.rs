@@ -12,8 +12,10 @@ use validator::Validate;
 use ferres_db_core::{MetadataFilter, Point, evaluate_condition, QueryCostEstimate};
 
 use crate::api_err;
-use crate::auth::RequireEditor;
+use crate::auth::{AuthenticatedUser, check_user_permission};
+use crate::audit::{self, AuditResult};
 use crate::error::{ApiError, ApiResult};
+use crate::permissions::{Action, PermissionResult, merge_restriction_filter};
 use crate::request_validation;
 use crate::state::{AppState, QueryPhase, QueryProfile, QUERY_PROFILES_CAP};
 
@@ -152,13 +154,31 @@ pub struct ListPointsResponse {
 
 /// Handler para POST /api/v1/collections/{name}/points
 ///
-/// Insere ou atualiza pontos (Editor ou Admin).
+/// Insere ou atualiza pontos (Editor ou Admin, com verificação granular de permissão Write).
 pub async fn upsert_points(
-    _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<UpsertPointsRequest>,
 ) -> ApiResult<Json<UpsertPointsResponse>> {
+    let start = Instant::now();
+
+    // Verificação de permissão granular (Write na collection)
+    let perm_result = check_user_permission(&user, &name, &Action::Write);
+    if !perm_result.is_allowed() {
+        // Audit: ação negada
+        let audit_logger = app_state.audit_logger.clone();
+        let entry = audit::audit_entry(
+            &user.username, "upsert", &format!("collection:{}", name),
+            serde_json::json!({"points_count": payload.points.len(), "denied": true}),
+            AuditResult::Denied, None, None,
+        );
+        tokio::spawn(async move { audit_logger.log(&entry).await });
+        return Err(ApiError::forbidden(format!(
+            "permission denied: write on collection '{}'", name
+        )));
+    }
+
     // Validação centralizada (limites de batch e dimensão — previne DoS/OOM)
     request_validation::validate_upsert_request(&payload)?;
 
@@ -178,20 +198,22 @@ pub async fn upsert_points(
         ApiError::invalid_payload(messages.join(", "))
     })?;
 
+    let points_count = payload.points.len();
+
+    // Captura IDs para broadcast de eventos WebSocket
+    let payload_point_ids: Vec<String> = payload.points.iter().map(|p| p.id.clone()).collect();
+
     // Obtém a coleção uma vez e mantém um único write lock para validação + inserção + mark_dirty
-    // (evita race: outra thread não pode alterar a coleção entre validação e inserção)
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     let (upserted, batch_failed) = {
         let mut collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
 
-        // Fase 1: validação e construção dos pontos (dentro do mesmo lock)
         let mut points = Vec::new();
         let mut failed = Vec::new();
 
         for input in payload.points {
-            // Valida dimensão do vetor (usa a coleção atual, não dados obsoletos)
             if let Err(e) = collection.validate_dimension(&input.vector) {
                 failed.push(FailedPoint {
                     id: input.id.clone(),
@@ -200,7 +222,6 @@ pub async fn upsert_points(
                 continue;
             }
 
-            // Valida que o vetor não está vazio
             if input.vector.is_empty() {
                 failed.push(FailedPoint {
                     id: input.id.clone(),
@@ -209,7 +230,6 @@ pub async fn upsert_points(
                 continue;
             }
 
-            // Valida que não há valores NaN ou infinito
             if let Some(pos) = input.vector.iter().position(|v| !v.is_finite()) {
                 failed.push(FailedPoint {
                     id: input.id.clone(),
@@ -236,12 +256,9 @@ pub async fn upsert_points(
             }));
         }
 
-        // Fase 2: inserção em batch otimizada e mark_dirty (mesmo lock)
         let upserted = match collection.insert_batch(points) {
             Ok(result) => result.inserted,
             Err(err) => {
-                // Se o batch falhou, não podemos saber quais pontos falharam individualmente
-                // então retornamos 0 inseridos e adicionamos um erro genérico
                 failed.push(FailedPoint {
                     id: "batch".to_string(),
                     reason: err.to_string(),
@@ -253,6 +270,44 @@ pub async fn upsert_points(
         (upserted, failed)
     };
 
+    let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+
+    // Emite evento no broadcast channel para subscribers WebSocket
+    if upserted > 0 {
+        // Coleta IDs dos pontos inseridos com sucesso
+        // (todos os que não estão em batch_failed)
+        let failed_ids: std::collections::HashSet<&str> =
+            batch_failed.iter().map(|f| f.id.as_str()).collect();
+        let point_ids: Vec<String> = payload_point_ids
+            .into_iter()
+            .filter(|id| !failed_ids.contains(id.as_str()))
+            .collect();
+        let event = crate::state::CollectionEvent {
+            collection: name.clone(),
+            action: "upsert".to_string(),
+            point_ids,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+        app_state.emit_event(event);
+    }
+
+    // Audit trail (async, não bloqueia)
+    let audit_logger = app_state.audit_logger.clone();
+    let username = user.username.clone();
+    let coll_name = name.clone();
+    let failed_count = batch_failed.len();
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &username, "upsert", &format!("collection:{}", coll_name),
+            serde_json::json!({"points_submitted": points_count, "upserted": upserted, "failed": failed_count}),
+            AuditResult::Success, None, Some(took_ms),
+        );
+        audit_logger.log(&entry).await;
+    });
+
     Ok(Json(UpsertPointsResponse {
         upserted,
         failed: batch_failed,
@@ -261,22 +316,70 @@ pub async fn upsert_points(
 
 /// Handler para DELETE /api/v1/collections/{name}/points
 ///
-/// Remove pontos (Editor ou Admin).
+/// Remove pontos (Editor ou Admin, com verificação granular de permissão Write).
 pub async fn delete_points(
-    _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<DeletePointsRequest>,
 ) -> ApiResult<Json<DeletePointsResponse>> {
+    let start = Instant::now();
+
+    // Verificação de permissão granular (Write na collection)
+    let perm_result = check_user_permission(&user, &name, &Action::Write);
+    if !perm_result.is_allowed() {
+        let audit_logger = app_state.audit_logger.clone();
+        let entry = audit::audit_entry(
+            &user.username, "delete_points", &format!("collection:{}", name),
+            serde_json::json!({"ids_count": payload.ids.len(), "denied": true}),
+            AuditResult::Denied, None, None,
+        );
+        tokio::spawn(async move { audit_logger.log(&entry).await });
+        return Err(ApiError::forbidden(format!(
+            "permission denied: write on collection '{}'", name
+        )));
+    }
+
     request_validation::validate_delete_batch_size(payload.ids.len())?;
 
+    let ids_count = payload.ids.len();
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
+    let deleted_ids = payload.ids.clone();
     let deleted = {
         let mut collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
         collection.delete_points_batch(&payload.ids).map_err(ApiError::from)?
     };
+
+    let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+
+    // Emite evento no broadcast channel para subscribers WebSocket
+    if deleted > 0 {
+        let event = crate::state::CollectionEvent {
+            collection: name.clone(),
+            action: "delete".to_string(),
+            point_ids: deleted_ids,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+        app_state.emit_event(event);
+    }
+
+    // Audit trail
+    let audit_logger = app_state.audit_logger.clone();
+    let username = user.username.clone();
+    let coll_name = name.clone();
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &username, "delete_points", &format!("collection:{}", coll_name),
+            serde_json::json!({"ids_submitted": ids_count, "deleted": deleted}),
+            AuditResult::Success, None, Some(took_ms),
+        );
+        audit_logger.log(&entry).await;
+    });
 
     Ok(Json(DeletePointsResponse { deleted }))
 }
@@ -300,11 +403,32 @@ pub async fn delete_points(
     )
 )]
 pub async fn search_points(
-    _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
-    Json(payload): Json<SearchPointsRequest>,
+    Json(mut payload): Json<SearchPointsRequest>,
 ) -> ApiResult<Json<SearchPointsResponse>> {
+    // Verificação de permissão granular (Read na collection)
+    let perm_result = check_user_permission(&user, &name, &Action::Read);
+    if !perm_result.is_allowed() {
+        let audit_logger = app_state.audit_logger.clone();
+        let entry = audit::audit_entry(
+            &user.username, "search", &format!("collection:{}", name),
+            serde_json::json!({"denied": true}),
+            AuditResult::Denied, None, None,
+        );
+        tokio::spawn(async move { audit_logger.log(&entry).await });
+        return Err(ApiError::forbidden(format!(
+            "permission denied: read on collection '{}'", name
+        )));
+    }
+
+    // Se a permissão vem com MetadataRestriction, injeta automaticamente no filtro
+    if let PermissionResult::AllowedWithRestriction(ref restriction) = perm_result {
+        let merged = merge_restriction_filter(payload.filter.as_ref(), restriction);
+        payload.filter = Some(merged);
+    }
+
     request_validation::validate_search_limit(payload.limit)?;
     request_validation::validate_vector_dimension(&payload.vector)?;
 
@@ -407,11 +531,10 @@ pub async fn search_points(
     .collect();
 
     // Drop lock imediatamente após extrair os dados necessários da coleção.
-    // Tudo abaixo (filtro, métricas, query_profiles, logging) não precisa do lock.
     drop(collection);
     drop(collection_arc);
 
-    // Aplica filtro de metadata se fornecido (Eq, Ne, In, Gt, Lt, Gte, Lte)
+    // Aplica filtro de metadata se fornecido (inclui filtros injetados por MetadataRestriction)
     let mut filtered_results = search_results;
     if let Some(filter_value) = &payload.filter {
         let filter = match MetadataFilter::from_json(filter_value.clone()) {
@@ -518,6 +641,20 @@ pub async fn search_points(
             .await;
     });
 
+    // Audit trail (async)
+    let audit_logger = app_state.audit_logger.clone();
+    let username = user.username.clone();
+    let coll_name_audit = name.clone();
+    let query_id_audit = query_id.clone();
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &username, "search", &format!("collection:{}", coll_name_audit),
+            serde_json::json!({"query_id": query_id_audit, "limit": payload.limit, "results_count": results_count}),
+            AuditResult::Success, None, Some(took_ms),
+        );
+        audit_logger.log(&entry).await;
+    });
+
     Ok(Json(SearchPointsResponse {
         results,
         took_ms,
@@ -547,11 +684,26 @@ pub async fn search_points(
     )
 )]
 pub async fn search_hybrid(
-    _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<HybridSearchPointsRequest>,
 ) -> ApiResult<Json<SearchPointsResponse>> {
+    // Verificação de permissão granular (Read na collection)
+    let perm_result = check_user_permission(&user, &name, &Action::Read);
+    if !perm_result.is_allowed() {
+        let audit_logger = app_state.audit_logger.clone();
+        let entry = audit::audit_entry(
+            &user.username, "search_hybrid", &format!("collection:{}", name),
+            serde_json::json!({"denied": true}),
+            AuditResult::Denied, None, None,
+        );
+        tokio::spawn(async move { audit_logger.log(&entry).await });
+        return Err(ApiError::forbidden(format!(
+            "permission denied: read on collection '{}'", name
+        )));
+    }
+
     request_validation::validate_search_limit(payload.limit)?;
     request_validation::validate_vector_dimension(&payload.query_vector)?;
     if !(0.0..=1.0).contains(&payload.alpha) {
@@ -693,6 +845,20 @@ pub async fn search_hybrid(
             .await;
     });
 
+    // Audit trail
+    let audit_logger = app_state.audit_logger.clone();
+    let username = user.username.clone();
+    let coll_name_audit = name.clone();
+    let query_id_audit = query_id.clone();
+    tokio::spawn(async move {
+        let entry = audit::audit_entry(
+            &username, "search_hybrid", &format!("collection:{}", coll_name_audit),
+            serde_json::json!({"query_id": query_id_audit, "results_count": results_count}),
+            AuditResult::Success, None, Some(took_ms),
+        );
+        audit_logger.log(&entry).await;
+    });
+
     Ok(Json(SearchPointsResponse {
         results,
         took_ms,
@@ -832,11 +998,19 @@ pub struct HistoricalLatency {
     fields(collection = %name, limit = payload.limit)
 )]
 pub async fn estimate_search(
-    _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<EstimateSearchRequest>,
 ) -> ApiResult<Json<EstimateSearchResponse>> {
+    // Verificação de permissão granular (Read)
+    let perm_result = check_user_permission(&user, &name, &Action::Read);
+    if !perm_result.is_allowed() {
+        return Err(ApiError::forbidden(format!(
+            "permission denied: read on collection '{}'", name
+        )));
+    }
+
     request_validation::validate_search_limit(payload.limit)?;
 
     // Obtém a coleção para extrair stats
@@ -927,11 +1101,19 @@ pub struct ExplainSearchRequest {
     fields(collection = %name, limit = payload.limit)
 )]
 pub async fn explain_search(
-    _editor: RequireEditor,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<ExplainSearchRequest>,
 ) -> ApiResult<Json<ferres_db_core::SearchExplanation>> {
+    // Verificação de permissão granular (Read)
+    let perm_result = check_user_permission(&user, &name, &Action::Read);
+    if !perm_result.is_allowed() {
+        return Err(ApiError::forbidden(format!(
+            "permission denied: read on collection '{}'", name
+        )));
+    }
+
     request_validation::validate_search_limit(payload.limit)?;
     request_validation::validate_vector_dimension(&payload.vector)?;
 
