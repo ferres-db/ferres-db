@@ -1,12 +1,15 @@
 #!/bin/sh
 set -e
 
-# Se STORAGE_PATH parecer path Windows (C:, C:\...) vindo do host, usar /data no container.
-# Evita "mkdir: cannot create directory 'C:'" e path inválido no Linux.
 case "$STORAGE_PATH" in
   ""|*\\*|*:*) export STORAGE_PATH=/data ;;
 esac
 
 mkdir -p "$STORAGE_PATH"
+chown -R ferres:ferres "$STORAGE_PATH" 2>/dev/null || true
 
-exec /app/ferres-db-server "$@"
+echo "[entrypoint] STORAGE_PATH=$STORAGE_PATH"
+echo "[entrypoint] Starting ferres-db-server..."
+
+# exec para que o servidor seja PID 1 e receba SIGTERM do docker stop
+exec /app/ferres-db-server

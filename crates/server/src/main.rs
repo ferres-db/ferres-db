@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use tokio::signal;
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt, Registry, Layer};
@@ -222,15 +221,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Inicia o servidor com graceful shutdown
     let server = axum::serve(listener, app);
 
-    // Aguarda sinal de shutdown (Ctrl+C ou SIGTERM)
+    // Aguarda sinal de shutdown: SIGTERM (docker stop) ou SIGINT (Ctrl+C em TTY).
+    // Em Docker sem TTY, ctrl_c() pode completar logo e encerrar o processo; por isso
+    // escutamos os sinais Unix explicitamente.
+    #[cfg(unix)]
+    let shutdown = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => { info!("received SIGTERM") }
+            _ = sigint.recv() => { info!("received SIGINT") }
+        }
+    };
+    #[cfg(not(unix))]
+    let shutdown = async {
+        tokio::signal::ctrl_c().await.expect("failed to listen for Ctrl+C");
+    };
+
     tokio::select! {
         result = server => {
             if let Err(e) = result {
                 error!(error = %e, "server error");
             }
         }
-        _ = signal::ctrl_c() => {
-            info!("received shutdown signal, performing graceful shutdown...");
+        _ = shutdown => {
+            info!("shutdown signal received, performing graceful shutdown...");
         }
     }
 
