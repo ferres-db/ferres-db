@@ -146,7 +146,7 @@ export const Collections = () => {
           <div>
             <label className="block text-sm font-medium mb-1">Distance Metric</label>
             <select
-              className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm"
+              className="flex h-10 w-full rounded-md border border-bg-tertiary bg-bg-secondary px-3 py-2 text-sm text-gray-50 ring-offset-bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 [&>option]:bg-bg-secondary [&>option]:text-gray-50"
               value={newDistanceMetric}
               onChange={(e) => setNewDistanceMetric(e.target.value)}
             >

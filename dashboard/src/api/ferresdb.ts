@@ -112,10 +112,19 @@ export const collectionsApi = {
   },
 
   create: async (name: string, vectorSize: number, distanceMetric: string = 'cosine'): Promise<void> => {
+    // Backend expects "dimension" and "distance" (PascalCase: Cosine, Euclidean, DotProduct)
+    const distance =
+      distanceMetric === 'cosine'
+        ? 'Cosine'
+        : distanceMetric === 'euclidean'
+          ? 'Euclidean'
+          : distanceMetric === 'dot'
+            ? 'DotProduct'
+            : 'Cosine';
     await apiClient.post('/api/v1/collections', {
       name,
-      vector_size: vectorSize,
-      distance_metric: distanceMetric,
+      dimension: vectorSize,
+      distance,
     });
   },
 
