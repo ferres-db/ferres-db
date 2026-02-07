@@ -43,7 +43,9 @@ use tracing::{error, info, warn};
 
 pub mod bm25;
 pub mod collection;
+pub mod cost;
 pub mod error;
+pub mod explain;
 pub mod point;
 pub mod search;
 pub mod storage;
@@ -57,6 +59,11 @@ pub use bm25::BM25Index;
 pub use search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex};
 pub use storage::{CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker};
 pub use wal::{Wal, WalEntry, WalOperation, recover_collection};
+pub use cost::{CostBreakdown, CostEstimateParams, QueryCostEstimate, estimate_search_cost};
+pub use explain::{
+    ConditionResult, ExplainMeta, ExplainResult, FilterExplanation, IndexStats,
+    SearchExplanation, evaluate_condition,
+};
 
 // MetadataFilter e SearchResult já são públicos e definidos neste módulo
 
@@ -846,6 +853,217 @@ impl VectorDB {
         );
 
         Ok(filtered_results)
+    }
+
+    /// Busca com explicação detalhada de cada resultado.
+    ///
+    /// Retorna uma [`SearchExplanation`] que detalha **por que** cada resultado
+    /// foi retornado (ou filtrado): score breakdown, avaliação de filtros
+    /// condição-a-condição, posição no ranking antes/depois de filtros e
+    /// estatísticas do índice HNSW.
+    ///
+    /// # Exemplo
+    ///
+    /// ```rust,no_run
+    /// use ferres_db_core::{VectorDB, MetadataFilter};
+    /// use serde_json::json;
+    ///
+    /// let db = VectorDB::new("./data".into())?;
+    ///
+    /// let explanation = db.search_explain(
+    ///     "embeddings",
+    ///     vec![0.15; 384],
+    ///     5,
+    ///     None,
+    /// )?;
+    ///
+    /// for result in &explanation.results {
+    ///     println!("ID: {}, Score: {:.4}, Passed filter: {}",
+    ///         result.id, result.score,
+    ///         result.filter_evaluation.as_ref().map_or(true, |f| f.passed));
+    /// }
+    /// # Ok::<(), ferres_db_core::FerresError>(())
+    /// ```
+    ///
+    /// # Validações
+    /// - Verifica se a coleção existe.
+    /// - Valida a dimensão do vetor de consulta.
+    ///
+    /// # Erros
+    /// - `CollectionNotFound` se a coleção não existir.
+    /// - `DimensionMismatch` se o vetor de consulta tiver dimensão incorreta.
+    pub fn search_explain(
+        &self,
+        collection: &str,
+        query: Vec<f32>,
+        limit: usize,
+        filter: Option<MetadataFilter>,
+    ) -> Result<SearchExplanation, FerresError> {
+        let col = self
+            .collections
+            .get(collection)
+            .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
+
+        col.validate_dimension(&query)?;
+
+        // Calcula norma L2 do vetor de consulta
+        let query_vector_norm = query
+            .iter()
+            .map(|x| (*x as f64) * (*x as f64))
+            .sum::<f64>()
+            .sqrt() as f32;
+
+        let distance_metric = format!("{:?}", col.config().distance);
+        let filter = filter.unwrap_or_else(MetadataFilter::empty);
+
+        // Busca mais candidatos quando há filtro para compensar filtragem
+        let search_limit = if filter.is_empty() {
+            limit
+        } else {
+            let expanded = limit.saturating_mul(10);
+            let max_points = col.len().max(limit);
+            expanded.min(max_points)
+        };
+
+        info!(
+            collection = %collection,
+            limit,
+            search_limit,
+            has_filter = !filter.is_empty(),
+            "performing search_explain"
+        );
+
+        // Busca com metadata de explain
+        let raw_results = col.search_explain(&query, search_limit)?;
+        let candidates_scanned = raw_results.len();
+
+        // Constrói ExplainResult para cada candidato
+        let mut explain_results = Vec::with_capacity(raw_results.len());
+        let mut rank_after_counter = 0usize;
+        let mut total_tombstones_skipped = 0usize;
+
+        for (rank_before_idx, (id, score, meta)) in raw_results.iter().enumerate() {
+            let point = match col.get(id) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            total_tombstones_skipped = meta.tombstones_skipped;
+
+            // Avalia cada condição do filtro individualmente
+            let filter_eval = if !filter.is_empty() {
+                let condition_results: Vec<explain::ConditionResult> = filter
+                    .conditions()
+                    .iter()
+                    .map(|cond| explain::evaluate_condition(cond, &point.metadata))
+                    .collect();
+                let passed = condition_results.iter().all(|c| c.passed);
+                Some(explain::FilterExplanation {
+                    conditions: condition_results,
+                    passed,
+                })
+            } else {
+                None
+            };
+
+            let passed_filter = filter_eval.as_ref().map_or(true, |f| f.passed);
+            if passed_filter {
+                rank_after_counter += 1;
+            }
+
+            let mut score_breakdown = HashMap::new();
+            score_breakdown.insert("vector_score".to_string(), *score);
+
+            explain_results.push(explain::ExplainResult {
+                id: id.clone(),
+                score: *score,
+                distance_metric: distance_metric.clone(),
+                raw_distance: *score,
+                score_breakdown,
+                filter_evaluation: filter_eval,
+                rank_before_filter: rank_before_idx + 1,
+                rank_after_filter: if passed_filter { rank_after_counter } else { 0 },
+            });
+        }
+
+        let candidates_after_filter = explain_results
+            .iter()
+            .filter(|r| r.filter_evaluation.as_ref().map_or(true, |f| f.passed))
+            .count();
+
+        let index_stats = explain::IndexStats {
+            total_points: col.len(),
+            hnsw_layers: col.config().hnsw.max_layer,
+            ef_search_used: col.config().hnsw.ef_search,
+            tombstones_skipped: total_tombstones_skipped,
+        };
+
+        info!(
+            collection = %collection,
+            candidates_scanned,
+            candidates_after_filter,
+            results = explain_results.len(),
+            "search_explain completed"
+        );
+
+        Ok(SearchExplanation {
+            query_vector_norm,
+            distance_metric,
+            candidates_scanned,
+            candidates_after_filter,
+            results: explain_results,
+            index_stats,
+        })
+    }
+
+    /// Estima o custo de uma busca vetorial antes da execução.
+    ///
+    /// Calcula heurísticas baseadas no tamanho da coleção, dimensão dos vetores,
+    /// configuração HNSW e presença de filtros. Não executa nenhuma busca real.
+    ///
+    /// # Exemplo
+    ///
+    /// ```rust,no_run
+    /// use ferres_db_core::VectorDB;
+    ///
+    /// let db = VectorDB::new("./data".into())?;
+    ///
+    /// let estimate = db.estimate_query_cost("embeddings", 10, None, 0.0, 0.0)?;
+    /// println!("Estimated: {:.2}ms, Expensive: {}", estimate.estimated_ms, estimate.is_expensive);
+    /// # Ok::<(), ferres_db_core::FerresError>(())
+    /// ```
+    ///
+    /// # Erros
+    /// - `CollectionNotFound` se a coleção não existir.
+    pub fn estimate_query_cost(
+        &self,
+        collection: &str,
+        limit: usize,
+        filter: Option<&MetadataFilter>,
+        historical_p50: f64,
+        historical_p95: f64,
+    ) -> Result<QueryCostEstimate, FerresError> {
+        let col = self
+            .collections
+            .get(collection)
+            .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
+
+        let config = col.config();
+        let has_filter = filter.map_or(false, |f| !f.is_empty());
+        let filter_conditions_count = filter.map_or(0, |f| f.conditions().len());
+
+        let params = cost::CostEstimateParams {
+            collection_size: col.len(),
+            dimension: config.dimension,
+            limit,
+            ef_search: config.hnsw.ef_search,
+            has_filter,
+            filter_conditions_count,
+            historical_p50,
+            historical_p95,
+        };
+
+        Ok(cost::estimate_search_cost(&params))
     }
 
     /// Retorna um ponto específico de uma coleção pelo ID.

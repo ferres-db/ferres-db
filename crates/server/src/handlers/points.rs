@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-use ferres_db_core::{MetadataFilter, Point};
+use ferres_db_core::{MetadataFilter, Point, evaluate_condition, QueryCostEstimate};
 
 use crate::api_err;
 use crate::auth::RequireEditor;
@@ -69,6 +69,10 @@ pub struct SearchPointsRequest {
     pub limit: usize,
     #[serde(default)]
     pub filter: Option<serde_json::Value>,
+    /// Orçamento máximo em ms. Se a estimativa de custo exceder, retorna erro 422
+    /// com a estimativa detalhada no body (sem executar a busca).
+    #[serde(default)]
+    pub budget_ms: Option<u64>,
 }
 
 /// Payload para busca híbrida (vetorial + keyword).
@@ -283,7 +287,17 @@ pub async fn delete_points(
 #[tracing::instrument(
     name = "search_points",
     skip(app_state, payload),
-    fields(collection = %name, limit = payload.limit)
+    fields(
+        db.collection = %name,
+        db.operation = "vector_search",
+        db.vector.dimension = tracing::field::Empty,
+        db.vector.limit = payload.limit,
+        db.results.count = tracing::field::Empty,
+        db.duration.search_ms = tracing::field::Empty,
+        db.duration.hydrate_ms = tracing::field::Empty,
+        db.index.r#type = "hnsw",
+        db.index.ef_search = tracing::field::Empty,
+    )
 )]
 pub async fn search_points(
     _editor: RequireEditor,
@@ -308,6 +322,62 @@ pub async fn search_points(
         .map_err(ApiError::from)?;
     drop(_span);
 
+    // Enriquece span OTel com atributos da coleção
+    {
+        let span = tracing::Span::current();
+        span.record("db.vector.dimension", collection.config().dimension);
+        span.record("db.index.ef_search", collection.config().hnsw.ef_search);
+    }
+
+    // Budget guard: se budget_ms está presente, estima o custo e rejeita se exceder
+    if let Some(budget) = payload.budget_ms {
+        let config = collection.config().clone();
+        let num_points = collection.len();
+
+        let (has_filter, filter_conditions_count) = if let Some(filter_value) = &payload.filter {
+            match MetadataFilter::from_json(filter_value.clone()) {
+                Ok(f) => (!f.is_empty(), f.conditions().len()),
+                Err(_) => (false, 0),
+            }
+        } else {
+            (false, 0)
+        };
+
+        let (p50, p95) = {
+            app_state.query_stats.get(&name)
+                .map(|s| {
+                    let (_, p50, p95, _) = s.calculate_percentiles();
+                    (p50, p95)
+                })
+                .unwrap_or((0.0, 0.0))
+        };
+
+        let params = ferres_db_core::CostEstimateParams {
+            collection_size: num_points,
+            dimension: config.dimension,
+            limit: payload.limit,
+            ef_search: config.hnsw.ef_search,
+            has_filter,
+            filter_conditions_count,
+            historical_p50: p50,
+            historical_p95: p95,
+        };
+
+        let estimate = ferres_db_core::estimate_search_cost(&params);
+
+        if estimate.estimated_ms > budget as f64 {
+            let estimate_json = serde_json::to_value(&estimate)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            return Err(ApiError::budget_exceeded(
+                format!(
+                    "estimated cost ({:.1}ms) exceeds budget ({}ms)",
+                    estimate.estimated_ms, budget
+                ),
+                estimate_json,
+            ));
+        }
+    }
+
     let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let search_start = Instant::now();
 
@@ -318,6 +388,7 @@ pub async fn search_points(
     drop(_span);
 
     let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    tracing::Span::current().record("db.duration.search_ms", search_ms);
     let hydrate_start = Instant::now();
 
     // Fase: hydrate (construir SearchResults + filtro)
@@ -330,10 +401,15 @@ pub async fn search_points(
                 id,
                 score,
                 metadata: point.metadata.clone(),
-                vector: None,
-            })
+            vector: None,
         })
-        .collect();
+    })
+    .collect();
+
+    // Drop lock imediatamente após extrair os dados necessários da coleção.
+    // Tudo abaixo (filtro, métricas, query_profiles, logging) não precisa do lock.
+    drop(collection);
+    drop(collection_arc);
 
     // Aplica filtro de metadata se fornecido (Eq, Ne, In, Gt, Lt, Gte, Lte)
     let mut filtered_results = search_results;
@@ -362,6 +438,11 @@ pub async fn search_points(
 
     let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let results_count = results.len();
+    {
+        let span = tracing::Span::current();
+        span.record("db.duration.hydrate_ms", hydrate_ms);
+        span.record("db.results.count", results_count);
+    }
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let collection_name = name.clone();
     let vector_preview = payload.vector.clone();
@@ -401,9 +482,6 @@ pub async fn search_points(
         }
     }
     app_state.query_profiles.insert(query_id.clone(), profile);
-
-    drop(collection);
-    drop(collection_arc);
 
     let query_logger = app_state.query_logger.clone();
 
@@ -455,7 +533,18 @@ pub async fn search_points(
 #[tracing::instrument(
     name = "search_hybrid",
     skip(app_state, payload),
-    fields(collection = %name, limit = payload.limit, alpha = payload.alpha)
+    fields(
+        db.collection = %name,
+        db.operation = "hybrid_search",
+        db.vector.dimension = tracing::field::Empty,
+        db.vector.limit = payload.limit,
+        db.hybrid.alpha = payload.alpha,
+        db.results.count = tracing::field::Empty,
+        db.duration.search_ms = tracing::field::Empty,
+        db.duration.hydrate_ms = tracing::field::Empty,
+        db.index.r#type = "hnsw",
+        db.index.ef_search = tracing::field::Empty,
+    )
 )]
 pub async fn search_hybrid(
     _editor: RequireEditor,
@@ -482,6 +571,13 @@ pub async fn search_hybrid(
         .map_err(ApiError::from)?;
     drop(_span);
 
+    // Enriquece span OTel com atributos da coleção
+    {
+        let span = tracing::Span::current();
+        span.record("db.vector.dimension", collection.config().dimension);
+        span.record("db.index.ef_search", collection.config().hnsw.ef_search);
+    }
+
     let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let search_start = Instant::now();
 
@@ -502,6 +598,7 @@ pub async fn search_hybrid(
     drop(_span);
 
     let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    tracing::Span::current().record("db.duration.search_ms", search_ms);
     let hydrate_start = Instant::now();
 
     let _span = tracing::info_span!("hydrate_results").entered();
@@ -518,10 +615,20 @@ pub async fn search_hybrid(
         .collect();
     drop(_span);
 
+    // Drop lock imediatamente após extrair os dados necessários da coleção.
+    // Tudo abaixo (métricas, query_profiles, logging) não precisa do lock.
+    drop(collection);
+    drop(collection_arc);
+
     let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let collection_name = name.clone();
     let results_count = results.len();
+    {
+        let span = tracing::Span::current();
+        span.record("db.duration.hydrate_ms", hydrate_ms);
+        span.record("db.results.count", results_count);
+    }
 
     let total = took_ms as f64;
     let phases = vec![
@@ -555,9 +662,6 @@ pub async fn search_hybrid(
         }
     }
     app_state.query_profiles.insert(query_id.clone(), profile);
-
-    drop(collection);
-    drop(collection_arc);
 
     app_state.query_stats
         .entry(collection_name.clone())
@@ -684,3 +788,280 @@ pub async fn get_point(
     }))
 }
 
+// ─── Estimate Search Cost ──────────────────────────────────────────────────
+
+/// Payload para estimativa de custo de busca.
+#[derive(Debug, Deserialize)]
+pub struct EstimateSearchRequest {
+    pub limit: usize,
+    #[serde(default)]
+    pub filter: Option<serde_json::Value>,
+    /// Se true, inclui dados históricos de latência (p50/p95/p99) no response.
+    #[serde(default)]
+    pub include_history: Option<bool>,
+}
+
+/// Resposta da estimativa de custo de busca.
+#[derive(Debug, Serialize)]
+pub struct EstimateSearchResponse {
+    /// Estimativa de custo detalhada.
+    #[serde(flatten)]
+    pub estimate: QueryCostEstimate,
+    /// Dados históricos de latência (presente se include_history=true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_latency: Option<HistoricalLatency>,
+}
+
+/// Dados históricos de latência de uma coleção.
+#[derive(Debug, Serialize)]
+pub struct HistoricalLatency {
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub avg_ms: f64,
+    pub total_queries: u64,
+}
+
+/// Handler para POST /api/v1/collections/{name}/search/estimate
+///
+/// Estima o custo de uma busca vetorial sem executá-la. Retorna latência
+/// estimada, consumo de memória, nós HNSW visitados e recomendações.
+#[tracing::instrument(
+    name = "estimate_search_cost",
+    skip(app_state, payload),
+    fields(collection = %name, limit = payload.limit)
+)]
+pub async fn estimate_search(
+    _editor: RequireEditor,
+    State(app_state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<EstimateSearchRequest>,
+) -> ApiResult<Json<EstimateSearchResponse>> {
+    request_validation::validate_search_limit(payload.limit)?;
+
+    // Obtém a coleção para extrair stats
+    let collection_arc = app_state.collections.get(&name)
+        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+
+    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+
+    let config = collection.config().clone();
+    let num_points = collection.len();
+
+    // Drop lock — não precisamos mais da coleção
+    drop(collection);
+    drop(collection_arc);
+
+    // Parse do filtro para contar condições
+    let (has_filter, filter_conditions_count) = if let Some(filter_value) = &payload.filter {
+        match MetadataFilter::from_json(filter_value.clone()) {
+            Ok(f) => (!f.is_empty(), f.conditions().len()),
+            Err(e) => return Err(ApiError::invalid_payload(e.to_string())),
+        }
+    } else {
+        (false, 0)
+    };
+
+    // Obtém percentis históricos do QueryStats
+    let (avg, p50, p95, p99, total_queries) = {
+        app_state.query_stats.get(&name)
+            .map(|s| {
+                let num_queries = s.num_queries.load(std::sync::atomic::Ordering::Relaxed);
+                let (avg, p50, p95, p99) = s.calculate_percentiles();
+                (avg, p50, p95, p99, num_queries)
+            })
+            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0))
+    };
+
+    // Calcula a estimativa
+    let params = ferres_db_core::CostEstimateParams {
+        collection_size: num_points,
+        dimension: config.dimension,
+        limit: payload.limit,
+        ef_search: config.hnsw.ef_search,
+        has_filter,
+        filter_conditions_count,
+        historical_p50: p50,
+        historical_p95: p95,
+    };
+
+    let estimate = ferres_db_core::estimate_search_cost(&params);
+
+    // Inclui histórico se solicitado
+    let historical_latency = if payload.include_history.unwrap_or(false) {
+        Some(HistoricalLatency {
+            p50_ms: p50,
+            p95_ms: p95,
+            p99_ms: p99,
+            avg_ms: avg,
+            total_queries,
+        })
+    } else {
+        None
+    };
+
+    Ok(Json(EstimateSearchResponse {
+        estimate,
+        historical_latency,
+    }))
+}
+
+// ─── Explain Search ───────────────────────────────────────────────────────
+
+/// Payload para busca com explicação.
+#[derive(Debug, Deserialize)]
+pub struct ExplainSearchRequest {
+    pub vector: Vec<f32>,
+    pub limit: usize,
+    #[serde(default)]
+    pub filter: Option<serde_json::Value>,
+}
+
+/// Handler para POST /api/v1/collections/{name}/search/explain
+///
+/// Retorna uma explicação detalhada de cada resultado da busca vetorial,
+/// incluindo score breakdown, avaliação de filtros e estatísticas do índice.
+#[tracing::instrument(
+    name = "explain_search",
+    skip(app_state, payload),
+    fields(collection = %name, limit = payload.limit)
+)]
+pub async fn explain_search(
+    _editor: RequireEditor,
+    State(app_state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<ExplainSearchRequest>,
+) -> ApiResult<Json<ferres_db_core::SearchExplanation>> {
+    request_validation::validate_search_limit(payload.limit)?;
+    request_validation::validate_vector_dimension(&payload.vector)?;
+
+    let start = Instant::now();
+
+    let collection_arc = app_state.collections.get(&name)
+        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+
+    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+
+    // Valida dimensão
+    collection.validate_dimension(&payload.vector)
+        .map_err(ApiError::from)?;
+
+    // Calcula norma L2 do vetor de consulta
+    let query_vector_norm = payload.vector
+        .iter()
+        .map(|x| (*x as f64) * (*x as f64))
+        .sum::<f64>()
+        .sqrt() as f32;
+
+    let distance_metric = format!("{:?}", collection.config().distance);
+
+    // Parse do filtro
+    let filter = if let Some(filter_value) = &payload.filter {
+        match MetadataFilter::from_json(filter_value.clone()) {
+            Ok(f) => f,
+            Err(e) => return Err(ApiError::invalid_payload(e.to_string())),
+        }
+    } else {
+        MetadataFilter::empty()
+    };
+
+    // Busca mais candidatos quando há filtro
+    let search_limit = if filter.is_empty() {
+        payload.limit
+    } else {
+        let expanded = payload.limit.saturating_mul(10);
+        let max_points = collection.len().max(payload.limit);
+        expanded.min(max_points)
+    };
+
+    // Busca com metadata de explain
+    let raw_results = collection.search_explain(&payload.vector, search_limit)
+        .map_err(ApiError::from)?;
+    let candidates_scanned = raw_results.len();
+
+    // Constrói ExplainResult para cada candidato
+    let mut explain_results = Vec::with_capacity(raw_results.len());
+    let mut rank_after_counter = 0usize;
+    let mut total_tombstones_skipped = 0usize;
+
+    for (rank_before_idx, (id, score, meta)) in raw_results.iter().enumerate() {
+        let point = match collection.get(id) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        total_tombstones_skipped = meta.tombstones_skipped;
+
+        // Avalia cada condição do filtro individualmente
+        let filter_eval = if !filter.is_empty() {
+            let condition_results: Vec<ferres_db_core::ConditionResult> = filter
+                .conditions()
+                .iter()
+                .map(|cond| evaluate_condition(cond, &point.metadata))
+                .collect();
+            let passed = condition_results.iter().all(|c| c.passed);
+            Some(ferres_db_core::FilterExplanation {
+                conditions: condition_results,
+                passed,
+            })
+        } else {
+            None
+        };
+
+        let passed_filter = filter_eval.as_ref().map_or(true, |f| f.passed);
+        if passed_filter {
+            rank_after_counter += 1;
+        }
+
+        let mut score_breakdown = std::collections::HashMap::new();
+        score_breakdown.insert("vector_score".to_string(), *score);
+
+        explain_results.push(ferres_db_core::ExplainResult {
+            id: id.clone(),
+            score: *score,
+            distance_metric: distance_metric.clone(),
+            raw_distance: *score,
+            score_breakdown,
+            filter_evaluation: filter_eval,
+            rank_before_filter: rank_before_idx + 1,
+            rank_after_filter: if passed_filter { rank_after_counter } else { 0 },
+        });
+    }
+
+    let candidates_after_filter = explain_results
+        .iter()
+        .filter(|r| r.filter_evaluation.as_ref().map_or(true, |f| f.passed))
+        .count();
+
+    let index_stats = ferres_db_core::IndexStats {
+        total_points: collection.len(),
+        hnsw_layers: collection.config().hnsw.max_layer,
+        ef_search_used: collection.config().hnsw.ef_search,
+        tombstones_skipped: total_tombstones_skipped,
+    };
+
+    // Drop lock antes de registrar métricas
+    drop(collection);
+    drop(collection_arc);
+
+    let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+
+    // Métricas Prometheus (reusa QUERIES_TOTAL com label da coleção)
+    crate::metrics::QUERIES_TOTAL
+        .with_label_values(&[&name])
+        .inc();
+    crate::metrics::QUERY_DURATION_MS
+        .with_label_values(&[&name])
+        .observe(took_ms as f64);
+
+    let explanation = ferres_db_core::SearchExplanation {
+        query_vector_norm,
+        distance_metric,
+        candidates_scanned,
+        candidates_after_filter,
+        results: explain_results,
+        index_stats,
+    };
+
+    Ok(Json(explanation))
+}

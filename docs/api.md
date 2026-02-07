@@ -345,11 +345,12 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 
 **Request body:**
 
-| Campo    | Tipo   | Obrigatório | Descrição                                                                 |
-| -------- | ------ | ----------- | ------------------------------------------------------------------------- |
-| `vector` | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                             |
-| `limit`  | number | sim         | Número máximo de resultados (> 0)                                         |
-| `filter` | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo. |
+| Campo       | Tipo   | Obrigatório | Descrição                                                                          |
+| ----------- | ------ | ----------- | ---------------------------------------------------------------------------------- |
+| `vector`    | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                                      |
+| `limit`     | number | sim         | Número máximo de resultados (> 0)                                                  |
+| `filter`    | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo.          |
+| `budget_ms` | number | não         | Orçamento máximo em ms. Se a estimativa exceder, retorna 422 sem executar a busca. |
 
 **Schema de request:**
 
@@ -357,7 +358,8 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 {
   "vector": [0.1, 0.2, -0.1],
   "limit": 5,
-  "filter": null
+  "filter": null,
+  "budget_ms": 50
 }
 ```
 
@@ -453,6 +455,189 @@ Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF. A coleç�
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/hybrid \
   -H "Content-Type: application/json" \
   -d '{"query_text":"deploy","query_vector":[0.1,0.2,-0.1],"limit":5,"alpha":0.5}'
+```
+
+---
+
+### POST /api/v1/collections/{name}/search/explain
+
+Busca vetorial com explicação detalhada de cada resultado. Retorna **por que** cada resultado foi retornado (ou filtrado): score breakdown, avaliação de filtros condição-a-condição, posição no ranking e estatísticas do índice HNSW.
+
+**Path:** `name` — nome da coleção.
+
+**Request body:**
+
+| Campo    | Tipo   | Obrigatório | Descrição                                                                |
+| -------- | ------ | ----------- | ------------------------------------------------------------------------ |
+| `vector` | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                            |
+| `limit`  | number | sim         | Número máximo de resultados (> 0)                                        |
+| `filter` | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) acima. |
+
+**Schema de request:**
+
+```json
+{
+  "vector": [0.1, 0.2, -0.1],
+  "limit": 5,
+  "filter": { "category": "tech" }
+}
+```
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "query_vector_norm": 0.245,
+  "distance_metric": "Cosine",
+  "candidates_scanned": 30,
+  "candidates_after_filter": 5,
+  "results": [
+    {
+      "id": "doc-1",
+      "score": 0.12,
+      "distance_metric": "Cosine",
+      "raw_distance": 0.12,
+      "score_breakdown": {
+        "vector_score": 0.12
+      },
+      "filter_evaluation": {
+        "conditions": [
+          {
+            "field": "category",
+            "operator": "$eq",
+            "expected": "tech",
+            "actual": "tech",
+            "passed": true
+          }
+        ],
+        "passed": true
+      },
+      "rank_before_filter": 1,
+      "rank_after_filter": 1
+    }
+  ],
+  "index_stats": {
+    "total_points": 1000,
+    "hnsw_layers": 16,
+    "ef_search_used": 50,
+    "tombstones_skipped": 0
+  }
+}
+```
+
+| Campo                          | Tipo   | Descrição                                                       |
+| ------------------------------ | ------ | --------------------------------------------------------------- |
+| `query_vector_norm`            | number | Norma L2 do vetor de consulta                                   |
+| `distance_metric`              | string | Métrica: `Cosine`, `Euclidean`, `DotProduct`                    |
+| `candidates_scanned`           | number | Total de candidatos escaneados pelo índice                      |
+| `candidates_after_filter`      | number | Candidatos que passaram no filtro                               |
+| `results`                      | array  | Resultados explicados individualmente                           |
+| `results[].score_breakdown`    | object | Componentes do score (`vector_score`, etc.)                     |
+| `results[].filter_evaluation`  | object | Avaliação detalhada do filtro (presente se filtro foi aplicado) |
+| `results[].rank_before_filter` | number | Posição no ranking antes de filtros (1-indexed)                 |
+| `results[].rank_after_filter`  | number | Posição após filtros (1-indexed, 0 se não passou)               |
+| `index_stats`                  | object | Estatísticas do índice HNSW no momento da busca                 |
+
+**Exemplo curl:**
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/explain \
+  -H "Content-Type: application/json" \
+  -d '{"vector":[0.1,0.2,-0.1],"limit":5,"filter":{"category":"tech"}}'
+```
+
+---
+
+### POST /api/v1/collections/{name}/search/estimate
+
+Estima o custo de uma busca vetorial **antes de executá-la**. Retorna latência estimada, consumo de memória, nós HNSW que serão visitados, se a query é "cara" e recomendações de otimização. Não executa nenhuma busca real.
+
+**Path:** `name` — nome da coleção.
+
+**Request body:**
+
+| Campo             | Tipo    | Obrigatório | Descrição                                                        |
+| ----------------- | ------- | ----------- | ---------------------------------------------------------------- |
+| `limit`           | number  | sim         | Número de resultados que serão solicitados na busca              |
+| `filter`          | object  | não         | Filtro de metadata (mesmo formato do endpoint de busca)          |
+| `include_history` | boolean | não         | Se `true`, inclui dados históricos de latência (p50/p95/p99/avg) |
+
+**Schema de request:**
+
+```json
+{
+  "limit": 10,
+  "filter": { "category": "tech" },
+  "include_history": true
+}
+```
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "estimated_ms": 2.35,
+  "confidence_range": [1.17, 8.0],
+  "estimated_memory_bytes": 45320,
+  "estimated_nodes_visited": 575,
+  "is_expensive": false,
+  "recommendations": [],
+  "breakdown": {
+    "index_scan_cost": 1.76,
+    "filter_cost": 0.0003,
+    "hydration_cost": 0.01,
+    "network_overhead": 0.1
+  },
+  "historical_latency": {
+    "p50_ms": 2.0,
+    "p95_ms": 8.0,
+    "p99_ms": 15.0,
+    "avg_ms": 3.2,
+    "total_queries": 1520
+  }
+}
+```
+
+| Campo                     | Tipo    | Descrição                                                                   |
+| ------------------------- | ------- | --------------------------------------------------------------------------- |
+| `estimated_ms`            | number  | Latência estimada em milissegundos                                          |
+| `confidence_range`        | array   | Faixa de confiança `[min, max]` em ms                                       |
+| `estimated_memory_bytes`  | number  | Bytes estimados de memória que a query consumirá                            |
+| `estimated_nodes_visited` | number  | Nós HNSW estimados que serão visitados                                      |
+| `is_expensive`            | boolean | `true` se a estimativa excede o p95 histórico                               |
+| `recommendations`         | array   | Sugestões de otimização (ex: "reduza limit")                                |
+| `breakdown`               | object  | Componentes individuais do custo (index_scan, filter, hydration, network)   |
+| `historical_latency`      | object  | Presente se `include_history=true`. Percentis e média de latência histórica |
+
+**Exemplo curl:**
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/estimate \
+  -H "Content-Type: application/json" \
+  -d '{"limit":10,"filter":{"category":"tech"},"include_history":true}'
+```
+
+#### Budget-Based Queries
+
+O campo `budget_ms` no endpoint `POST /search` permite definir um orçamento máximo de latência. Se a estimativa de custo exceder o orçamento, a busca **não é executada** e o servidor retorna `422 Unprocessable Entity` com a estimativa detalhada:
+
+```json
+{
+  "error": "budget_exceeded",
+  "message": "estimated cost (12.5ms) exceeds budget (5ms)",
+  "code": 422,
+  "estimate": {
+    "estimated_ms": 12.5,
+    "confidence_range": [6.25, 18.75],
+    "is_expensive": true,
+    "recommendations": ["Considere reduzir limit para melhor performance"],
+    "breakdown": { "...": "..." }
+  }
+}
 ```
 
 ---

@@ -343,6 +343,77 @@ docker run --rm -v ferres-db-core_ferres-data:/data -v $(pwd):/backup \
   debian:bookworm-slim tar czf /backup/ferres-backup.tar.gz /data
 ```
 
+## 📡 Observability (Distributed Tracing)
+
+O FerresDB suporta tracing distribuído via **OpenTelemetry** (OTLP) para monitorar buscas vetoriais end-to-end. Quando habilitado, cada requisição HTTP gera spans hierárquicos com atributos ricos (collection, dimensão, latência por fase, etc.), exportados para backends como Jaeger, Grafana Tempo ou qualquer collector OTLP.
+
+### Habilitando OpenTelemetry
+
+Compile com a feature `otel`:
+
+```bash
+cargo build --release --features otel
+```
+
+### Variáveis de Ambiente
+
+| Variável                      | Padrão                  | Descrição                       |
+| ----------------------------- | ----------------------- | ------------------------------- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | Endpoint gRPC do collector OTLP |
+
+### Exemplo com Jaeger
+
+```bash
+# 1. Inicie o Jaeger (UI em http://localhost:16686)
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4317:4317 \
+  jaegertracing/all-in-one:latest
+
+# 2. Inicie o FerresDB com tracing
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+  cargo run --release --features otel
+
+# 3. Execute uma busca e visualize o trace no Jaeger
+curl -X POST http://localhost:8080/api/v1/collections/docs/search \
+  -H "Content-Type: application/json" \
+  -d '{"vector":[0.1,0.2,-0.1],"limit":5}'
+```
+
+### Hierarquia de Spans
+
+Cada busca vetorial gera a seguinte árvore de spans:
+
+```
+http_request
+  └── search_points (db.operation=vector_search, db.collection=..., db.results.count=...)
+        ├── validate_query
+        ├── collection.search (points=N, dimension=D)
+        │     └── hnsw.search (candidates=N, ef=E, tombstones=T)
+        └── hydrate_results
+```
+
+### Atributos OTel nos Spans
+
+| Atributo                 | Span          | Descrição                                |
+| ------------------------ | ------------- | ---------------------------------------- |
+| `db.collection`          | search_points | Nome da coleção                          |
+| `db.operation`           | search_points | Tipo: `vector_search` ou `hybrid_search` |
+| `db.vector.dimension`    | search_points | Dimensão dos vetores                     |
+| `db.results.count`       | search_points | Número de resultados retornados          |
+| `db.duration.search_ms`  | search_points | Tempo da busca HNSW (ms)                 |
+| `db.duration.hydrate_ms` | search_points | Tempo de hidratação (ms)                 |
+| `db.index.type`          | search_points | Tipo de índice (`hnsw`)                  |
+| `db.index.ef_search`     | search_points | Parâmetro ef_search usado                |
+
+### Propagação de Contexto (W3C Trace Context)
+
+O FerresDB propaga automaticamente trace context via headers W3C `traceparent` e `tracestate`. Ao receber uma requisição com esses headers, o span HTTP é linkado ao trace do caller. O header `x-trace-id` é incluído na resposta para facilitar debugging.
+
+### Sem OTel (padrão)
+
+Sem a feature `otel`, o FerresDB funciona normalmente com logging estruturado (JSON para arquivo, texto para console) sem overhead de tracing distribuído.
+
 ## 🔧 Build e Desenvolvimento
 
 ### Build

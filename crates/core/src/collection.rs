@@ -32,6 +32,7 @@ use rayon::prelude::*;
 
 use crate::bm25::BM25Index;
 use crate::error::FerresError;
+use crate::explain::ExplainMeta;
 use crate::point::Point;
 use crate::search::{normalize_vectors_parallel, ANNIndex, DistanceMetric, HnswConfig, HnswIndex};
 
@@ -458,8 +459,14 @@ impl Collection {
             }
         }
 
-        // Executa busca
-        let results = self.index.search(query, k)?;
+        // Executa busca (com span para tracing distribuído)
+        let results = {
+            let _span = tracing::info_span!("collection.search",
+                points = self.points.len(),
+                dimension = self.config.dimension,
+            ).entered();
+            self.index.search(query, k)?
+        };
 
         // Armazena no cache se habilitado
         if let Some(cache) = &self.search_cache {
@@ -469,6 +476,20 @@ impl Collection {
         }
 
         Ok(results)
+    }
+
+    /// Busca os `k` vizinhos mais próximos com metadados de explicação.
+    ///
+    /// Semelhante a [`search`], mas retorna [`ExplainMeta`] adicional para
+    /// cada resultado com informações internas do índice (candidatos visitados,
+    /// camadas percorridas, tombstones ignorados). Não usa cache LRU.
+    pub fn search_explain(
+        &self,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(String, f32, ExplainMeta)>, FerresError> {
+        self.validate_dimension(query)?;
+        self.index.search_explain(query, k)
     }
 
     /// Busca híbrida: combina resultados vetoriais e BM25 via RRF ponderado por `alpha`.
