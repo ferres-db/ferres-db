@@ -24,14 +24,14 @@ RUN npm run build
 # Stage 2: Production
 FROM nginx:alpine
 
-# Entrypoint gera config.js em runtime a partir de VITE_API_BASE_URL e VITE_API_KEY
+# Entrypoint gera config.js em runtime (converte CRLF→LF para rodar no Linux)
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+RUN sed -i 's/\r$//' /docker-entrypoint.sh 2>/dev/null || true && chmod +x /docker-entrypoint.sh
 
 # Copia arquivos buildados
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Copia configuração customizada do nginx
+# Server block (SPA, config.js, cache) — mantém nginx.conf padrão da imagem
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Garante que config.js existe (será sobrescrito pelo entrypoint em runtime)
