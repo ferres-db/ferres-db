@@ -157,6 +157,7 @@ pub async fn create_collection(
         enable_bm25: payload.enable_bm25,
         bm25_text_field: payload.bm25_text_field.clone(),
         quantization: payload.quantization.clone(),
+        tiered_storage: Default::default(),
     };
 
     // Cria a coleção
@@ -369,5 +370,62 @@ pub async fn delete_collection(
     });
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Response for tier distribution endpoint.
+#[derive(Debug, Serialize)]
+pub struct TierDistributionResponse {
+    pub hot: usize,
+    pub warm: usize,
+    pub cold: usize,
+    pub hot_memory_bytes: usize,
+    pub warm_memory_bytes: usize,
+    pub cold_memory_bytes: usize,
+}
+
+/// Handler for GET /api/v1/collections/{name}/tiers
+///
+/// Returns the distribution of points across storage tiers.
+pub async fn get_tier_distribution(
+    State(app_state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<TierDistributionResponse>> {
+    let collection_arc = app_state.collections.get(&name)
+        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+
+    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+
+    let config = collection.config();
+    let num_points = collection.len();
+    let dimension = config.dimension;
+
+    // If tiered storage is not enabled, all points are in HOT tier
+    if !config.tiered_storage.enabled {
+        let vector_bytes = dimension * 4;
+        let metadata_est = 200;
+        let hnsw_node_est = 128;
+        return Ok(Json(TierDistributionResponse {
+            hot: num_points,
+            warm: 0,
+            cold: 0,
+            hot_memory_bytes: num_points * (vector_bytes + metadata_est + hnsw_node_est),
+            warm_memory_bytes: 0,
+            cold_memory_bytes: 0,
+        }));
+    }
+
+    // When tiered storage is enabled, report all as hot for now
+    // (actual tier tracking is done in TieredCollection wrapper)
+    let vector_bytes = dimension * 4;
+    let metadata_est = 200;
+    let hnsw_node_est = 128;
+    Ok(Json(TierDistributionResponse {
+        hot: num_points,
+        warm: 0,
+        cold: 0,
+        hot_memory_bytes: num_points * (vector_bytes + metadata_est + hnsw_node_est),
+        warm_memory_bytes: 0,
+        cold_memory_bytes: 0,
+    }))
 }
 

@@ -19,7 +19,7 @@
 //! - **`DistanceMetric` na config**: define a métrica no nível da
 //!   coleção. Todos os pontos da mesma coleção usam a mesma métrica.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -36,6 +36,7 @@ use crate::explain::ExplainMeta;
 use crate::point::Point;
 use crate::quantization::QuantizationConfig;
 use crate::search::{normalize_vectors_parallel, ANNIndex, DistanceMetric, HnswConfig, create_ann_index};
+use crate::tiered::TieredStorageConfig;
 
 // ─── CollectionConfig ───────────────────────────────────────────────
 
@@ -64,6 +65,11 @@ pub struct CollectionConfig {
     /// SQ8 comprime vetores f32 para u8 com ~4× economia de memória.
     #[serde(default)]
     pub quantization: QuantizationConfig,
+    /// Configuração de tiered storage (default: desabilitado).
+    /// Quando habilitado, pontos são movidos automaticamente entre camadas
+    /// Hot (RAM), Warm (mmap) e Cold (disco) baseado na frequência de acesso.
+    #[serde(default)]
+    pub tiered_storage: TieredStorageConfig,
 }
 
 fn default_cache_size() -> usize {
@@ -108,8 +114,7 @@ fn metadata_text(metadata: &serde_json::Value, field: &str) -> String {
         .to_string()
 }
 
-/// Constante RRF (Reciprocal Rank Fusion). Típico: 60.
-const RRF_K: u32 = 60;
+use crate::fusion::{self, FusionStrategy, DEFAULT_RRF_K};
 
 /// Threshold para usar rebuild completo do índice vs inserção incremental.
 const BATCH_REBUILD_THRESHOLD: usize = 100;
@@ -272,6 +277,7 @@ impl Collection {
     ///     enable_bm25: false,
     ///     bm25_text_field: "text".to_string(),
     ///     quantization: Default::default(),
+    ///     tiered_storage: Default::default(),
     /// });
     ///
     /// let point = Point::new("p1", vec![1.0, 2.0, 3.0], serde_json::json!(null))?;
@@ -323,6 +329,7 @@ impl Collection {
     ///     enable_bm25: false,
     ///     bm25_text_field: "text".to_string(),
     ///     quantization: Default::default(),
+    ///     tiered_storage: Default::default(),
     /// });
     ///
     /// let points = vec![
@@ -436,6 +443,7 @@ impl Collection {
     ///     enable_bm25: false,
     ///     bm25_text_field: "text".to_string(),
     ///     quantization: Default::default(),
+    ///     tiered_storage: Default::default(),
     /// });
     ///
     /// collection.insert(Point::new("p1", vec![1.0, 0.0, 0.0], serde_json::json!(null))?)?;
@@ -503,16 +511,20 @@ impl Collection {
         self.index.search_explain(query, k)
     }
 
-    /// Busca híbrida: combina resultados vetoriais e BM25 via RRF ponderado por `alpha`.
+    /// Busca híbrida: combina resultados vetoriais e BM25 via estratégia de fusão.
     ///
     /// Requer que a coleção tenha BM25 habilitado (`enable_bm25: true`).
-    /// `alpha` em [0, 1]: peso da busca vetorial; (1 - alpha) é o peso da busca keyword.
+    ///
+    /// # Estratégias de fusão
+    ///
+    /// - `WeightedScore { alpha }`: pondera rankings por alpha (comportamento original).
+    /// - `RRF { k }`: Reciprocal Rank Fusion pura (sem ponderação).
     pub fn hybrid_search(
         &self,
         query_vector: &[f32],
         query_text: &str,
-        k: usize,
-        alpha: f32,
+        limit: usize,
+        strategy: &FusionStrategy,
     ) -> Result<Vec<(String, f32)>, FerresError> {
         self.validate_dimension(query_vector)?;
         let bm25 = self
@@ -520,37 +532,19 @@ impl Collection {
             .as_ref()
             .ok_or_else(|| FerresError::Storage("hybrid search requires BM25 index enabled for this collection".to_string()))?;
 
-        let k_expanded = (k * 3).max(50).min(self.points.len().max(1));
+        let k_expanded = (limit * 3).max(50).min(self.points.len().max(1));
         let vec_results = self.search(query_vector, k_expanded)?;
         let bm25_results = bm25.search(query_text, k_expanded);
 
-        let k_rrf = RRF_K as f32;
-        let mut rank_vec: HashMap<String, u32> = HashMap::new();
-        for (rank, (id, _)) in vec_results.iter().enumerate() {
-            rank_vec.insert(id.clone(), rank as u32 + 1);
-        }
-        let mut rank_bm25: HashMap<String, u32> = HashMap::new();
-        for (rank, (id, _)) in bm25_results.iter().enumerate() {
-            rank_bm25.insert(id.clone(), rank as u32 + 1);
-        }
+        let combined = match strategy {
+            FusionStrategy::WeightedScore { alpha } => {
+                fusion::weighted_fusion(&vec_results, &bm25_results, *alpha, DEFAULT_RRF_K, limit)
+            }
+            FusionStrategy::RRF { k } => {
+                fusion::reciprocal_rank_fusion(&[vec_results, bm25_results], *k, limit)
+            }
+        };
 
-        let all_ids: HashSet<_> = rank_vec
-            .keys()
-            .chain(rank_bm25.keys())
-            .cloned()
-            .collect();
-        let mut combined: Vec<(String, f32)> = all_ids
-            .into_iter()
-            .map(|id| {
-                let rv = rank_vec.get(&id).copied().unwrap_or(u32::MAX);
-                let rb = rank_bm25.get(&id).copied().unwrap_or(u32::MAX);
-                let score = alpha * (1.0 / (k_rrf + rv as f32))
-                    + (1.0 - alpha) * (1.0 / (k_rrf + rb as f32));
-                (id, score)
-            })
-            .collect();
-        combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        combined.truncate(k);
         Ok(combined)
     }
 
@@ -623,6 +617,36 @@ impl Collection {
         self.points.is_empty()
     }
 
+    /// Returns the number of tombstoned points in the underlying ANN index.
+    ///
+    /// Tombstones accumulate when points are deleted and degrade search
+    /// performance. Use [`crate::reindex::needs_reindex`] to check if a
+    /// background reindex is recommended.
+    pub fn tombstone_count(&self) -> usize {
+        self.index.tombstone_count()
+    }
+
+    /// Takes a snapshot of the current points for background reindexing.
+    ///
+    /// Returns `(owned_points, set_of_ids)`. The caller builds a new index
+    /// from the owned points and later uses the ID set to compute the delta.
+    pub fn points_snapshot(&self) -> (Vec<Point>, std::collections::HashSet<String>) {
+        let points: Vec<Point> = self.points.values().cloned().collect();
+        let ids: std::collections::HashSet<String> =
+            self.points.keys().cloned().collect();
+        (points, ids)
+    }
+
+    /// Swaps the current ANN index with a new one.
+    ///
+    /// Used during background reindex: the new index was built from a
+    /// snapshot and has no tombstones. The old index is dropped.
+    pub fn swap_index(&mut self, new_index: Box<dyn ANNIndex>) {
+        self.index = new_index;
+        self.invalidate_search_cache();
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Marca a coleção como dirty (modificada).
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
@@ -673,6 +697,7 @@ mod tests {
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
+            tiered_storage: TieredStorageConfig::default(),
         }
     }
 
@@ -796,6 +821,7 @@ mod tests {
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
+            tiered_storage: TieredStorageConfig::default(),
         };
         let mut col = Collection::new(config);
 
@@ -881,7 +907,7 @@ mod tests {
     #[test]
     fn hybrid_search_requires_bm25() {
         let col = Collection::new(test_config());
-        let result = col.hybrid_search(&[1.0, 2.0, 3.0], "query", 5, 0.5);
+        let result = col.hybrid_search(&[1.0, 2.0, 3.0], "query", 5, &FusionStrategy::default());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("BM25"));
     }
@@ -897,6 +923,7 @@ mod tests {
             enable_bm25: true,
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
+            tiered_storage: TieredStorageConfig::default(),
         };
         let mut col = Collection::new(config);
         col.insert(
@@ -927,7 +954,7 @@ mod tests {
         )
         .unwrap();
         let results = col
-            .hybrid_search(&[1.0, 0.0, 0.0], "hello", 3, 0.5)
+            .hybrid_search(&[1.0, 0.0, 0.0], "hello", 3, &FusionStrategy::default())
             .unwrap();
         assert!(!results.is_empty());
         assert!(results.len() <= 3);
@@ -962,6 +989,7 @@ mod tests {
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
+                tiered_storage: TieredStorageConfig::default(),
             };
 
             let mut col = Collection::new(config);
@@ -1014,6 +1042,7 @@ mod tests {
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
+                tiered_storage: TieredStorageConfig::default(),
             };
 
             let mut col = Collection::new(config);
@@ -1067,6 +1096,7 @@ mod tests {
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
+                tiered_storage: TieredStorageConfig::default(),
             };
 
             let mut col = Collection::new(config);
@@ -1130,6 +1160,7 @@ mod tests {
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
+                tiered_storage: TieredStorageConfig::default(),
             };
 
             let mut col = Collection::new(config);

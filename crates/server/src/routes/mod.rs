@@ -10,6 +10,7 @@ mod debug;
 mod health;
 mod keys;
 mod metrics;
+mod reindex;
 mod users;
 mod points;
 mod stats;
@@ -31,6 +32,7 @@ pub fn create_router() -> Router<AppState> {
         .merge(collections::create_named_collection_routes())
         .merge(points::create_points_routes())
         .merge(stats::create_stats_routes())
+        .merge(reindex::create_reindex_routes())
         .layer(middleware::create_collection_rate_limit_layer());
 
     // Rotas protegidas (requerem API key)

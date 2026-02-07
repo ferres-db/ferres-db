@@ -1,0 +1,221 @@
+// FerresDB gRPC API — v1
+//
+// Espelho da API REST com suporte a streaming bidirecional.
+// Ative a feature "grpc" no Cargo.toml para compilar este serviço.
+
+syntax = "proto3";
+
+package ferresdb.v1;
+
+// ─── Service ────────────────────────────────────────────────────────────
+
+service FerresDB {
+  // ── Collections ──────────────────────────────────────────────────────
+  rpc CreateCollection(CreateCollectionRequest) returns (CreateCollectionResponse);
+  rpc GetCollection(GetCollectionRequest) returns (GetCollectionResponse);
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc DeleteCollection(DeleteCollectionRequest) returns (DeleteCollectionResponse);
+
+  // ── Points ───────────────────────────────────────────────────────────
+  rpc UpsertPoints(UpsertPointsRequest) returns (UpsertPointsResponse);
+  rpc DeletePoints(DeletePointsRequest) returns (DeletePointsResponse);
+  rpc GetPoint(GetPointRequest) returns (GetPointResponse);
+  rpc ListPoints(ListPointsRequest) returns (ListPointsResponse);
+
+  // ── Search ───────────────────────────────────────────────────────────
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc HybridSearch(HybridSearchRequest) returns (SearchResponse);
+  rpc ExplainSearch(ExplainSearchRequest) returns (ExplainSearchResponse);
+
+  // ── Streaming ────────────────────────────────────────────────────────
+  rpc StreamUpsert(stream UpsertPointsRequest) returns (stream UpsertPointsResponse);
+  rpc StreamSearch(stream SearchRequest) returns (stream SearchResponse);
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────
+
+enum DistanceMetric {
+  DISTANCE_METRIC_UNSPECIFIED = 0;
+  DISTANCE_METRIC_COSINE      = 1;
+  DISTANCE_METRIC_DOT_PRODUCT = 2;
+  DISTANCE_METRIC_EUCLIDEAN   = 3;
+}
+
+// ─── Collections ────────────────────────────────────────────────────────
+
+message CreateCollectionRequest {
+  string          name        = 1;
+  uint32          dimension   = 2;
+  DistanceMetric  distance    = 3;
+  bool            enable_bm25 = 4;
+  string          bm25_text_field = 5;
+}
+
+message CreateCollectionResponse {
+  string          name       = 1;
+  uint32          dimension  = 2;
+  DistanceMetric  distance   = 3;
+  uint64          created_at = 4;
+}
+
+message GetCollectionRequest {
+  string name = 1;
+}
+
+message GetCollectionResponse {
+  string          name         = 1;
+  uint32          dimension    = 2;
+  uint64          num_points   = 3;
+  uint64          last_updated = 4;
+  DistanceMetric  distance     = 5;
+  uint64          index_size_bytes = 6;
+}
+
+message ListCollectionsRequest {}
+
+message ListCollectionsResponse {
+  repeated CollectionInfo collections = 1;
+}
+
+message CollectionInfo {
+  string          name       = 1;
+  uint32          dimension  = 2;
+  uint64          num_points = 3;
+  uint64          created_at = 4;
+  DistanceMetric  distance   = 5;
+}
+
+message DeleteCollectionRequest {
+  string name = 1;
+}
+
+message DeleteCollectionResponse {}
+
+// ─── Points ─────────────────────────────────────────────────────────────
+
+message PointInput {
+  string         id       = 1;
+  repeated float vector   = 2;
+  // metadata como JSON string (deserializado no server)
+  string         metadata_json = 3;
+}
+
+message UpsertPointsRequest {
+  string              collection = 1;
+  repeated PointInput points     = 2;
+}
+
+message FailedPoint {
+  string id     = 1;
+  string reason = 2;
+}
+
+message UpsertPointsResponse {
+  uint64              upserted = 1;
+  repeated FailedPoint failed  = 2;
+}
+
+message DeletePointsRequest {
+  string          collection = 1;
+  repeated string ids        = 2;
+}
+
+message DeletePointsResponse {
+  uint64 deleted = 1;
+}
+
+message GetPointRequest {
+  string collection = 1;
+  string id         = 2;
+}
+
+message GetPointResponse {
+  string         id            = 1;
+  repeated float vector        = 2;
+  string         metadata_json = 3;
+  uint64         created_at    = 4;
+}
+
+message ListPointsRequest {
+  string collection = 1;
+  uint64 limit      = 2;
+  uint64 offset     = 3;
+  // filtro de metadata como JSON string
+  string filter_json = 4;
+}
+
+message ListPointsResponse {
+  repeated GetPointResponse points = 1;
+  uint64 total    = 2;
+  uint64 limit    = 3;
+  uint64 offset   = 4;
+  bool   has_more = 5;
+}
+
+// ─── Search ─────────────────────────────────────────────────────────────
+
+message SearchRequest {
+  string         collection = 1;
+  repeated float vector     = 2;
+  uint32         limit      = 3;
+  // filtro de metadata como JSON string
+  string         filter_json = 4;
+}
+
+message SearchResult {
+  string id            = 1;
+  float  score         = 2;
+  string metadata_json = 3;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+  uint64 took_ms                = 2;
+}
+
+message HybridSearchRequest {
+  string         collection   = 1;
+  string         query_text   = 2;
+  repeated float query_vector = 3;
+  uint32         limit        = 4;
+  float          alpha        = 5;
+  // "weighted" (default) ou "rrf"
+  string         fusion       = 6;
+  // Constante k para RRF (default: 60)
+  uint32         rrf_k        = 7;
+}
+
+// ─── Explain ────────────────────────────────────────────────────────────
+
+message ExplainSearchRequest {
+  string         collection = 1;
+  repeated float vector     = 2;
+  uint32         limit      = 3;
+  string         filter_json = 4;
+}
+
+message ExplainResult {
+  string id                         = 1;
+  float  score                      = 2;
+  string distance_metric            = 3;
+  float  raw_distance               = 4;
+  map<string, float> score_breakdown = 5;
+  uint32 rank_before_filter         = 6;
+  uint32 rank_after_filter          = 7;
+}
+
+message IndexStats {
+  uint64 total_points       = 1;
+  uint32 hnsw_layers        = 2;
+  uint32 ef_search_used     = 3;
+  uint64 tombstones_skipped = 4;
+}
+
+message ExplainSearchResponse {
+  float             query_vector_norm       = 1;
+  string            distance_metric         = 2;
+  uint64            candidates_scanned      = 3;
+  uint64            candidates_after_filter = 4;
+  repeated ExplainResult results            = 5;
+  IndexStats        index_stats             = 6;
+}

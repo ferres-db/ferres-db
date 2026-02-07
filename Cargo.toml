@@ -26,6 +26,7 @@ rayon = "1.8"
 lru = "0.12"
 quickcheck = "1"
 quickcheck_macros = "1"
+memmap2 = "0.9"
 
 # O core é dependência dos outros crates do workspace
 ferres-db-core = { path = "crates/core" }

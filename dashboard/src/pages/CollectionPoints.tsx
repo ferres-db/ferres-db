@@ -1,6 +1,6 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useMemo } from 'react';
-import { useCollection } from '@/hooks/useCollections';
+import { useCollection, useTierDistribution } from '@/hooks/useCollections';
 import { usePoints } from '@/hooks/usePoints';
 import { useCollectionStats, useCollectionQueries } from '@/hooks/useCollectionStats';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
@@ -10,9 +10,9 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
 import { DropdownMenu, DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs';
-import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3 } from 'lucide-react';
+import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers } from 'lucide-react';
 import { format } from 'date-fns';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 interface FilterField {
   id: string;
@@ -35,6 +35,7 @@ export const CollectionPoints = () => {
   const { data: collection, isLoading: collectionLoading } = useCollection(name || '');
   const { data: stats, isLoading: statsLoading } = useCollectionStats(name || '');
   const { data: queries, isLoading: queriesLoading } = useCollectionQueries(name || '');
+  const { data: tierDistribution } = useTierDistribution(name || '');
   
   // Construir filtro a partir dos campos de filtro
   const filter = useMemo(() => {
@@ -209,6 +210,14 @@ export const CollectionPoints = () => {
     );
   };
 
+  const formatBytes = (bytes: number): string => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+  };
+
   if (!name) {
     return (
       <div className="space-y-6">
@@ -248,6 +257,7 @@ export const CollectionPoints = () => {
               <Skeleton className="h-4 w-full" />
             </div>
           ) : (
+            <>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div>
                 <p className="text-sm text-gray-400">Dimension</p>
@@ -270,6 +280,66 @@ export const CollectionPoints = () => {
                 </p>
               </div>
             </div>
+
+            {/* Tier Distribution */}
+            {tierDistribution && (tierDistribution.warm > 0 || tierDistribution.cold > 0) && (
+              <div className="mt-4 pt-4 border-t border-bg-tertiary">
+                <div className="flex items-center gap-2 mb-3">
+                  <Layers className="h-4 w-4 text-gray-400" />
+                  <p className="text-sm font-medium text-gray-400">Tiered Storage</p>
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-bg-tertiary/50 rounded-md p-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="w-2 h-2 rounded-full bg-orange-500" />
+                      <p className="text-xs text-gray-400">Hot (RAM)</p>
+                    </div>
+                    <p className="text-lg font-semibold text-gray-50">{tierDistribution.hot.toLocaleString()}</p>
+                    <p className="text-[10px] text-gray-500">{formatBytes(tierDistribution.hot_memory_bytes)}</p>
+                  </div>
+                  <div className="bg-bg-tertiary/50 rounded-md p-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="w-2 h-2 rounded-full bg-yellow-500" />
+                      <p className="text-xs text-gray-400">Warm (mmap)</p>
+                    </div>
+                    <p className="text-lg font-semibold text-gray-50">{tierDistribution.warm.toLocaleString()}</p>
+                    <p className="text-[10px] text-gray-500">{formatBytes(tierDistribution.warm_memory_bytes)}</p>
+                  </div>
+                  <div className="bg-bg-tertiary/50 rounded-md p-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="w-2 h-2 rounded-full bg-blue-500" />
+                      <p className="text-xs text-gray-400">Cold (disk)</p>
+                    </div>
+                    <p className="text-lg font-semibold text-gray-50">{tierDistribution.cold.toLocaleString()}</p>
+                    <p className="text-[10px] text-gray-500">{formatBytes(tierDistribution.cold_memory_bytes)}</p>
+                  </div>
+                </div>
+                {/* Tier distribution bar */}
+                {(tierDistribution.hot + tierDistribution.warm + tierDistribution.cold) > 0 && (
+                  <div className="mt-3 h-2 rounded-full overflow-hidden flex bg-bg-tertiary">
+                    {tierDistribution.hot > 0 && (
+                      <div
+                        className="bg-orange-500 h-full"
+                        style={{ width: `${(tierDistribution.hot / (tierDistribution.hot + tierDistribution.warm + tierDistribution.cold)) * 100}%` }}
+                      />
+                    )}
+                    {tierDistribution.warm > 0 && (
+                      <div
+                        className="bg-yellow-500 h-full"
+                        style={{ width: `${(tierDistribution.warm / (tierDistribution.hot + tierDistribution.warm + tierDistribution.cold)) * 100}%` }}
+                      />
+                    )}
+                    {tierDistribution.cold > 0 && (
+                      <div
+                        className="bg-blue-500 h-full"
+                        style={{ width: `${(tierDistribution.cold / (tierDistribution.hot + tierDistribution.warm + tierDistribution.cold)) * 100}%` }}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            </>
           )}
         </CardContent>
       </Card>
@@ -622,6 +692,46 @@ export const CollectionPoints = () => {
                     </CardContent>
                   </Card>
                 </div>
+
+                {/* Tier Distribution Chart */}
+                {tierDistribution && (tierDistribution.warm > 0 || tierDistribution.cold > 0) && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        <Layers className="h-5 w-5" />
+                        Tiered Storage Distribution
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <ResponsiveContainer width="100%" height={250}>
+                        <BarChart
+                          data={[
+                            { name: 'Hot (RAM)', points: tierDistribution.hot, memory: tierDistribution.hot_memory_bytes, fill: '#f97316' },
+                            { name: 'Warm (mmap)', points: tierDistribution.warm, memory: tierDistribution.warm_memory_bytes, fill: '#eab308' },
+                            { name: 'Cold (disk)', points: tierDistribution.cold, memory: tierDistribution.cold_memory_bytes, fill: '#3b82f6' },
+                          ]}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#3f3f3f" />
+                          <XAxis dataKey="name" stroke="#9ca3af" />
+                          <YAxis stroke="#9ca3af" />
+                          <Tooltip
+                            contentStyle={{ backgroundColor: '#2d2d2d', border: '1px solid #3f3f3f', borderRadius: '8px' }}
+                            labelStyle={{ color: '#f9fafb' }}
+                            formatter={((value: any, _name: any, props: any) => {
+                              const memBytes = props?.payload?.memory ?? 0;
+                              return [`${Number(value).toLocaleString()} points (${formatBytes(memBytes)})`, 'Count'];
+                            }) as any}
+                          />
+                          <Bar dataKey="points">
+                            {['#f97316', '#eab308', '#3b82f6'].map((color, index) => (
+                              <Cell key={`cell-${index}`} fill={color} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </CardContent>
+                  </Card>
+                )}
 
                 {/* Percentiles Chart */}
                 {percentileData && (

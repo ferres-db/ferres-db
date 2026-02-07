@@ -106,6 +106,7 @@ Cria uma nova coleção.
 | `distance`        | string  | sim         | Métrica: `Cosine`, `Euclidean`, `DotProduct`                     |
 | `enable_bm25`     | boolean | não         | Habilita índice BM25 para busca híbrida (default: false)         |
 | `bm25_text_field` | string  | não         | Chave em metadata usada como texto para BM25 (default: `"text"`) |
+| `tiered_storage`  | object  | não         | Configuração de tiered storage (ver seção Tiered Storage)        |
 
 **Schema de request:**
 
@@ -213,6 +214,229 @@ Remove uma coleção e seus dados do disco.
 
 ```bash
 curl -s -X DELETE http://localhost:8080/api/v1/collections/docs
+```
+
+---
+
+### GET /api/v1/collections/{name}/tiers
+
+Retorna a distribuição de pontos por camada de armazenamento (Tiered Storage).
+
+**Path:** `name` — nome da coleção.
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "hot": 1000,
+  "warm": 5000,
+  "cold": 20000,
+  "hot_memory_bytes": 1536000,
+  "warm_memory_bytes": 1320000,
+  "cold_memory_bytes": 1280000
+}
+```
+
+| Campo               | Tipo   | Descrição                                          |
+| ------------------- | ------ | -------------------------------------------------- |
+| `hot`               | number | Pontos na camada Hot (RAM, acesso instantâneo)     |
+| `warm`              | number | Pontos na camada Warm (mmap, acesso rápido)        |
+| `cold`              | number | Pontos na camada Cold (disco, carregado on-demand) |
+| `hot_memory_bytes`  | number | Memória estimada usada pela camada Hot (bytes)     |
+| `warm_memory_bytes` | number | Memória estimada usada pela camada Warm (bytes)    |
+| `cold_memory_bytes` | number | Memória estimada usada pela camada Cold (bytes)    |
+
+**Exemplo curl:**
+
+```bash
+curl -s http://localhost:8080/api/v1/collections/docs/tiers \
+  -H "Authorization: Bearer <api-key>"
+```
+
+> **Nota:** Quando tiered storage não está habilitado na coleção, todos os pontos
+> são reportados na camada Hot. Habilite via `tiered_storage` na criação da coleção.
+
+---
+
+### Tiered Storage (Configuração)
+
+O Tiered Storage é configurado via campo `tiered_storage` na criação da coleção:
+
+```json
+{
+  "name": "my_collection",
+  "dimension": 384,
+  "distance": "Cosine",
+  "tiered_storage": {
+    "enabled": true,
+    "hot_threshold_hours": 24,
+    "warm_threshold_hours": 168,
+    "compaction_interval_secs": 3600
+  }
+}
+```
+
+| Campo                      | Tipo    | Default | Descrição                                                 |
+| -------------------------- | ------- | ------- | --------------------------------------------------------- |
+| `enabled`                  | boolean | false   | Habilita tiered storage                                   |
+| `hot_threshold_hours`      | number  | 24      | Pontos acessados nas últimas N horas ficam em Hot (RAM)   |
+| `warm_threshold_hours`     | number  | 168     | Pontos acessados nas últimas N horas ficam em Warm (mmap) |
+| `compaction_interval_secs` | number  | 3600    | Intervalo entre compactações automáticas (segundos)       |
+
+**Camadas:**
+
+| Tier | Armazenamento             | Latência | Memória |
+| ---- | ------------------------- | -------- | ------- |
+| Hot  | RAM completa              | ~0ms     | Alta    |
+| Warm | mmap (vetor) + RAM (meta) | ~1ms     | Média   |
+| Cold | Disco (on-demand)         | ~5-10ms  | Mínima  |
+
+**Comportamento:**
+
+- O grafo HNSW **sempre** permanece em memória (apenas dados dos pontos são tiered).
+- Qualquer acesso a um ponto Cold/Warm o promove automaticamente para Hot.
+- A compactação roda em background sem bloquear buscas.
+- Quando desabilitado (default), tudo fica em RAM como antes.
+
+---
+
+## Reindex (Background Index Rebuild)
+
+Reconstrói o índice ANN de uma coleção em background sem bloquear buscas nem mutações. Remove tombstones acumulados e restaura performance de busca.
+
+**Fluxo:**
+
+1. **Building**: Snapshot dos pontos → novo índice construído em thread separada. Buscas continuam no índice antigo.
+2. **Swapping**: Write lock < 1ms para trocar índice antigo pelo novo. Delta (ops durante build) é aplicado.
+3. **Cleanup**: Índice antigo é descartado (memória liberada).
+
+**Auto-reindex**: Dispara automaticamente quando tombstones > 20% dos pontos indexados (após deleções).
+
+### POST /api/v1/collections/{name}/reindex
+
+Inicia um job de reindex em background. Apenas 1 job ativo por coleção.
+
+**Resposta:** `202 Accepted`
+
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "collection": "my-vectors",
+  "status": "Building",
+  "message": "reindex job started"
+}
+```
+
+| Campo        | Tipo   | Descrição                   |
+| ------------ | ------ | --------------------------- |
+| `job_id`     | string | UUID do job criado          |
+| `collection` | string | Nome da coleção             |
+| `status`     | string | Status inicial (`Building`) |
+| `message`    | string | Mensagem descritiva         |
+
+**Erros:**
+
+- `404` — coleção não encontrada.
+- `409` — já existe um job de reindex ativo para esta coleção.
+
+**Exemplo:**
+
+```bash
+curl -X POST http://localhost:8080/api/v1/collections/my-vectors/reindex \
+  -H "Authorization: Bearer sk-xxx"
+```
+
+### GET /api/v1/collections/{name}/reindex/{job_id}
+
+Retorna o status de um job de reindex específico.
+
+**Resposta:** `200 OK`
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "collection": "my-vectors",
+  "status": "Completed",
+  "progress": 1.0,
+  "started_at": 1707300000,
+  "completed_at": 1707300042,
+  "error": null,
+  "stats": {
+    "points_processed": 50000,
+    "points_total": 50000,
+    "tombstones_cleaned": 12500,
+    "old_index_size_bytes": 76800000,
+    "new_index_size_bytes": 76800000
+  }
+}
+```
+
+| Campo                        | Tipo    | Descrição                                               |
+| ---------------------------- | ------- | ------------------------------------------------------- |
+| `id`                         | string  | UUID do job                                             |
+| `collection`                 | string  | Nome da coleção                                         |
+| `status`                     | string  | `Queued`, `Building`, `Swapping`, `Completed`, `Failed` |
+| `progress`                   | number  | Progresso de 0.0 a 1.0                                  |
+| `started_at`                 | number  | Timestamp UNIX (segundos)                               |
+| `completed_at`               | number? | Timestamp de conclusão (null se em andamento)           |
+| `error`                      | string? | Mensagem de erro (null se sucesso)                      |
+| `stats.points_processed`     | number  | Pontos processados                                      |
+| `stats.points_total`         | number  | Total de pontos no snapshot                             |
+| `stats.tombstones_cleaned`   | number  | Tombstones removidos                                    |
+| `stats.old_index_size_bytes` | number  | Tamanho estimado do índice antigo (bytes)               |
+| `stats.new_index_size_bytes` | number  | Tamanho estimado do novo índice (bytes)                 |
+
+**Erros:**
+
+- `404` — coleção ou job não encontrado.
+
+**Exemplo:**
+
+```bash
+curl http://localhost:8080/api/v1/collections/my-vectors/reindex/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer sk-xxx"
+```
+
+### GET /api/v1/collections/{name}/reindex
+
+Lista todos os jobs de reindex de uma coleção (mais recentes primeiro).
+
+**Resposta:** `200 OK`
+
+```json
+{
+  "jobs": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "collection": "my-vectors",
+      "status": "Completed",
+      "progress": 1.0,
+      "started_at": 1707300000,
+      "completed_at": 1707300042,
+      "error": null,
+      "stats": {
+        "points_processed": 50000,
+        "points_total": 50000,
+        "tombstones_cleaned": 12500,
+        "old_index_size_bytes": 76800000,
+        "new_index_size_bytes": 76800000
+      }
+    }
+  ]
+}
+```
+
+**Erros:**
+
+- `404` — coleção não encontrada.
+
+**Exemplo:**
+
+```bash
+curl http://localhost:8080/api/v1/collections/my-vectors/reindex \
+  -H "Authorization: Bearer sk-xxx"
 ```
 
 ---
@@ -416,20 +640,32 @@ Múltiplos campos são combinados com **AND**. Exemplo:
 
 ### POST /api/v1/collections/{name}/search/hybrid
 
-Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF. A coleção deve ter sido criada com `enable_bm25: true`.
+Busca híbrida: combina resultados vetoriais e BM25 (keyword) via estratégia de fusão configurável. A coleção deve ter sido criada com `enable_bm25: true`.
 
 **Path:** `name` — nome da coleção.
 
 **Request body:**
 
-| Campo          | Tipo   | Obrigatório | Descrição                                                              |
-| -------------- | ------ | ----------- | ---------------------------------------------------------------------- |
-| `query_text`   | string | sim         | Texto para busca keyword (BM25)                                        |
-| `query_vector` | array  | sim         | Vetor para busca vetorial                                              |
-| `limit`        | number | sim         | Número máximo de resultados (> 0)                                      |
-| `alpha`        | number | não         | Peso da busca vetorial 0..1 (default: 0.5). (1 - alpha) = peso keyword |
+| Campo          | Tipo   | Obrigatório | Descrição                                                                                                            |
+| -------------- | ------ | ----------- | -------------------------------------------------------------------------------------------------------------------- |
+| `query_text`   | string | sim         | Texto para busca keyword (BM25)                                                                                      |
+| `query_vector` | array  | sim         | Vetor para busca vetorial                                                                                            |
+| `limit`        | number | sim         | Número máximo de resultados (> 0)                                                                                    |
+| `alpha`        | number | não         | Peso da busca vetorial 0..1 (default: 0.5). (1 - alpha) = peso keyword. Usado com `fusion: "weighted"`               |
+| `fusion`       | string | não         | Estratégia de fusão: `"weighted"` (default) ou `"rrf"`                                                               |
+| `rrf_k`        | number | não         | Constante k para RRF (default: 60). Apenas usado quando `fusion: "rrf"`. Valores maiores suavizam diferenças de rank |
 
-**Schema de request:**
+**Estratégias de fusão:**
+
+- **`weighted`** (default): Pondera os rankings por `alpha`. Score = `alpha × 1/(k + rank_vec) + (1-alpha) × 1/(k + rank_bm25)`. Permite controlar o balanço entre busca vetorial e keyword.
+- **`rrf`** (Reciprocal Rank Fusion): Fusão pura por rank sem ponderação. Score = `Σ 1/(k + rank_i)` para cada ranker. Produz resultados mais estáveis pois trata todos os rankers igualmente e não depende da escala dos scores originais.
+
+**Quando usar RRF vs Weighted:**
+
+- Use **weighted** quando quiser controlar manualmente o balanço entre vetorial e keyword via `alpha`.
+- Use **rrf** quando quiser resultados mais estáveis, independentes da escala dos scores de cada ranker.
+
+**Schema de request (weighted — default):**
 
 ```json
 {
@@ -437,6 +673,18 @@ Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF. A coleç�
   "query_vector": [0.1, 0.2, -0.1],
   "limit": 5,
   "alpha": 0.5
+}
+```
+
+**Schema de request (RRF):**
+
+```json
+{
+  "query_text": "como fazer deploy",
+  "query_vector": [0.1, 0.2, -0.1],
+  "limit": 5,
+  "fusion": "rrf",
+  "rrf_k": 60
 }
 ```
 
@@ -449,12 +697,20 @@ Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF. A coleç�
 }
 ```
 
-**Exemplo curl:**
+**Exemplo curl (weighted):**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/hybrid \
   -H "Content-Type: application/json" \
   -d '{"query_text":"deploy","query_vector":[0.1,0.2,-0.1],"limit":5,"alpha":0.5}'
+```
+
+**Exemplo curl (RRF):**
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"query_text":"deploy","query_vector":[0.1,0.2,-0.1],"limit":5,"fusion":"rrf","rrf_k":60}'
 ```
 
 ---
@@ -1053,14 +1309,14 @@ Endpoint para upgrade HTTP → WebSocket.
 
 **Limites:**
 
-| Parâmetro                 | Valor    |
-| ------------------------- | -------- |
-| Máximo de conexões        | 100 (configurável) |
-| Tamanho máximo de mensagem | 10 MB   |
-| Heartbeat (ping)          | a cada 30s |
-| Timeout de pong           | 10s (se não chegar, conexão é fechada) |
-| Timeout de inatividade    | 5 minutos |
-| Debounce de batch (upsert) | 10ms   |
+| Parâmetro                  | Valor                                  |
+| -------------------------- | -------------------------------------- |
+| Máximo de conexões         | 100 (configurável)                     |
+| Tamanho máximo de mensagem | 10 MB                                  |
+| Heartbeat (ping)           | a cada 30s                             |
+| Timeout de pong            | 10s (se não chegar, conexão é fechada) |
+| Timeout de inatividade     | 5 minutos                              |
+| Debounce de batch (upsert) | 10ms                                   |
 
 **Exemplo de conexão (JavaScript):**
 
@@ -1078,10 +1334,10 @@ wscat -c "ws://localhost:8080/api/v1/ws?token=sk-xxx"
 
 **Erros de conexão:**
 
-| Status | Descrição                                    |
-| ------ | -------------------------------------------- |
-| `401`  | API key inválida ou ausente                  |
-| `503`  | Limite de conexões simultâneas atingido      |
+| Status | Descrição                               |
+| ------ | --------------------------------------- |
+| `401`  | API key inválida ou ausente             |
+| `503`  | Limite de conexões simultâneas atingido |
 
 ---
 
@@ -1114,19 +1370,19 @@ Insere ou atualiza pontos numa coleção. Mensagens de upsert são acumuladas in
 }
 ```
 
-| Campo        | Tipo   | Obrigatório | Descrição                                     |
-| ------------ | ------ | ----------- | --------------------------------------------- |
-| `type`       | string | sim         | Sempre `"upsert"`                             |
-| `collection` | string | sim         | Nome da coleção alvo                          |
-| `points`     | array  | sim         | Array de pontos (id, vector, metadata)        |
+| Campo        | Tipo   | Obrigatório | Descrição                              |
+| ------------ | ------ | ----------- | -------------------------------------- |
+| `type`       | string | sim         | Sempre `"upsert"`                      |
+| `collection` | string | sim         | Nome da coleção alvo                   |
+| `points`     | array  | sim         | Array de pontos (id, vector, metadata) |
 
 Cada ponto:
 
-| Campo      | Tipo   | Obrigatório | Descrição                                             |
-| ---------- | ------ | ----------- | ----------------------------------------------------- |
-| `id`       | string | sim         | ID único do ponto                                     |
-| `vector`   | array  | sim         | Array de floats (mesma dimensão da coleção)           |
-| `metadata` | object | não         | JSON arbitrário (default: `{}`)                       |
+| Campo      | Tipo   | Obrigatório | Descrição                                   |
+| ---------- | ------ | ----------- | ------------------------------------------- |
+| `id`       | string | sim         | ID único do ponto                           |
+| `vector`   | array  | sim         | Array de floats (mesma dimensão da coleção) |
+| `metadata` | object | não         | JSON arbitrário (default: `{}`)             |
 
 **Resposta:** mensagem `ack` (ver abaixo).
 
@@ -1142,10 +1398,10 @@ Inscreve a conexão para receber notificações em tempo real quando pontos são
 }
 ```
 
-| Campo        | Tipo   | Obrigatório | Descrição                                                             |
-| ------------ | ------ | ----------- | --------------------------------------------------------------------- |
-| `type`       | string | sim         | Sempre `"subscribe"`                                                  |
-| `collection` | string | sim         | Nome da coleção para subscrever                                       |
+| Campo        | Tipo   | Obrigatório | Descrição                                                                                        |
+| ------------ | ------ | ----------- | ------------------------------------------------------------------------------------------------ |
+| `type`       | string | sim         | Sempre `"subscribe"`                                                                             |
+| `collection` | string | sim         | Nome da coleção para subscrever                                                                  |
 | `events`     | array  | não         | Filtro de tipos de evento: `["upsert"]`, `["delete"]`, ou ambos. Se vazio/ausente, recebe todos. |
 
 **Resposta:** mensagem `ack` confirmando a subscrição (com `upserted: 0, failed: 0, took_ms: 0`).
@@ -1182,12 +1438,12 @@ Enviada após um `upsert` ou `subscribe` bem-sucedido.
 }
 ```
 
-| Campo      | Tipo   | Descrição                                |
-| ---------- | ------ | ---------------------------------------- |
-| `type`     | string | Sempre `"ack"`                           |
-| `upserted` | number | Pontos inseridos/atualizados com sucesso |
+| Campo      | Tipo   | Descrição                                     |
+| ---------- | ------ | --------------------------------------------- |
+| `type`     | string | Sempre `"ack"`                                |
+| `upserted` | number | Pontos inseridos/atualizados com sucesso      |
 | `failed`   | number | Pontos que falharam (dimensão inválida, etc.) |
-| `took_ms`  | number | Tempo de processamento em ms             |
+| `took_ms`  | number | Tempo de processamento em ms                  |
 
 ##### `event` — Notificação de mudança em coleção
 
@@ -1203,13 +1459,13 @@ Enviada para subscribers quando pontos são inseridos ou deletados (via REST ou 
 }
 ```
 
-| Campo        | Tipo   | Descrição                                   |
-| ------------ | ------ | ------------------------------------------- |
-| `type`       | string | Sempre `"event"`                            |
-| `collection` | string | Nome da coleção                             |
+| Campo        | Tipo   | Descrição                                  |
+| ------------ | ------ | ------------------------------------------ |
+| `type`       | string | Sempre `"event"`                           |
+| `collection` | string | Nome da coleção                            |
 | `action`     | string | Tipo de operação: `"upsert"` ou `"delete"` |
-| `point_ids`  | array  | IDs dos pontos afetados                     |
-| `timestamp`  | number | Timestamp UNIX (segundos) da operação       |
+| `point_ids`  | array  | IDs dos pontos afetados                    |
+| `timestamp`  | number | Timestamp UNIX (segundos) da operação      |
 
 **Nota:** Eventos são emitidos tanto por operações REST (`POST /points`, `DELETE /points`) quanto por upserts via WebSocket. Todos os subscribers ativos recebem a notificação.
 
@@ -1223,21 +1479,21 @@ Enviada para subscribers quando pontos são inseridos ou deletados (via REST ou 
 }
 ```
 
-| Campo     | Tipo   | Descrição                                    |
-| --------- | ------ | -------------------------------------------- |
-| `type`    | string | Sempre `"error"`                             |
-| `message` | string | Mensagem legível do erro                     |
+| Campo     | Tipo   | Descrição                                       |
+| --------- | ------ | ----------------------------------------------- |
+| `type`    | string | Sempre `"error"`                                |
+| `message` | string | Mensagem legível do erro                        |
 | `code`    | number | Código HTTP semântico (400, 404, 408, 409, 500) |
 
 Códigos de erro comuns:
 
-| Code | Descrição                               |
-| ---- | --------------------------------------- |
-| 400  | Mensagem JSON inválida ou malformada    |
-| 404  | Coleção não encontrada                  |
-| 408  | Timeout (inatividade ou pong)           |
-| 409  | Já subscrito nesta coleção              |
-| 500  | Erro interno (lock, insert, etc.)       |
+| Code | Descrição                            |
+| ---- | ------------------------------------ |
+| 400  | Mensagem JSON inválida ou malformada |
+| 404  | Coleção não encontrada               |
+| 408  | Timeout (inatividade ou pong)        |
+| 409  | Já subscrito nesta coleção           |
+| 500  | Erro interno (lock, insert, etc.)    |
 
 ##### `pong` — Resposta a ping
 
@@ -1276,11 +1532,11 @@ O servidor mantém a conexão saudável com heartbeat bidirecional:
 
 O WebSocket expõe métricas para observabilidade:
 
-| Métrica                         | Tipo    | Labels | Descrição                           |
-| ------------------------------- | ------- | ------ | ----------------------------------- |
-| `ws_connections_active`         | Gauge   | —      | Conexões WebSocket ativas no momento |
-| `ws_messages_received_total`    | Counter | `type` | Mensagens recebidas (text, upsert, subscribe, ping) |
-| `ws_messages_sent_total`        | Counter | `type` | Mensagens enviadas (outgoing, event) |
+| Métrica                      | Tipo    | Labels | Descrição                                           |
+| ---------------------------- | ------- | ------ | --------------------------------------------------- |
+| `ws_connections_active`      | Gauge   | —      | Conexões WebSocket ativas no momento                |
+| `ws_messages_received_total` | Counter | `type` | Mensagens recebidas (text, upsert, subscribe, ping) |
+| `ws_messages_sent_total`     | Counter | `type` | Mensagens enviadas (outgoing, event)                |
 
 ---
 
@@ -1292,31 +1548,47 @@ const ws = new WebSocket("ws://localhost:8080/api/v1/ws?token=sk-xxx");
 
 ws.onopen = () => {
   // 1. Subscrever a eventos da coleção "docs"
-  ws.send(JSON.stringify({
-    type: "subscribe",
-    collection: "docs",
-    events: ["upsert", "delete"]
-  }));
+  ws.send(
+    JSON.stringify({
+      type: "subscribe",
+      collection: "docs",
+      events: ["upsert", "delete"],
+    }),
+  );
 
   // 2. Inserir pontos via WebSocket
-  ws.send(JSON.stringify({
-    type: "upsert",
-    collection: "docs",
-    points: [
-      { id: "ws-1", vector: [0.1, 0.2, 0.3], metadata: { text: "real-time data" } },
-      { id: "ws-2", vector: [0.4, 0.5, 0.6], metadata: { text: "streaming insert" } }
-    ]
-  }));
+  ws.send(
+    JSON.stringify({
+      type: "upsert",
+      collection: "docs",
+      points: [
+        {
+          id: "ws-1",
+          vector: [0.1, 0.2, 0.3],
+          metadata: { text: "real-time data" },
+        },
+        {
+          id: "ws-2",
+          vector: [0.4, 0.5, 0.6],
+          metadata: { text: "streaming insert" },
+        },
+      ],
+    }),
+  );
 };
 
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
   switch (msg.type) {
     case "ack":
-      console.log(`Upserted: ${msg.upserted}, Failed: ${msg.failed}, Took: ${msg.took_ms}ms`);
+      console.log(
+        `Upserted: ${msg.upserted}, Failed: ${msg.failed}, Took: ${msg.took_ms}ms`,
+      );
       break;
     case "event":
-      console.log(`Event: ${msg.action} on ${msg.collection}, IDs: ${msg.point_ids}`);
+      console.log(
+        `Event: ${msg.action} on ${msg.collection}, IDs: ${msg.point_ids}`,
+      );
       break;
     case "pong":
       console.log("Pong received");
@@ -1367,4 +1639,173 @@ async def main():
             print(f"[{msg['type']}] {msg}")
 
 asyncio.run(main())
+```
+
+---
+
+## API gRPC (feature `grpc`)
+
+O FerresDB oferece uma **API gRPC nativa** como alternativa à API REST, ideal para comunicação server-to-server com alta performance, streaming bidirecional e geração automática de clientes em qualquer linguagem.
+
+### Ativação
+
+A API gRPC é opcional e controlada por feature flag. Para compilar com suporte gRPC:
+
+```bash
+cargo build -p ferres-db-server --features grpc
+```
+
+O servidor REST continua funcionando normalmente mesmo sem a feature `grpc`.
+
+### Portas
+
+| Protocolo | Porta padrão | Configuração         |
+|-----------|-------------|----------------------|
+| REST/HTTP | 8080        | `PORT` env ou config |
+| gRPC      | 50051       | `GRPC_PORT` env      |
+
+Ambos os servidores rodam simultaneamente quando a feature está habilitada.
+
+### Proto file
+
+O arquivo de definição está em `crates/server/proto/ferresdb.proto` (package `ferresdb.v1`).
+
+### Serviço `FerresDB`
+
+```protobuf
+service FerresDB {
+  // Collections
+  rpc CreateCollection(CreateCollectionRequest) returns (CreateCollectionResponse);
+  rpc GetCollection(GetCollectionRequest) returns (GetCollectionResponse);
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc DeleteCollection(DeleteCollectionRequest) returns (DeleteCollectionResponse);
+
+  // Points
+  rpc UpsertPoints(UpsertPointsRequest) returns (UpsertPointsResponse);
+  rpc DeletePoints(DeletePointsRequest) returns (DeletePointsResponse);
+  rpc GetPoint(GetPointRequest) returns (GetPointResponse);
+  rpc ListPoints(ListPointsRequest) returns (ListPointsResponse);
+
+  // Search
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc HybridSearch(HybridSearchRequest) returns (SearchResponse);
+  rpc ExplainSearch(ExplainSearchRequest) returns (ExplainSearchResponse);
+
+  // Streaming bidirecional
+  rpc StreamUpsert(stream UpsertPointsRequest) returns (stream UpsertPointsResponse);
+  rpc StreamSearch(stream SearchRequest) returns (stream SearchResponse);
+}
+```
+
+### Mapeamento REST → gRPC
+
+| REST Endpoint                                       | gRPC RPC          |
+|-----------------------------------------------------|-------------------|
+| `POST /api/v1/collections`                          | `CreateCollection`|
+| `GET  /api/v1/collections`                          | `ListCollections` |
+| `GET  /api/v1/collections/{name}`                   | `GetCollection`   |
+| `DELETE /api/v1/collections/{name}`                  | `DeleteCollection`|
+| `POST /api/v1/collections/{name}/points`             | `UpsertPoints`    |
+| `DELETE /api/v1/collections/{name}/points`           | `DeletePoints`    |
+| `GET  /api/v1/collections/{name}/points/{id}`        | `GetPoint`        |
+| `GET  /api/v1/collections/{name}/points`             | `ListPoints`      |
+| `POST /api/v1/collections/{name}/search`             | `Search`          |
+| `POST /api/v1/collections/{name}/search/hybrid`      | `HybridSearch`    |
+| `POST /api/v1/collections/{name}/search/explain`     | `ExplainSearch`   |
+| WebSocket streaming                                  | `StreamUpsert` / `StreamSearch` |
+
+### Diferenças em relação à API REST
+
+- **Metadata**: no gRPC, metadata é transmitido como JSON string no campo `metadata_json` (em vez de objeto JSON inline).
+- **Filtros**: filtros são JSON strings no campo `filter_json`.
+- **Distance Metric**: enum protobuf `DistanceMetric` (1=Cosine, 2=DotProduct, 3=Euclidean).
+- **Autenticação**: a API gRPC não inclui middleware de autenticação por API key (ideal para redes internas/service mesh). Para ambientes expostos, use um proxy com mTLS.
+
+### Exemplos com `grpcurl`
+
+**Criar coleção:**
+
+```bash
+grpcurl -plaintext -d '{
+  "name": "embeddings",
+  "dimension": 384,
+  "distance": 1
+}' localhost:50051 ferresdb.v1.FerresDB/CreateCollection
+```
+
+**Listar coleções:**
+
+```bash
+grpcurl -plaintext localhost:50051 ferresdb.v1.FerresDB/ListCollections
+```
+
+**Upsert de pontos:**
+
+```bash
+grpcurl -plaintext -d '{
+  "collection": "embeddings",
+  "points": [
+    {
+      "id": "doc-1",
+      "vector": [0.1, 0.2, 0.3],
+      "metadata_json": "{\"source\": \"grpc\"}"
+    }
+  ]
+}' localhost:50051 ferresdb.v1.FerresDB/UpsertPoints
+```
+
+**Busca vetorial:**
+
+```bash
+grpcurl -plaintext -d '{
+  "collection": "embeddings",
+  "vector": [0.1, 0.2, 0.3],
+  "limit": 5
+}' localhost:50051 ferresdb.v1.FerresDB/Search
+```
+
+**Busca híbrida:**
+
+```bash
+grpcurl -plaintext -d '{
+  "collection": "embeddings",
+  "query_text": "machine learning",
+  "query_vector": [0.1, 0.2, 0.3],
+  "limit": 10,
+  "alpha": 0.7,
+  "fusion": "rrf",
+  "rrf_k": 60
+}' localhost:50051 ferresdb.v1.FerresDB/HybridSearch
+```
+
+### Gerando clientes gRPC
+
+**Python:**
+
+```bash
+pip install grpcio-tools
+python -m grpc_tools.protoc \
+  -I crates/server/proto \
+  --python_out=. \
+  --grpc_python_out=. \
+  crates/server/proto/ferresdb.proto
+```
+
+**TypeScript/Node.js:**
+
+```bash
+npx grpc_tools_node_protoc \
+  --js_out=import_style=commonjs,binary:. \
+  --grpc_out=grpc_js:. \
+  --ts_out=. \
+  -I crates/server/proto \
+  crates/server/proto/ferresdb.proto
+```
+
+**Go:**
+
+```bash
+protoc --go_out=. --go-grpc_out=. \
+  -I crates/server/proto \
+  crates/server/proto/ferresdb.proto
 ```

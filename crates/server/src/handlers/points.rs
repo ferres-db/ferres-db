@@ -86,6 +86,12 @@ pub struct HybridSearchPointsRequest {
     /// Peso da busca vetorial (0..=1). (1 - alpha) é o peso da busca keyword. Padrão: 0.5.
     #[serde(default = "default_alpha")]
     pub alpha: f32,
+    /// Estratégia de fusão: "weighted" (default) ou "rrf".
+    #[serde(default)]
+    pub fusion: Option<String>,
+    /// Constante k para RRF (default: 60). Apenas usado quando fusion = "rrf".
+    #[serde(default)]
+    pub rrf_k: Option<usize>,
 }
 
 fn default_alpha() -> f32 {
@@ -366,6 +372,9 @@ pub async fn delete_points(
                 .as_secs(),
         };
         app_state.emit_event(event);
+
+        // Auto-reindex when tombstones exceed 20% threshold
+        crate::handlers::reindex::maybe_auto_reindex(&app_state, &name);
     }
 
     // Audit trail
@@ -664,7 +673,7 @@ pub async fn search_points(
 
 /// Handler para POST /api/v1/collections/{name}/search/hybrid
 ///
-/// Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF.
+/// Busca híbrida: combina resultados vetoriais e BM25 (keyword) via fusão configurável.
 /// Requer que a coleção tenha sido criada com BM25 habilitado.
 /// Sub-operações instrumentadas: validate_query, hybrid_search, hydrate_results.
 #[tracing::instrument(
@@ -676,6 +685,7 @@ pub async fn search_points(
         db.vector.dimension = tracing::field::Empty,
         db.vector.limit = payload.limit,
         db.hybrid.alpha = payload.alpha,
+        db.hybrid.fusion = tracing::field::Empty,
         db.results.count = tracing::field::Empty,
         db.duration.search_ms = tracing::field::Empty,
         db.duration.hydrate_ms = tracing::field::Empty,
@@ -710,6 +720,30 @@ pub async fn search_hybrid(
         return Err(ApiError::invalid_payload("alpha must be between 0 and 1"));
     }
 
+    // Parse fusion strategy
+    let fusion_strategy = match payload.fusion.as_deref() {
+        None | Some("weighted") => {
+            ferres_db_core::FusionStrategy::WeightedScore { alpha: payload.alpha }
+        }
+        Some("rrf") => {
+            let k = payload.rrf_k.unwrap_or(ferres_db_core::DEFAULT_RRF_K);
+            if k == 0 {
+                return Err(ApiError::invalid_payload("rrf_k must be greater than 0"));
+            }
+            ferres_db_core::FusionStrategy::RRF { k }
+        }
+        Some(other) => {
+            return Err(ApiError::invalid_payload(format!(
+                "unknown fusion strategy '{}': must be 'weighted' or 'rrf'", other
+            )));
+        }
+    };
+    let fusion_label = match &fusion_strategy {
+        ferres_db_core::FusionStrategy::WeightedScore { .. } => "weighted",
+        ferres_db_core::FusionStrategy::RRF { .. } => "rrf",
+    };
+    tracing::Span::current().record("db.hybrid.fusion", fusion_label);
+
     let query_id = uuid::Uuid::new_v4().to_string();
     let start = Instant::now();
 
@@ -738,7 +772,7 @@ pub async fn search_hybrid(
         &payload.query_vector,
         &payload.query_text,
         payload.limit,
-        payload.alpha,
+        &fusion_strategy,
     ).map_err(|e| {
         let msg = e.to_string();
         if msg.contains("BM25") || msg.contains("hybrid search") {

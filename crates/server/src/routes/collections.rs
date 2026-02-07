@@ -6,7 +6,7 @@ use axum::{
 };
 
 use crate::handlers::collections::{
-    create_collection, delete_collection, get_collection, list_collections,
+    create_collection, delete_collection, get_collection, get_tier_distribution, list_collections,
 };
 use crate::state::AppState;
 
@@ -20,4 +20,5 @@ pub fn create_base_collection_routes() -> Router<AppState> {
 pub fn create_named_collection_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/collections/{name}", get(get_collection).delete(delete_collection))
+        .route("/api/v1/collections/{name}/tiers", get(get_tier_distribution))
 }

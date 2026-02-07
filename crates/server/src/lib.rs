@@ -20,3 +20,6 @@ pub mod state;
 #[cfg(feature = "otel")]
 pub mod tracing_otel;
 
+#[cfg(feature = "grpc")]
+pub mod grpc;
+

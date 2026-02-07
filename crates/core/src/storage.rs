@@ -34,6 +34,7 @@ use crate::error::FerresError;
 use crate::point::Point;
 use crate::quantization::QuantizationConfig;
 use crate::search::{DistanceMetric, HnswConfig};
+use crate::tiered::{TierMetadata, TieredStorageConfig};
 
 // ─── StorageCircuitBreaker ─────────────────────────────────────────────
 
@@ -168,6 +169,9 @@ pub struct CollectionMeta {
     /// Configuração de quantização (default: None para backward compat).
     #[serde(default)]
     pub quantization: QuantizationConfig,
+    /// Configuração de tiered storage (default: desabilitado para backward compat).
+    #[serde(default)]
+    pub tiered_storage: TieredStorageConfig,
 }
 
 /// Engine de armazenamento em disco baseado em arquivos.
@@ -407,6 +411,37 @@ impl FileStorage {
         Ok(())
     }
 
+    /// Persiste metadados de tier no diretório `path`.
+    ///
+    /// Salva em `tier_meta.json` com serialização JSON.
+    pub fn save_tier_metadata(path: &Path, metadata: &TierMetadata) -> Result<(), FerresError> {
+        let tier_path = path.join("tier_meta.json");
+        let json = serde_json::to_string_pretty(metadata).map_err(|e| {
+            FerresError::Storage(format!("failed to serialize tier metadata: {e}"))
+        })?;
+        Self::atomic_write(&tier_path, json.as_bytes())?;
+        debug!(path = %tier_path.display(), "tier metadata saved");
+        Ok(())
+    }
+
+    /// Carrega metadados de tier do diretório `path`.
+    ///
+    /// Retorna `None` se o arquivo não existir (coleção sem tiered storage).
+    pub fn load_tier_metadata(path: &Path) -> Result<Option<TierMetadata>, FerresError> {
+        let tier_path = path.join("tier_meta.json");
+        if !tier_path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&tier_path).map_err(|e| {
+            FerresError::Storage(format!("failed to read tier metadata: {e}"))
+        })?;
+        let metadata: TierMetadata = serde_json::from_str(&content).map_err(|e| {
+            FerresError::Storage(format!("failed to parse tier metadata: {e}"))
+        })?;
+        debug!(path = %tier_path.display(), "tier metadata loaded");
+        Ok(Some(metadata))
+    }
+
     /// Carrega uma coleção do diretório `path`.
     ///
     /// Valida o checksum MD5 de `points.jsonl` quando `checksum.md5`
@@ -558,6 +593,7 @@ mod tests {
             distance: DistanceMetric::Cosine,
             hnsw_config: HnswConfig::default(),
             quantization: QuantizationConfig::default(),
+            tiered_storage: TieredStorageConfig::default(),
         };
 
         let points = vec![
@@ -593,6 +629,7 @@ mod tests {
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
+            tiered_storage: Default::default(),
         };
 
         let mut collection = Collection::new(config);
@@ -655,6 +692,7 @@ mod tests {
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
+            tiered_storage: Default::default(),
         };
         let mut collection = Collection::new(config);
         collection
@@ -723,6 +761,7 @@ mod tests {
             distance: DistanceMetric::Euclidean,
             hnsw_config: HnswConfig::default(),
             quantization: QuantizationConfig::default(),
+            tiered_storage: TieredStorageConfig::default(),
         };
         storage.save_collection(&meta, &[]).unwrap();
 

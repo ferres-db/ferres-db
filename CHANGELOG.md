@@ -6,6 +6,91 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 
 ### Added
 
+- **API gRPC nativa — alternativa de alta performance à API REST com streaming bidirecional**
+  - Feature flag `grpc` no `crates/server/Cargo.toml` — servidor funciona sem gRPC por padrão (só REST).
+  - Proto file `crates/server/proto/ferresdb.proto` com package `ferresdb.v1`.
+  - Serviço `FerresDB` com 13 RPCs espelhando a API REST:
+    - `CreateCollection`, `GetCollection`, `ListCollections`, `DeleteCollection` — CRUD de coleções.
+    - `UpsertPoints`, `DeletePoints`, `GetPoint`, `ListPoints` — gerenciamento de pontos.
+    - `Search`, `HybridSearch`, `ExplainSearch` — busca vetorial, híbrida e explain.
+    - `StreamUpsert` (client→server streaming) e `StreamSearch` (bidirecional) — operações em streaming.
+  - Novo módulo `crates/server/src/grpc.rs` (~960 linhas): implementação completa do serviço gRPC reutilizando `AppState`, `Collection`, `Point`, `MetadataFilter` — zero duplicação de lógica de negócio.
+  - `build.rs` com `tonic-build` para compilação automática do proto (requer `protoc`).
+  - Server gRPC (tonic) escuta na porta 50051 (configurável via `GRPC_PORT` env) em paralelo com REST.
+  - Dependências opcionais: `tonic 0.12`, `prost 0.13`, `tonic-build 0.12`, `async-stream 0.3`.
+  - Metadata e filtros transmitidos como JSON string (`metadata_json`, `filter_json`) no gRPC.
+  - `DistanceMetric` mapeado para enum protobuf (1=Cosine, 2=DotProduct, 3=Euclidean).
+  - Métricas Prometheus e query stats registrados para queries gRPC (mesmos counters/histograms do REST).
+  - Documentação: `docs/api.md` com seção gRPC completa (mapeamento REST→gRPC, exemplos `grpcurl`, geração de clientes).
+  - SDKs: READMEs atualizados com instruções para gerar stubs gRPC em Python, TypeScript e Go.
+
+- **Background Reindex — reconstrução de índice ANN sem downtime**
+  - Novo módulo `crates/core/src/reindex.rs` com toda a lógica de reindex em background.
+  - `ReindexJob`, `ReindexStatus`, `ReindexStats`: tipos para rastrear jobs de reindex.
+  - Fluxo de 3 fases: **Building** (thread separada, buscas continuam no índice antigo), **Swapping** (write lock < 1ms para trocar índices), **Cleanup** (drop do índice antigo).
+  - `build_new_index()`: constrói novo `Box<dyn ANNIndex>` a partir de snapshot de pontos — sem tombstones.
+  - `apply_delta()`: reconcilia inserções/remoções que ocorreram durante a fase de build.
+  - `needs_reindex()`: detecta quando tombstones > 20% dos pontos indexados.
+  - `estimate_index_size()`: estima tamanho do índice em bytes.
+  - Trait `ANNIndex` estendido com `tombstone_count()` (implementado em `HnswIndex` e `QuantizedHnswIndex`).
+  - `Collection` estendido com `tombstone_count()`, `points_snapshot()`, `swap_index()`.
+  - Novos endpoints no server:
+    - `POST /api/v1/collections/{name}/reindex` — inicia job de reindex (retorna 202 Accepted).
+    - `GET /api/v1/collections/{name}/reindex/{job_id}` — status do job.
+    - `GET /api/v1/collections/{name}/reindex` — lista jobs da collection.
+  - Auto-reindex: após deleção de pontos, se tombstones > 20%, um reindex é disparado automaticamente.
+  - Jobs registrados no `AppState` via `DashMap<String, Arc<RwLock<ReindexJob>>>`.
+  - Restrição: apenas 1 reindex por collection por vez (retorna 409 se já existe job ativo).
+  - Testes: `test_reindex_cleans_tombstones`, `test_reindex_concurrent_search`, `test_reindex_with_concurrent_writes`, `test_reindex_job_lifecycle`, `test_reindex_job_failure`, `test_build_new_index`, `test_apply_delta_additions`, `test_apply_delta_removals`, `test_needs_reindex`, `test_estimate_index_size`, `test_reindex_stats_default`, `test_reindex_job_serialization`.
+  - SDKs atualizados:
+    - **Python**: `start_reindex()`, `get_reindex_job()`, `list_reindex_jobs()` + modelos `ReindexJob`, `ReindexStatus`, `ReindexStats`, `StartReindexResponse`.
+    - **TypeScript**: `startReindex()`, `getReindexJob()`, `listReindexJobs()` + tipos e schemas Zod correspondentes.
+  - Dashboard: API client com `reindexApi.start()`, `reindexApi.getJob()`, `reindexApi.listJobs()`.
+  - Documentação: `docs/api.md` atualizado com endpoints, schemas e exemplos.
+
+- **Fusion Strategies para Hybrid Search — Reciprocal Rank Fusion (RRF) como alternativa ao weighted score**
+  - Novo módulo `crates/core/src/fusion.rs` com algoritmos de fusão desacoplados.
+  - `FusionStrategy` (enum): `WeightedScore { alpha }` (compatível com comportamento original) e `RRF { k }` (fusão pura por rank).
+  - `reciprocal_rank_fusion()`: fusão genérica de N rankings via `score = Σ 1/(k + rank_i)`. Suporta qualquer número de rankers.
+  - `weighted_fusion()`: fusão ponderada de 2 rankings (vetorial + keyword) com alpha. Replica o comportamento original.
+  - `Collection::hybrid_search()` agora aceita `FusionStrategy` em vez de `alpha` diretamente.
+  - Novos campos opcionais no endpoint `POST /api/v1/collections/{name}/search/hybrid`:
+    - `fusion`: `"weighted"` (default) ou `"rrf"`.
+    - `rrf_k`: constante k para RRF (default: 60).
+  - Backward compatible: requests sem `fusion` usam `"weighted"` com `alpha` (comportamento idêntico ao anterior).
+  - Testes: `test_rrf_basic`, `test_rrf_no_overlap`, `test_rrf_vs_weighted`, `test_weighted_backward_compat`, `test_rrf_limit`, `test_rrf_empty_rankings`, `test_rrf_single_ranking`, `test_weighted_fusion_extreme_alpha`, `test_rrf_three_rankers`.
+  - SDKs atualizados:
+    - **Python**: parâmetros `fusion` e `rrf_k` em `hybrid_search()`.
+    - **TypeScript**: campos `fusion` e `rrf_k` em `HybridSearchQuery`.
+  - Dashboard: seletor de estratégia de fusão na aba Hybrid do Query Tester.
+  - Documentação: `api.md` atualizado com novos parâmetros, exemplos e guia de quando usar RRF vs weighted.
+
+- **Tiered Storage — movimentação automática de vetores entre camadas de armazenamento baseada em frequência de acesso**
+  - Novo módulo `crates/core/src/tiered.rs` com toda a lógica de tiered storage.
+  - `TieredStorageConfig`: configuração opt-in com thresholds para Hot/Warm/Cold e intervalo de compactação.
+  - `StorageTier` (enum): `Hot` (RAM), `Warm` (mmap), `Cold` (disco on-demand).
+  - `AccessTracker`: rastreio de último acesso e contagem por ponto para decisão automática de tier.
+  - `WarmStorage`: armazenamento de vetores em memory-mapped files via `memmap2`.
+  - `ColdStorage`: persistência completa de pontos em disco (JSON), carregados on-demand.
+  - `TieredCollection`: wrapper sobre `Collection` que gerencia Hot/Warm/Cold com promoção e demoção automática.
+  - Background compaction: task periódica que demove pontos Hot→Warm→Cold baseado em thresholds de acesso.
+  - Promoção automática: qualquer acesso a ponto Warm/Cold promove para Hot.
+  - Grafo HNSW **sempre** em memória — apenas dados dos pontos são tiered.
+  - `CollectionConfig` estendido com campo `tiered_storage` (`#[serde(default)]` para backward compatibility).
+  - `CollectionMeta` em `storage.rs` inclui `tiered_storage` para persistência.
+  - `FileStorage::save_tier_metadata` / `load_tier_metadata` para persistir `TierMetadata` (tiers, acessos).
+  - Novo endpoint `GET /api/v1/collections/{name}/tiers`: retorna distribuição de pontos por tier e memória estimada.
+  - Testes: `test_tier_demotion`, `test_tier_promotion`, `test_search_across_tiers`, `test_compaction`, `test_tier_distribution`, `test_tiered_disabled_everything_hot`, `test_tier_metadata_serialization`, `bench_search_latency_hot_vs_cold`.
+  - Dependência: `memmap2 = "0.9"` no workspace.
+  - SDKs atualizados:
+    - **Python**: `TieredStorageConfig` model, `get_tier_distribution()` no client, `TierDistribution` response model.
+    - **TypeScript**: `TieredStorageConfig` interface/schema, `getTierDistribution()` no client, `TierDistribution` response type.
+  - Documentação: `api.md` atualizado com novo endpoint e configuração de tiered storage.
+
+## [Released] - 07/02/2026 - 15:00 - 0.2.0
+
+### Added
+
 - **Real-time Streaming via WebSocket — ingestão e subscrição de eventos em tempo real**
   - Novo endpoint `GET /api/v1/ws` para upgrade HTTP → WebSocket.
   - Protocolo JSON sobre WebSocket com mensagens tipadas:

@@ -116,6 +116,7 @@ fn benchmark_indexing(c: &mut Criterion) {
                         enable_bm25: false,
                         bm25_text_field: "text".to_string(),
                         quantization: Default::default(),
+                        tiered_storage: Default::default(),
                     };
                     
                     db.create_collection(config).unwrap();
@@ -172,6 +173,7 @@ fn benchmark_search(c: &mut Criterion) {
         enable_bm25: false,
         bm25_text_field: "text".to_string(),
         quantization: Default::default(),
+        tiered_storage: Default::default(),
     };
     db.create_collection(config).unwrap();
     db.upsert_points("search_bench", points.clone()).unwrap();
@@ -290,6 +292,7 @@ fn benchmark_upsert(c: &mut Criterion) {
                 enable_bm25: false,
                 bm25_text_field: "text".to_string(),
                 quantization: Default::default(),
+                tiered_storage: Default::default(),
             };
             db.create_collection(config).unwrap();
 

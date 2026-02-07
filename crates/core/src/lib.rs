@@ -26,6 +26,7 @@
 //!     enable_bm25: false,
 //!     bm25_text_field: "text".to_string(),
 //!     quantization: Default::default(),
+//!     tiered_storage: Default::default(),
 //! };
 //!
 //! db.create_collection(config).unwrap();
@@ -47,10 +48,13 @@ pub mod collection;
 pub mod cost;
 pub mod error;
 pub mod explain;
+pub mod fusion;
 pub mod point;
 pub mod quantization;
+pub mod reindex;
 pub mod search;
 pub mod storage;
+pub mod tiered;
 pub mod wal;
 
 // Re-exporta os tipos mais usados na raiz do crate para ergonomia.
@@ -61,11 +65,20 @@ pub use bm25::BM25Index;
 pub use quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarType};
 pub use search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex, QuantizedHnswIndex, create_ann_index};
 pub use storage::{CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker};
+pub use tiered::{
+    AccessTracker, CompactionResult, ColdStorage, StorageTier, TierDistribution,
+    TierMetadata, TieredCollection, TieredStorageConfig, WarmStorage,
+};
 pub use wal::{Wal, WalEntry, WalOperation, recover_collection};
 pub use cost::{CostBreakdown, CostEstimateParams, QueryCostEstimate, estimate_search_cost};
 pub use explain::{
     ConditionResult, ExplainMeta, ExplainResult, FilterExplanation, IndexStats,
     SearchExplanation, evaluate_condition,
+};
+pub use fusion::{FusionStrategy, reciprocal_rank_fusion, weighted_fusion, DEFAULT_RRF_K};
+pub use reindex::{
+    ReindexJob, ReindexStats, ReindexStatus, AUTO_REINDEX_TOMBSTONE_RATIO,
+    apply_delta, build_new_index, estimate_index_size, needs_reindex,
 };
 
 // MetadataFilter e SearchResult já são públicos e definidos neste módulo
@@ -392,6 +405,7 @@ impl VectorDB {
     ///     enable_bm25: false,
     ///     bm25_text_field: "text".to_string(),
     ///     quantization: Default::default(),
+    ///     tiered_storage: Default::default(),
     /// };
     ///
     /// db.create_collection(config)?;
@@ -1310,6 +1324,7 @@ mod tests {
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
+            tiered_storage: TieredStorageConfig::default(),
         };
         db.create_collection(config).unwrap();
     }

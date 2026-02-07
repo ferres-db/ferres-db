@@ -209,17 +209,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(cors)
         .with_state(app_state.clone());
 
-    // Bind do servidor
+    // Bind do servidor REST
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| format!("invalid address {}:{} - {}", config.host, config.port, e))?;
-    info!(address = %addr, "server listening");
+    info!(address = %addr, "REST server listening");
 
-    // Cria o listener
+    // Cria o listener REST
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    // Inicia o servidor com graceful shutdown
+    // Inicia o servidor REST com graceful shutdown
     let server = axum::serve(listener, app);
+
+    // ── gRPC server (feature "grpc") ──────────────────────────────────
+    #[cfg(feature = "grpc")]
+    let grpc_handle = {
+        let grpc_port: u16 = std::env::var("GRPC_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50051);
+        let grpc_addr: SocketAddr = format!("{}:{}", config.host, grpc_port)
+            .parse()
+            .map_err(|e| format!("invalid gRPC address: {e}"))?;
+
+        let grpc_service = ferres_db_server::grpc::FerresGrpcService::new(app_state.clone());
+
+        info!(address = %grpc_addr, "gRPC server listening");
+
+        tokio::spawn(async move {
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(grpc_service.into_server())
+                .serve(grpc_addr)
+                .await
+            {
+                error!(error = %e, "gRPC server error");
+            }
+        })
+    };
 
     // Aguarda sinal de shutdown: SIGTERM (docker stop) ou SIGINT (Ctrl+C em TTY).
     // Em Docker sem TTY, ctrl_c() pode completar logo e encerrar o processo; por isso
@@ -264,6 +290,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SHUTDOWN_TASK_TIMEOUT
         ),
     }
+
+    // Encerra gRPC server
+    #[cfg(feature = "grpc")]
+    grpc_handle.abort();
 
     // Agora é seguro salvar (task já encerrou)
     if let Err(e) = app_state.save_all_collections() {

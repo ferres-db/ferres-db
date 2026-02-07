@@ -13,11 +13,15 @@ import type {
   AuditEntry,
   AuditQueryParams,
   QuantizationConfig,
+  TieredStorageConfig,
+  TierDistribution,
   HybridSearchRequest,
   SearchExplainRequest,
   SearchExplainResponse,
   SearchEstimateRequest,
   SearchEstimateResponse,
+  ReindexJob,
+  StartReindexResponse,
 } from "@/types";
 
 // Runtime (Docker): window.__RUNTIME_CONFIG__ é preenchido pelo entrypoint.
@@ -139,6 +143,7 @@ export const collectionsApi = {
       quantization?: QuantizationConfig;
       enable_bm25?: boolean;
       bm25_text_field?: string;
+      tiered_storage?: TieredStorageConfig;
     },
   ): Promise<void> => {
     // Backend expects "dimension" and "distance" (PascalCase: Cosine, Euclidean, DotProduct)
@@ -172,8 +177,16 @@ export const collectionsApi = {
         body.bm25_text_field = options.bm25_text_field;
       }
     }
+    if (options?.tiered_storage && options.tiered_storage.enabled) {
+      body.tiered_storage = options.tiered_storage;
+    }
 
     await apiClient.post("/api/v1/collections", body);
+  },
+
+  getTierDistribution: async (name: string): Promise<TierDistribution> => {
+    const response = await apiClient.get(`/api/v1/collections/${name}/tiers`);
+    return response.data;
   },
 
   delete: async (name: string): Promise<void> => {
@@ -392,6 +405,30 @@ export const usersApi = {
       },
     );
     return response.data;
+  },
+};
+
+// Reindex API
+export const reindexApi = {
+  start: async (collection: string): Promise<StartReindexResponse> => {
+    const response = await apiClient.post<StartReindexResponse>(
+      `/api/v1/collections/${encodeURIComponent(collection)}/reindex`,
+    );
+    return response.data;
+  },
+
+  getJob: async (collection: string, jobId: string): Promise<ReindexJob> => {
+    const response = await apiClient.get<ReindexJob>(
+      `/api/v1/collections/${encodeURIComponent(collection)}/reindex/${encodeURIComponent(jobId)}`,
+    );
+    return response.data;
+  },
+
+  listJobs: async (collection: string): Promise<ReindexJob[]> => {
+    const response = await apiClient.get<{ jobs: ReindexJob[] }>(
+      `/api/v1/collections/${encodeURIComponent(collection)}/reindex`,
+    );
+    return response.data.jobs;
   },
 };
 
