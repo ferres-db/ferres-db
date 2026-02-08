@@ -87,6 +87,9 @@ pub fn reciprocal_rank_fusion(
     if rankings.is_empty() {
         return Vec::new();
     }
+    if rankings.len() == 2 {
+        return rrf_two_rankings(&rankings[0], &rankings[1], k, limit);
+    }
 
     let k_f = k as f32;
 
@@ -124,6 +127,51 @@ pub fn reciprocal_rank_fusion(
         .collect();
 
     combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    combined.truncate(limit);
+    combined
+}
+
+/// Fast path para exatamente 2 rankings: usa Vec + sort em vez de HashMap.
+/// Resultado idêntico a `reciprocal_rank_fusion(&[a, b], k, limit)`.
+fn rrf_two_rankings(
+    a: &[(String, f32)],
+    b: &[(String, f32)],
+    k: usize,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    let k_f = k as f32;
+
+    // Mapeia id → rank (1-based) para cada ranking
+    let rank_a: std::collections::HashMap<&str, u32> = a
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| (id.as_str(), i as u32 + 1))
+        .collect();
+    let rank_b: std::collections::HashMap<&str, u32> = b
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| (id.as_str(), i as u32 + 1))
+        .collect();
+
+    // Coleta todos os IDs únicos (Vec de IDs únicos via HashSet)
+    let all_ids: HashSet<String> = a
+        .iter()
+        .chain(b.iter())
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    // Para cada ID: score = 1/(k+rank_a) + 1/(k+rank_b); ausente = u32::MAX
+    let mut combined: Vec<(String, f32)> = all_ids
+        .into_iter()
+        .map(|id| {
+            let ra = rank_a.get(id.as_str()).copied().unwrap_or(u32::MAX);
+            let rb = rank_b.get(id.as_str()).copied().unwrap_or(u32::MAX);
+            let score = 1.0 / (k_f + ra as f32) + 1.0 / (k_f + rb as f32);
+            (id, score)
+        })
+        .collect();
+
+    combined.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
     combined.truncate(limit);
     combined
 }
@@ -265,7 +313,7 @@ mod tests {
         assert_eq!(fused.len(), 6);
         let ids: HashSet<_> = fused.iter().map(|x| x.0.as_str()).collect();
         for expected in &["a", "b", "c", "x", "y", "z"] {
-            assert!(ids.contains(expected), "missing {}", expected);
+            assert!(ids.contains(expected), "missing {expected}");
         }
 
         // Os primeiros de cada ranking devem ter score igual (ambos rank 1)
@@ -336,9 +384,7 @@ mod tests {
         let actual_a = result.iter().find(|x| x.0 == "a").unwrap().1;
         assert!(
             (actual_a - expected_a).abs() < 1e-9,
-            "expected {}, got {}",
-            expected_a,
-            actual_a
+            "expected {expected_a}, got {actual_a}"
         );
 
         // Score para "b" (rank 2 em vec, rank 1 em bm25)
@@ -347,9 +393,7 @@ mod tests {
         let actual_b = result.iter().find(|x| x.0 == "b").unwrap().1;
         assert!(
             (actual_b - expected_b).abs() < 1e-9,
-            "expected {}, got {}",
-            expected_b,
-            actual_b
+            "expected {expected_b}, got {actual_b}"
         );
     }
 
@@ -405,6 +449,39 @@ mod tests {
     fn test_fusion_strategy_default() {
         let default = FusionStrategy::default();
         assert_eq!(default, FusionStrategy::WeightedScore { alpha: 0.5 });
+    }
+
+    #[test]
+    fn test_rrf_two_rankings_matches_generic() {
+        // Fast path (2 rankings) deve retornar o mesmo que o path genérico.
+        // Forçamos o genérico passando um terceiro ranking vazio (contribuição 0).
+        let a = vec![
+            ("id1".to_string(), 0.9),
+            ("id2".to_string(), 0.8),
+            ("id3".to_string(), 0.7),
+        ];
+        let b = vec![
+            ("id2".to_string(), 5.0),
+            ("id4".to_string(), 4.0),
+            ("id1".to_string(), 3.0),
+        ];
+        let empty: Vec<(String, f32)> = vec![];
+
+        let fast = reciprocal_rank_fusion(&[a.clone(), b.clone()], 60, 10);
+        let generic = reciprocal_rank_fusion(&[a.clone(), b.clone(), empty], 60, 10);
+
+        assert_eq!(fast.len(), generic.len(), "same number of results");
+        for (i, (id_f, score_f)) in fast.iter().enumerate() {
+            let (id_g, score_g) = &generic[i];
+            assert_eq!(id_f, id_g, "result {}: id mismatch", i);
+            assert!(
+                (score_f - score_g).abs() < 1e-9,
+                "result {}: score mismatch {} vs {}",
+                i,
+                score_f,
+                score_g
+            );
+        }
     }
 
     #[test]

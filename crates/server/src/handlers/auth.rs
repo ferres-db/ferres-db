@@ -42,16 +42,12 @@ pub async fn login(
     let valid = store.validate(username, password).map_err(ApiError::from)?;
     if !valid {
         // Audit: failed login attempt
-        let audit_logger = state.audit_logger.clone();
-        let uname = username.to_string();
-        tokio::spawn(async move {
-            let entry = audit::audit_entry(
-                &uname, "login", &format!("user:{}", uname),
-                serde_json::json!({"reason": "invalid credentials"}),
-                AuditResult::Denied, None, None,
-            );
-            audit_logger.log(&entry).await;
-        });
+        let entry = audit::audit_entry(
+            username, "login", &format!("user:{username}"),
+            serde_json::json!({"reason": "invalid credentials"}),
+            AuditResult::Denied, None, None,
+        );
+        state.audit_logger.log(&entry);
         return Err(ApiError::invalid_payload("Invalid username or password"));
     }
 
@@ -80,17 +76,14 @@ pub async fn login(
     .map_err(|_| ApiError::internal_error("Failed to create token"))?;
 
     // Audit: successful login
-    let audit_logger = state.audit_logger.clone();
-    let uname = username.to_string();
-    let role_str = role.as_str().to_string();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &uname, "login", &format!("user:{}", uname),
-            serde_json::json!({"role": role_str}),
+            username, "login", &format!("user:{username}"),
+            serde_json::json!({"role": role.as_str()}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        state.audit_logger.log(&entry);
+    }
 
     Ok(Json(LoginResponse {
         token,

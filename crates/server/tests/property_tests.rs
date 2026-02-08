@@ -65,7 +65,7 @@ async fn setup_server() -> TestServer {
         )
         .with_state(app_state);
 
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -80,13 +80,13 @@ async fn setup_server() -> TestServer {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let base_url = format!("http://127.0.0.1:{}", port);
+    let base_url = format!("http://127.0.0.1:{port}");
 
     // Cliente com API key default em todos os requests
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "Authorization",
-        format!("Bearer {}", TEST_API_KEY).parse().unwrap(),
+        format!("Bearer {TEST_API_KEY}").parse().unwrap(),
     );
     let client = reqwest::Client::builder()
         .default_headers(headers)
@@ -108,7 +108,7 @@ async fn create_collection(
     name: &str,
     dimension: usize,
 ) -> bool {
-    let url = format!("{}/api/v1/collections", base_url);
+    let url = format!("{base_url}/api/v1/collections");
     let resp = client
         .post(&url)
         .json(&serde_json::json!({
@@ -141,7 +141,7 @@ async fn upsert_point(
     collection_name: &str,
     point: serde_json::Value,
 ) {
-    let url = format!("{}/api/v1/collections/{}/points", base_url, collection_name);
+    let url = format!("{base_url}/api/v1/collections/{collection_name}/points");
     let resp = client
         .post(&url)
         .json(&serde_json::json!({ "points": [point] }))
@@ -163,7 +163,7 @@ async fn get_collection_stats(
     base_url: &str,
     name: &str,
 ) -> usize {
-    let url = format!("{}/api/v1/collections/{}", base_url, name);
+    let url = format!("{base_url}/api/v1/collections/{name}");
     let resp = client.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -406,7 +406,7 @@ async fn prop_concurrent_upserts_are_safe_async(
     let base_url = Arc::new(server.base_url.clone());
 
     for name in &collections {
-        if !create_collection(client.as_ref(), &*base_url, name, 128).await {
+        if !create_collection(client.as_ref(), &base_url, name, 128).await {
             return false;
         }
     }
@@ -420,7 +420,7 @@ async fn prop_concurrent_upserts_are_safe_async(
             tokio::spawn(async move {
                 for i in 0..points_per_thread {
                     let point = create_random_point(i, 128);
-                    upsert_point(client.as_ref(), &*base_url, &name, point).await;
+                    upsert_point(client.as_ref(), &base_url, &name, point).await;
                 }
             })
         })
@@ -433,7 +433,7 @@ async fn prop_concurrent_upserts_are_safe_async(
     }
 
     for name in &collections {
-        let num_points = get_collection_stats(client.as_ref(), &*base_url, name).await;
+        let num_points = get_collection_stats(client.as_ref(), &base_url, name).await;
         if num_points != points_per_thread {
             return false;
         }
@@ -457,7 +457,7 @@ async fn prop_create_get_collection_roundtrip() {
 
     // Testa com diferentes combinações de parâmetros
     for i in 0..10 {
-        let name = format!("prop-test-{}", i);
+        let name = format!("prop-test-{i}");
         let dimension = (i % 4095) + 1;
         let distances = ["Cosine", "Euclidean", "DotProduct"];
         let distance = distances[i % 3];
@@ -507,7 +507,7 @@ async fn prop_insert_search_points_consistency() {
 
     server
         .client
-        .post(&format!("{}/api/v1/collections", server.base_url))
+        .post(format!("{}/api/v1/collections", server.base_url))
         .json(&serde_json::json!({
             "name": collection_name,
             "dimension": dimension,
@@ -579,8 +579,7 @@ async fn prop_insert_search_points_consistency() {
         for i in 1..scores.len() {
             assert!(
                 scores[i - 1] <= scores[i],
-                "Scores not sorted: {:?}",
-                scores
+                "Scores not sorted: {scores:?}"
             );
         }
     }
@@ -597,7 +596,7 @@ async fn prop_dimension_validation() {
     // Cria coleção
     server
         .client
-        .post(&format!("{}/api/v1/collections", server.base_url))
+        .post(format!("{}/api/v1/collections", server.base_url))
         .json(&serde_json::json!({
             "name": collection_name,
             "dimension": dimension,
@@ -632,8 +631,7 @@ async fn prop_dimension_validation() {
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(
             body["upserted"], 0,
-            "Wrong dimension {} should not be inserted for collection dimension {}",
-            wrong_dim, dimension
+            "Wrong dimension {wrong_dim} should not be inserted for collection dimension {dimension}"
         );
         let failed = body["failed"].as_array().unwrap();
         assert!(!failed.is_empty(), "Wrong dimension should appear in failed list");
@@ -669,7 +667,7 @@ async fn prop_point_id_uniqueness() {
     // Cria coleção
     server
         .client
-        .post(&format!("{}/api/v1/collections", server.base_url))
+        .post(format!("{}/api/v1/collections", server.base_url))
         .json(&serde_json::json!({
             "name": collection_name,
             "dimension": dimension,
@@ -721,7 +719,7 @@ async fn prop_point_id_uniqueness() {
         // Contagem deve permanecer 1
         let response = server.client.get(&get_url).send().await.unwrap();
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["num_points"], 1, "After version {}", version);
+        assert_eq!(body["num_points"], 1, "After version {version}");
     }
 }
 
@@ -738,7 +736,7 @@ async fn test_concurrent_writes() {
     // Cria coleção
     server
         .client
-        .post(&format!("{}/api/v1/collections", server.base_url))
+        .post(format!("{}/api/v1/collections", server.base_url))
         .json(&serde_json::json!({
             "name": collection_name,
             "dimension": dimension,
@@ -763,7 +761,7 @@ async fn test_concurrent_writes() {
         let success_count = Arc::clone(&success_count);
 
         let handle = tokio::spawn(async move {
-            let upsert_url = format!("{}/api/v1/collections/{}/points", base_url, collection_name);
+            let upsert_url = format!("{base_url}/api/v1/collections/{collection_name}/points");
             let mut rng = rand::rngs::StdRng::from_entropy();
 
             for point_id in 0..points_per_writer {
@@ -801,8 +799,7 @@ async fn test_concurrent_writes() {
     // Todas as escritas devem ter sucesso
     assert_eq!(
         total_success, expected,
-        "Expected {} successful writes, got {}",
-        expected, total_success
+        "Expected {expected} successful writes, got {total_success}"
     );
 
     // Verifica contagem final (retry em 429 por rate limit; aceita 429 após retries em CI)
@@ -819,7 +816,7 @@ async fn test_concurrent_writes() {
     if response.status() == reqwest::StatusCode::OK {
         let text = response.text().await.unwrap();
         let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
-            panic!("GET collection response was not JSON: {} (body: {:?})", e, text)
+            panic!("GET collection response was not JSON: {e} (body: {text:?})")
         });
         assert_eq!(body["num_points"], expected);
     }
@@ -837,7 +834,7 @@ async fn test_concurrent_read_write() {
     // Cria coleção e insere alguns pontos iniciais
     server
         .client
-        .post(&format!("{}/api/v1/collections", server.base_url))
+        .post(format!("{}/api/v1/collections", server.base_url))
         .json(&serde_json::json!({
             "name": collection_name,
             "dimension": dimension,
@@ -860,7 +857,7 @@ async fn test_concurrent_read_write() {
 
     server
         .client
-        .post(&format!("{}/api/v1/collections/{}/points", server.base_url, collection_name))
+        .post(format!("{}/api/v1/collections/{}/points", server.base_url, collection_name))
         .json(&serde_json::json!({ "points": initial_points }))
         .send()
         .await
@@ -884,7 +881,7 @@ async fn test_concurrent_read_write() {
         let read_success = Arc::clone(&read_success);
 
         let handle = tokio::spawn(async move {
-            let search_url = format!("{}/api/v1/collections/{}/search", base_url, collection_name);
+            let search_url = format!("{base_url}/api/v1/collections/{collection_name}/search");
             let mut rng = rand::rngs::StdRng::from_entropy();
 
             for _ in 0..ops_per_task {
@@ -920,7 +917,7 @@ async fn test_concurrent_read_write() {
         let write_success = Arc::clone(&write_success);
 
         let handle = tokio::spawn(async move {
-            let upsert_url = format!("{}/api/v1/collections/{}/points", base_url, collection_name);
+            let upsert_url = format!("{base_url}/api/v1/collections/{collection_name}/points");
             let mut rng = rand::rngs::StdRng::from_entropy();
 
             for point_id in 0..ops_per_task {
@@ -993,7 +990,7 @@ async fn test_concurrent_collection_creation() {
         let success_count = Arc::clone(&success_count);
 
         let handle = tokio::spawn(async move {
-            let url = format!("{}/api/v1/collections", base_url);
+            let url = format!("{base_url}/api/v1/collections");
             let distances = ["Cosine", "Euclidean", "DotProduct"];
             let distance = distances[i % 3];
 
@@ -1044,7 +1041,7 @@ async fn test_load_rapid_operations() {
     // Cria coleção
     server
         .client
-        .post(&format!("{}/api/v1/collections", server.base_url))
+        .post(format!("{}/api/v1/collections", server.base_url))
         .json(&serde_json::json!({
             "name": collection_name,
             "dimension": dimension,
@@ -1122,8 +1119,7 @@ async fn test_load_rapid_operations() {
             let status = response.status();
             assert!(
                 status == reqwest::StatusCode::OK || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
-                "Search should return 200 or 429 (rate limit), got {}",
-                status
+                "Search should return 200 or 429 (rate limit), got {status}"
             );
         }
     }
@@ -1133,8 +1129,7 @@ async fn test_load_rapid_operations() {
     let total_searches = num_batches * searches_per_batch;
 
     println!(
-        "Load test completed: {} points, {} searches in {:?}",
-        total_points, total_searches, elapsed
+        "Load test completed: {total_points} points, {total_searches} searches in {elapsed:?}"
     );
 
     // Verifica contagem final (retry em 429)
@@ -1165,7 +1160,7 @@ async fn test_load_large_batch_insert() {
     // Cria coleção
     server
         .client
-        .post(&format!("{}/api/v1/collections", server.base_url))
+        .post(format!("{}/api/v1/collections", server.base_url))
         .json(&serde_json::json!({
             "name": collection_name,
             "dimension": dimension,
@@ -1249,7 +1244,7 @@ async fn test_stress_parallel_requests() {
     // Cria coleção
     server
         .client
-        .post(&format!("{}/api/v1/collections", server.base_url))
+        .post(format!("{}/api/v1/collections", server.base_url))
         .json(&serde_json::json!({
             "name": collection_name,
             "dimension": dimension,
@@ -1272,7 +1267,7 @@ async fn test_stress_parallel_requests() {
 
     server
         .client
-        .post(&format!("{}/api/v1/collections/{}/points", server.base_url, collection_name))
+        .post(format!("{}/api/v1/collections/{}/points", server.base_url, collection_name))
         .json(&serde_json::json!({ "points": initial_points }))
         .send()
         .await
@@ -1292,7 +1287,7 @@ async fn test_stress_parallel_requests() {
             let success_count = Arc::clone(&success_count);
 
             tokio::spawn(async move {
-                let search_url = format!("{}/api/v1/collections/{}/search", base_url, collection_name);
+                let search_url = format!("{base_url}/api/v1/collections/{collection_name}/search");
                 let query_vector = vec![i as f32 / 50.0; dimension];
 
                 let response = client

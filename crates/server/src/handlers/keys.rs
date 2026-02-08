@@ -56,18 +56,14 @@ pub async fn create_key(
     let (raw_key, id, key_prefix, created_at) = store.create_key(name).map_err(ApiError::from)?;
 
     // Audit trail
-    let audit_logger = state.audit_logger.clone();
-    let username = user.username.clone();
-    let key_name = name.to_string();
-    let prefix_for_audit = key_prefix.clone();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &username, "create_api_key", &format!("api_key:{}", key_name),
-            serde_json::json!({"key_prefix": prefix_for_audit}),
+            &user.username, "create_api_key", &format!("api_key:{name}"),
+            serde_json::json!({"key_prefix": &key_prefix}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        state.audit_logger.log(&entry);
+    }
 
     Ok(Json(CreateKeyResponse {
         id,
@@ -93,16 +89,14 @@ pub async fn delete_key(
     store.delete_key(id).map_err(ApiError::from)?;
 
     // Audit trail
-    let audit_logger = state.audit_logger.clone();
-    let username = user.username.clone();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &username, "delete_api_key", &format!("api_key:{}", id),
+            &user.username, "delete_api_key", &format!("api_key:{id}"),
             serde_json::json!({}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        state.audit_logger.log(&entry);
+    }
 
     Ok(Json(serde_json::json!({ "deleted": true, "id": id })))
 }

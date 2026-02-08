@@ -16,6 +16,7 @@ use tracing::info;
 
 use ferres_db_core::{
     Collection, CollectionConfig, FileStorage, MetadataFilter, Point,
+    build_search_explanation,
 };
 
 use crate::state::AppState;
@@ -670,6 +671,16 @@ impl FerresDb for FerresGrpcService {
         let req = request.into_inner();
         let start = Instant::now();
 
+        // Parse do filtro
+        let filter = if !req.filter_json.is_empty() {
+            let fv: serde_json::Value = serde_json::from_str(&req.filter_json)
+                .map_err(|e| Status::invalid_argument(format!("invalid filter JSON: {e}")))?;
+            Some(MetadataFilter::from_json(fv)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?)
+        } else {
+            None
+        };
+
         let collection_arc = self
             .state
             .collections
@@ -678,114 +689,77 @@ impl FerresDb for FerresGrpcService {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
 
-        let coll = collection_arc
-            .read()
-            .map_err(|e| Status::internal(format!("lock error: {e}")))?;
-
-        coll.validate_dimension(&req.vector)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        let query_vector_norm = req
-            .vector
-            .iter()
-            .map(|x| (*x as f64) * (*x as f64))
-            .sum::<f64>()
-            .sqrt() as f32;
-
-        let distance_metric = format!("{:?}", coll.config().distance);
-
-        let filter = if !req.filter_json.is_empty() {
-            let fv: serde_json::Value = serde_json::from_str(&req.filter_json)
-                .map_err(|e| Status::invalid_argument(format!("invalid filter JSON: {e}")))?;
-            MetadataFilter::from_json(fv).map_err(|e| Status::invalid_argument(e.to_string()))?
-        } else {
-            MetadataFilter::empty()
+        // Delega ao core: toda a lógica de explain está em build_search_explanation
+        let explanation = {
+            let coll = collection_arc
+                .read()
+                .map_err(|e| Status::internal(format!("lock error: {e}")))?;
+            build_search_explanation(&coll, &req.vector, req.limit as usize, filter)
+                .map_err(|e| Status::internal(e.to_string()))?
         };
 
-        let search_limit = if filter.is_empty() {
-            req.limit as usize
-        } else {
-            let expanded = (req.limit as usize).saturating_mul(10);
-            expanded.min(coll.len().max(req.limit as usize))
-        };
-
-        let raw_results = coll
-            .search_explain(&req.vector, search_limit)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let candidates_scanned = raw_results.len();
-
-        let mut explain_results = Vec::new();
-        let mut rank_after_counter = 0u32;
-        let mut total_tombstones_skipped = 0u64;
-
-        for (rank_before_idx, (id, score, meta)) in raw_results.iter().enumerate() {
-            let point = match coll.get(id) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            total_tombstones_skipped = meta.tombstones_skipped as u64;
-
-            let filter_eval = if !filter.is_empty() {
-                let condition_results: Vec<ferres_db_core::ConditionResult> = filter
-                    .conditions()
-                    .iter()
-                    .map(|cond| ferres_db_core::evaluate_condition(cond, &point.metadata))
-                    .collect();
-                condition_results.iter().all(|c| c.passed)
-            } else {
-                true
-            };
-
-            if filter_eval {
-                rank_after_counter += 1;
-            }
-
-            let mut score_breakdown = std::collections::HashMap::new();
-            score_breakdown.insert("vector_score".to_string(), *score);
-
-            explain_results.push(ExplainResult {
-                id: id.clone(),
-                score: *score,
-                distance_metric: distance_metric.clone(),
-                raw_distance: *score,
-                score_breakdown,
-                rank_before_filter: (rank_before_idx + 1) as u32,
-                rank_after_filter: if filter_eval { rank_after_counter } else { 0 },
-            });
-        }
-
-        let candidates_after_filter = explain_results
-            .iter()
-            .filter(|r| r.rank_after_filter > 0)
-            .count();
-
-        let index_stats = Some(IndexStats {
-            total_points: coll.len() as u64,
-            hnsw_layers: coll.config().hnsw.max_layer as u32,
-            ef_search_used: coll.config().hnsw.ef_search as u32,
-            tombstones_skipped: total_tombstones_skipped,
-        });
-
-        drop(coll);
-        drop(collection_arc);
-
-        let _took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
         crate::metrics::QUERIES_TOTAL
             .with_label_values(&[&req.collection])
             .inc();
         crate::metrics::QUERY_DURATION_MS
             .with_label_values(&[&req.collection])
-            .observe(_took_ms as f64);
+            .observe(took_ms as f64);
+
+        // Converte SearchExplanation do core para tipos protobuf
+        let results: Vec<ExplainResult> = explanation
+            .results
+            .iter()
+            .map(|r| {
+                // Converte FilterExplanation do core → FilterEvaluation proto
+                let filter_evaluation = r.filter_evaluation.as_ref().map(|fe| {
+                    let conditions = fe
+                        .conditions
+                        .iter()
+                        .map(|c| ConditionResult {
+                            field: c.field.clone(),
+                            operator: c.operator.clone(),
+                            expected_json: serde_json::to_string(&c.expected)
+                                .unwrap_or_else(|_| "null".to_string()),
+                            actual_json: serde_json::to_string(&c.actual)
+                                .unwrap_or_else(|_| "null".to_string()),
+                            passed: c.passed,
+                        })
+                        .collect();
+                    FilterEvaluation {
+                        conditions,
+                        passed: fe.passed,
+                    }
+                });
+
+                ExplainResult {
+                    id: r.id.clone(),
+                    score: r.score,
+                    distance_metric: r.distance_metric.clone(),
+                    raw_distance: r.raw_distance,
+                    score_breakdown: r.score_breakdown.clone(),
+                    rank_before_filter: r.rank_before_filter as u32,
+                    rank_after_filter: r.rank_after_filter as u32,
+                    similarity: r.similarity,
+                    filter_evaluation,
+                }
+            })
+            .collect();
+
+        let index_stats = Some(IndexStats {
+            total_points: explanation.index_stats.total_points as u64,
+            hnsw_layers: explanation.index_stats.hnsw_layers as u32,
+            ef_search_used: explanation.index_stats.ef_search_used as u32,
+            tombstones_skipped: explanation.index_stats.tombstones_skipped as u64,
+        });
 
         Ok(Response::new(ExplainSearchResponse {
-            query_vector_norm,
-            distance_metric,
-            candidates_scanned: candidates_scanned as u64,
-            candidates_after_filter: candidates_after_filter as u64,
-            results: explain_results,
+            query_vector_norm: explanation.query_vector_norm,
+            distance_metric: explanation.distance_metric,
+            candidates_scanned: explanation.candidates_scanned as u64,
+            candidates_after_filter: explanation.candidates_after_filter as u64,
+            results,
             index_stats,
         }))
     }
@@ -973,4 +947,198 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
     state.global_query_stats.record(&req.collection, took_ms);
 
     Ok(SearchResponse { results, took_ms })
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ServerConfig;
+    use serde_json::json;
+    use tonic::Request;
+
+    /// Cria um `FerresGrpcService` com AppState temporário para testes.
+    fn setup_grpc_service() -> (FerresGrpcService, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            storage_path: temp_dir.path().to_path_buf(),
+            log_level: "error".to_string(),
+            api_keys: None,
+        };
+        let state = AppState::new(config, None, None).unwrap();
+        let service = FerresGrpcService::new(state);
+        (service, temp_dir)
+    }
+
+    /// Helper: cria uma coleção via gRPC.
+    async fn create_test_collection(service: &FerresGrpcService, name: &str, dimension: u32) {
+        service
+            .create_collection(Request::new(CreateCollectionRequest {
+                name: name.to_string(),
+                dimension,
+                distance: 3, // Euclidean
+                enable_bm25: false,
+                bm25_text_field: String::new(),
+            }))
+            .await
+            .unwrap();
+    }
+
+    /// Helper: insere pontos via gRPC.
+    async fn upsert_test_points(service: &FerresGrpcService, collection: &str, points: Vec<PointInput>) {
+        service
+            .upsert_points(Request::new(UpsertPointsRequest {
+                collection: collection.to_string(),
+                points,
+            }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_explain_search_filter_evaluation_present() {
+        let (service, _temp) = setup_grpc_service();
+        let coll_name = "grpc_explain_test";
+
+        // Cria coleção com 3 dimensões, Euclidean
+        create_test_collection(&service, coll_name, 3).await;
+
+        // Insere pontos com metadata variada
+        let points = vec![
+            PointInput {
+                id: "p1".to_string(),
+                vector: vec![1.0, 0.0, 0.0],
+                metadata_json: json!({"category": "tech", "price": 50}).to_string(),
+            },
+            PointInput {
+                id: "p2".to_string(),
+                vector: vec![0.0, 1.0, 0.0],
+                metadata_json: json!({"category": "science", "price": 200}).to_string(),
+            },
+            PointInput {
+                id: "p3".to_string(),
+                vector: vec![0.9, 0.1, 0.0],
+                metadata_json: json!({"category": "tech", "price": 30}).to_string(),
+            },
+        ];
+        upsert_test_points(&service, coll_name, points).await;
+
+        // Faz explain_search COM filtro
+        let filter = json!({
+            "category": "tech",
+            "price": { "$lte": 100 }
+        });
+        let response = service
+            .explain_search(Request::new(ExplainSearchRequest {
+                collection: coll_name.to_string(),
+                vector: vec![1.0, 0.0, 0.0],
+                limit: 10,
+                filter_json: filter.to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let resp = response.into_inner();
+        assert!(!resp.results.is_empty(), "deve retornar resultados");
+
+        // Verifica que TODOS os resultados têm filter_evaluation
+        for result in &resp.results {
+            let fe = result
+                .filter_evaluation
+                .as_ref()
+                .expect("filter_evaluation deve estar presente quando filtro é aplicado");
+
+            // Deve ter 2 condições (category + price)
+            assert_eq!(
+                fe.conditions.len(),
+                2,
+                "deve ter 2 condições para resultado '{}'",
+                result.id
+            );
+
+            // Cada condição deve ter campos preenchidos
+            for cond in &fe.conditions {
+                assert!(!cond.field.is_empty(), "field não deve ser vazio");
+                assert!(!cond.operator.is_empty(), "operator não deve ser vazio");
+                assert!(!cond.expected_json.is_empty(), "expected_json não deve ser vazio");
+                assert!(!cond.actual_json.is_empty(), "actual_json não deve ser vazio");
+            }
+        }
+
+        // Verifica p2 (science, price=200): não deve passar no filtro
+        let p2 = resp.results.iter().find(|r| r.id == "p2");
+        if let Some(p2) = p2 {
+            let fe = p2.filter_evaluation.as_ref().unwrap();
+            assert!(!fe.passed, "p2 não deveria passar no filtro");
+            assert_eq!(p2.rank_after_filter, 0, "rank_after_filter deve ser 0 para p2");
+
+            // A condição category=$eq deve falhar (science != tech)
+            let cat_cond = fe.conditions.iter().find(|c| c.field == "category").unwrap();
+            assert_eq!(cat_cond.operator, "$eq");
+            assert!(!cat_cond.passed, "condição category=$eq deve falhar para p2");
+            assert_eq!(cat_cond.expected_json, "\"tech\"");
+            assert_eq!(cat_cond.actual_json, "\"science\"");
+        }
+
+        // Verifica p1 (tech, price=50): deve passar no filtro
+        let p1 = resp.results.iter().find(|r| r.id == "p1");
+        if let Some(p1) = p1 {
+            let fe = p1.filter_evaluation.as_ref().unwrap();
+            assert!(fe.passed, "p1 deveria passar no filtro");
+            assert!(p1.rank_after_filter > 0, "rank_after_filter deve ser > 0 para p1");
+
+            // Todas as condições devem passar
+            for cond in &fe.conditions {
+                assert!(cond.passed, "condição {}={} deve passar para p1", cond.field, cond.operator);
+            }
+        }
+
+        // Verifica p3 (tech, price=30): deve passar no filtro
+        let p3 = resp.results.iter().find(|r| r.id == "p3");
+        if let Some(p3) = p3 {
+            let fe = p3.filter_evaluation.as_ref().unwrap();
+            assert!(fe.passed, "p3 deveria passar no filtro");
+            assert!(p3.rank_after_filter > 0, "rank_after_filter deve ser > 0 para p3");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_explain_search_no_filter_no_evaluation() {
+        let (service, _temp) = setup_grpc_service();
+        let coll_name = "grpc_explain_no_filter";
+
+        create_test_collection(&service, coll_name, 3).await;
+
+        let points = vec![PointInput {
+            id: "p1".to_string(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata_json: json!({"category": "tech"}).to_string(),
+        }];
+        upsert_test_points(&service, coll_name, points).await;
+
+        // Explain SEM filtro
+        let response = service
+            .explain_search(Request::new(ExplainSearchRequest {
+                collection: coll_name.to_string(),
+                vector: vec![1.0, 0.0, 0.0],
+                limit: 10,
+                filter_json: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let resp = response.into_inner();
+        assert!(!resp.results.is_empty());
+
+        // Sem filtro, filter_evaluation deve ser None
+        for result in &resp.results {
+            assert!(
+                result.filter_evaluation.is_none(),
+                "filter_evaluation deve ser None quando não há filtro"
+            );
+        }
+    }
 }

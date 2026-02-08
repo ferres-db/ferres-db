@@ -20,7 +20,7 @@ impl fmt::Display for Resource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Resource::AllCollections => write!(f, "*"),
-            Resource::Collection(name) => write!(f, "collection:{}", name),
+            Resource::Collection(name) => write!(f, "collection:{name}"),
         }
     }
 }
@@ -113,8 +113,7 @@ pub fn check_permission(
     // Nota: Admin bypassa esta checagem no nível do extractor/handler.
     if permissions.is_empty() {
         return PermissionResult::Denied(format!(
-            "no permissions configured for action '{}' on '{}'",
-            action, resource
+            "no permissions configured for action '{action}' on '{resource}'"
         ));
     }
 
@@ -122,7 +121,7 @@ pub fn check_permission(
     for perm in permissions {
         let matches_resource = match &perm.resource {
             Resource::Collection(name) => {
-                name == resource || resource == format!("collection:{}", name)
+                name == resource || resource == format!("collection:{name}")
             }
             Resource::AllCollections => false, // verificado no segundo passo
         };
@@ -150,8 +149,7 @@ pub fn check_permission(
     }
 
     PermissionResult::Denied(format!(
-        "permission denied: action '{}' not allowed on '{}'",
-        action, resource
+        "permission denied: action '{action}' not allowed on '{resource}'"
     ))
 }
 

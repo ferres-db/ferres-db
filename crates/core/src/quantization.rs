@@ -376,13 +376,12 @@ mod tests {
         let ratio = f32_bytes as f64 / u8_bytes as f64;
         assert!(
             (ratio - 4.0).abs() < 0.01,
-            "expected ~4x compression, got {:.2}x",
-            ratio
+            "expected ~4x compression, got {ratio:.2}x"
         );
 
         // Verifica valores absolutos
         assert_eq!(f32_bytes, n * dim * 4);
-        assert_eq!(u8_bytes, n * dim * 1);
+        assert_eq!(u8_bytes, (n * dim));
     }
 
     /// Testa distância assimétrica Euclidean.

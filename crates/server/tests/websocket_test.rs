@@ -61,7 +61,7 @@ async fn setup_server() -> TestServer {
         )
         .with_state(app_state);
 
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -76,8 +76,8 @@ async fn setup_server() -> TestServer {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let base_url = format!("http://127.0.0.1:{}", port);
-    let ws_url = format!("ws://127.0.0.1:{}", port);
+    let base_url = format!("http://127.0.0.1:{port}");
+    let ws_url = format!("ws://127.0.0.1:{port}");
 
     TestServer {
         base_url,
@@ -91,8 +91,8 @@ async fn setup_server() -> TestServer {
 async fn create_collection(base_url: &str, name: &str, dimension: usize) {
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/api/v1/collections", base_url))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .post(format!("{base_url}/api/v1/collections"))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&json!({
             "name": name,
             "dimension": dimension,
@@ -117,10 +117,9 @@ async fn rest_upsert_points(
     let client = reqwest::Client::new();
     client
         .post(format!(
-            "{}/api/v1/collections/{}/points",
-            base_url, collection
+            "{base_url}/api/v1/collections/{collection}/points"
         ))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&json!({ "points": points }))
         .send()
         .await

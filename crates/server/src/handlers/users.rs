@@ -58,24 +58,21 @@ pub async fn create_user(
     let role = body
         .role
         .as_deref()
-        .and_then(Role::from_str)
+        .and_then(|s| s.parse().ok())
         .or(Some(Role::Viewer));
     let user = store
         .create_with_permissions(username, &body.password, role, body.permissions)
         .map_err(ApiError::from)?;
 
     // Audit trail
-    let audit_logger = state.audit_logger.clone();
-    let admin_name = admin_user.username.clone();
-    let created_name = username.to_string();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &admin_name, "create_user", &format!("user:{}", created_name),
+            &admin_user.username, "create_user", &format!("user:{username}"),
             serde_json::json!({"role": role.map(|r| r.as_str())}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        state.audit_logger.log(&entry);
+    }
 
     Ok(Json(user))
 }
@@ -94,16 +91,14 @@ pub async fn delete_user(
     store.delete_by_id(id).map_err(ApiError::from)?;
 
     // Audit trail
-    let audit_logger = state.audit_logger.clone();
-    let admin_name = admin_user.username.clone();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &admin_name, "delete_user", &format!("user:id={}", id),
+            &admin_user.username, "delete_user", &format!("user:id={id}"),
             serde_json::json!({}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        state.audit_logger.log(&entry);
+    }
 
     Ok(Json(serde_json::json!({ "deleted": true, "id": id })))
 }
@@ -130,17 +125,15 @@ pub async fn update_user_password(
         .map_err(ApiError::from)?;
 
     // Audit trail
-    let audit_logger = state.audit_logger.clone();
-    let admin_name = admin_user.username.clone();
-    let target_user = username.trim().to_string();
-    tokio::spawn(async move {
+    {
+        let target_user = username.trim();
         let entry = audit::audit_entry(
-            &admin_name, "update_password", &format!("user:{}", target_user),
+            &admin_user.username, "update_password", &format!("user:{target_user}"),
             serde_json::json!({}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        state.audit_logger.log(&entry);
+    }
 
     Ok(Json(serde_json::json!({ "updated": true })))
 }
@@ -168,18 +161,16 @@ pub async fn update_user_permissions(
         .map_err(ApiError::from)?;
 
     // Audit trail
-    let audit_logger = state.audit_logger.clone();
-    let admin_name = admin_user.username.clone();
-    let target_user = username.trim().to_string();
-    let perms_count = body.permissions.as_ref().map(|p| p.len()).unwrap_or(0);
-    tokio::spawn(async move {
+    {
+        let target_user = username.trim();
+        let perms_count = body.permissions.as_ref().map(|p| p.len()).unwrap_or(0);
         let entry = audit::audit_entry(
-            &admin_name, "update_permissions", &format!("user:{}", target_user),
+            &admin_user.username, "update_permissions", &format!("user:{target_user}"),
             serde_json::json!({"permissions_count": perms_count}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        state.audit_logger.log(&entry);
+    }
 
     Ok(Json(serde_json::json!({ "updated": true, "username": username.trim() })))
 }

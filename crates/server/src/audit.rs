@@ -1,7 +1,8 @@
 //! # Audit — audit trail completo para todas as operações
 //!
 //! Registra ações de usuários em arquivos JSONL com rotação diária.
-//! O logger é async e não bloqueia handlers (usa `tokio::spawn`).
+//! O logger usa um channel buffered com uma única task de background para
+//! reduzir overhead de I/O (batch writes em vez de um syscall por entry).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use std::sync::Mutex;
 
 /// Resultado de uma ação auditada.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,57 +48,54 @@ pub struct AuditEntry {
     pub duration_ms: Option<u64>,
 }
 
+/// Tamanho máximo do buffer antes de forçar flush.
+const FLUSH_BATCH_SIZE: usize = 100;
+
 /// Logger de auditoria que escreve em arquivos JSONL com rotação diária.
 ///
-/// Thread-safe e async. Uso: clone o Arc<AuditLogger> e chame `log()` via `tokio::spawn`.
+/// Thread-safe e síncrono. Usa um channel buffered com uma única task de
+/// background que acumula entries e faz flush por batch ou timeout (1s).
+/// Cada chamada a `log()` é non-blocking (fire-and-forget via `try_send`).
 pub struct AuditLogger {
     log_dir: PathBuf,
-    /// Writer corrente (arquivo do dia). Protegido por Mutex para escrita atômica.
-    writer: Arc<Mutex<AuditWriter>>,
+    /// Canal para enviar entries para a task de background.
+    /// Wrapped in Mutex<Option<>> para permitir shutdown (drop do sender fecha o channel).
+    tx: Arc<Mutex<Option<mpsc::Sender<AuditEntry>>>>,
+    /// Handle da task de background (para shutdown graceful).
+    bg_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 /// Estado interno do writer com referência ao arquivo e data corrente.
 struct AuditWriter {
     file: Option<tokio::fs::File>,
     current_date: Option<String>,
+    log_dir: PathBuf,
 }
 
-impl AuditLogger {
-    /// Cria um novo AuditLogger que escreve no diretório `log_dir`.
-    ///
-    /// Os arquivos são nomeados `audit-YYYY-MM-DD.jsonl`.
-    pub fn new(log_dir: PathBuf) -> std::io::Result<Self> {
-        std::fs::create_dir_all(&log_dir)?;
-        Ok(Self {
+impl AuditWriter {
+    fn new(log_dir: PathBuf) -> Self {
+        Self {
+            file: None,
+            current_date: None,
             log_dir,
-            writer: Arc::new(Mutex::new(AuditWriter {
-                file: None,
-                current_date: None,
-            })),
-        })
+        }
     }
 
     /// Retorna o nome do arquivo de audit para uma data.
     fn file_name(date: &str) -> String {
-        format!("audit-{}.jsonl", date)
+        format!("audit-{date}.jsonl")
     }
 
-    /// Registra uma entrada de auditoria (async, não bloqueia o caller).
-    pub async fn log(&self, entry: &AuditEntry) {
-        let json = match serde_json::to_string(entry) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to serialize audit entry");
-                return;
-            }
-        };
+    /// Faz flush de um batch de entries para disco em uma única escrita.
+    async fn flush(&mut self, entries: &[AuditEntry]) {
+        if entries.is_empty() {
+            return;
+        }
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
 
-        let mut writer = self.writer.lock().await;
-
         // Rotação diária: se a data mudou, fecha o arquivo atual e abre novo
-        let needs_rotate = writer
+        let needs_rotate = self
             .current_date
             .as_ref()
             .map(|d| d != &today)
@@ -104,7 +103,7 @@ impl AuditLogger {
 
         if needs_rotate {
             // Fecha arquivo anterior (drop automático)
-            writer.file = None;
+            self.file = None;
 
             let file_path = self.log_dir.join(Self::file_name(&today));
             match OpenOptions::new()
@@ -114,8 +113,8 @@ impl AuditLogger {
                 .await
             {
                 Ok(file) => {
-                    writer.file = Some(file);
-                    writer.current_date = Some(today);
+                    self.file = Some(file);
+                    self.current_date = Some(today);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to open audit log file");
@@ -124,11 +123,124 @@ impl AuditLogger {
             }
         }
 
-        if let Some(ref mut file) = writer.file {
-            let line = format!("{}\n", json);
-            if let Err(e) = file.write_all(line.as_bytes()).await {
-                tracing::warn!(error = %e, "failed to write audit entry");
+        if let Some(ref mut file) = self.file {
+            // Serializa todas as entries de uma vez em um único buffer
+            let mut buf = String::new();
+            for entry in entries {
+                match serde_json::to_string(entry) {
+                    Ok(json) => {
+                        buf.push_str(&json);
+                        buf.push('\n');
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to serialize audit entry");
+                    }
+                }
             }
+            if !buf.is_empty() {
+                if let Err(e) = file.write_all(buf.as_bytes()).await {
+                    tracing::warn!(error = %e, "failed to write audit entries batch");
+                }
+            }
+        }
+    }
+}
+
+impl AuditLogger {
+    /// Cria um novo AuditLogger que escreve no diretório `log_dir`.
+    ///
+    /// Os arquivos são nomeados `audit-YYYY-MM-DD.jsonl`.
+    /// Spawna uma task de background que recebe entries via channel e faz
+    /// flush batched (a cada 100 entries ou 1 segundo, o que vier primeiro).
+    pub fn new(log_dir: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&log_dir)?;
+
+        let (tx, rx) = mpsc::channel::<AuditEntry>(10_000);
+
+        let writer_log_dir = log_dir.clone();
+        let bg_handle = tokio::spawn(Self::background_writer(rx, writer_log_dir));
+
+        Ok(Self {
+            log_dir,
+            tx: Arc::new(Mutex::new(Some(tx))),
+            bg_handle: Arc::new(tokio::sync::Mutex::new(Some(bg_handle))),
+        })
+    }
+
+    /// Task de background que consome entries do channel e faz flush batched.
+    async fn background_writer(mut rx: mpsc::Receiver<AuditEntry>, log_dir: PathBuf) {
+        let mut writer = AuditWriter::new(log_dir);
+        let mut buffer: Vec<AuditEntry> = Vec::with_capacity(FLUSH_BATCH_SIZE);
+        let mut flush_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        // O primeiro tick completa imediatamente; consumimos para não fazer flush vazio.
+        flush_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                maybe_entry = rx.recv() => {
+                    match maybe_entry {
+                        Some(entry) => {
+                            buffer.push(entry);
+                            if buffer.len() >= FLUSH_BATCH_SIZE {
+                                writer.flush(&buffer).await;
+                                buffer.clear();
+                            }
+                        }
+                        None => {
+                            // Channel fechado — flush final e encerra
+                            if !buffer.is_empty() {
+                                writer.flush(&buffer).await;
+                                buffer.clear();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ = flush_interval.tick() => {
+                    if !buffer.is_empty() {
+                        writer.flush(&buffer).await;
+                        buffer.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Retorna o nome do arquivo de audit para uma data.
+    fn file_name(date: &str) -> String {
+        format!("audit-{date}.jsonl")
+    }
+
+    /// Registra uma entrada de auditoria (síncrono, non-blocking, fire-and-forget).
+    ///
+    /// Envia a entry para o channel buffered. Se o canal estiver cheio, loga
+    /// um warning e descarta a entry (não bloqueia o caller).
+    pub fn log(&self, entry: &AuditEntry) {
+        let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tx) = guard.as_ref() {
+            if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(entry.clone()) {
+                tracing::warn!("audit channel full, dropping entry");
+            }
+            // TrySendError::Closed é silenciosamente ignorado (shutdown em curso)
+        }
+    }
+
+    /// Fecha o channel e aguarda a task de background fazer o flush final.
+    ///
+    /// Deve ser chamado durante o shutdown graceful para garantir que
+    /// nenhuma entry pendente seja perdida.
+    pub async fn shutdown(&self) {
+        // Drop do sender fecha o channel — a task de background recebe None e faz flush final.
+        // Todos os clones de AuditLogger compartilham o mesmo Arc<Mutex<Option<Sender>>>,
+        // então basta tomar o sender de um deles.
+        {
+            let mut guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = None;
+        }
+        // Aguarda a task de background terminar (flush final)
+        let mut handle = self.bg_handle.lock().await;
+        if let Some(h) = handle.take() {
+            let _ = h.await;
         }
     }
 
@@ -207,7 +319,8 @@ impl Clone for AuditLogger {
     fn clone(&self) -> Self {
         Self {
             log_dir: self.log_dir.clone(),
-            writer: self.writer.clone(),
+            tx: self.tx.clone(),
+            bg_handle: self.bg_handle.clone(),
         }
     }
 }
@@ -253,10 +366,14 @@ mod tests {
             Some(5),
         );
 
-        logger.log(&entry).await;
+        logger.log(&entry);
 
-        // Flush by dropping writer lock
-        let results = logger.query(
+        // Shutdown flushes all pending entries
+        logger.shutdown().await;
+
+        // Re-create logger to query (original tx is closed)
+        let logger2 = AuditLogger::new(temp_dir.path().to_path_buf()).unwrap();
+        let results = logger2.query(
             Some("testuser"),
             Some("search"),
             None,
@@ -298,20 +415,99 @@ mod tests {
         let entry2 = audit_entry("user1", "upsert", "collection:docs", serde_json::json!({}), AuditResult::Success, None, None);
         let entry3 = audit_entry("user2", "search", "collection:other", serde_json::json!({}), AuditResult::Denied, None, None);
 
-        logger.log(&entry1).await;
-        logger.log(&entry2).await;
-        logger.log(&entry3).await;
+        logger.log(&entry1);
+        logger.log(&entry2);
+        logger.log(&entry3);
+
+        // Shutdown flushes all pending entries
+        logger.shutdown().await;
+
+        // Re-create logger to query
+        let logger2 = AuditLogger::new(temp_dir.path().to_path_buf()).unwrap();
 
         // Filter by action "search"
-        let results = logger.query(None, Some("search"), None, None, None, 100).await;
+        let results = logger2.query(None, Some("search"), None, None, None, 100).await;
         assert_eq!(results.len(), 2);
 
         // Filter by user "user1"
-        let results = logger.query(Some("user1"), None, None, None, None, 100).await;
+        let results = logger2.query(Some("user1"), None, None, None, None, 100).await;
         assert_eq!(results.len(), 2);
 
         // Filter by action "upsert"
-        let results = logger.query(None, Some("upsert"), None, None, None, 100).await;
+        let results = logger2.query(None, Some("upsert"), None, None, None, 100).await;
         assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_audit_buffered_write() {
+        // Envia 1000 entries rapidamente, verifica que todas aparecem no arquivo após flush.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let logger = AuditLogger::new(temp_dir.path().to_path_buf()).unwrap();
+
+        for i in 0..1000 {
+            let entry = audit_entry(
+                &format!("user-{i}"),
+                "search",
+                &format!("collection:coll-{i}"),
+                serde_json::json!({"index": i}),
+                AuditResult::Success,
+                None,
+                None,
+            );
+            logger.log(&entry);
+        }
+
+        // Shutdown faz o flush final
+        logger.shutdown().await;
+
+        // Lê o arquivo JSONL diretamente para contar as linhas
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let file_path = temp_dir.path().join(format!("audit-{today}.jsonl"));
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1000, "all 1000 entries must be persisted");
+
+        // Verifica que cada linha é um JSON válido de AuditEntry
+        for line in &lines {
+            let entry: AuditEntry = serde_json::from_str(line)
+                .expect("each line must be a valid AuditEntry JSON");
+            assert_eq!(entry.action, "search");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_audit_flush_on_timeout() {
+        // Envia 1 entry, espera 2 segundos, verifica que apareceu no arquivo
+        // (o flush por timeout de 1s deve ter escrito antes dos 2s).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let logger = AuditLogger::new(temp_dir.path().to_path_buf()).unwrap();
+
+        let entry = audit_entry(
+            "timeout-user",
+            "login",
+            "user:timeout-user",
+            serde_json::json!({}),
+            AuditResult::Success,
+            None,
+            None,
+        );
+        logger.log(&entry);
+
+        // Espera 2 segundos para o flush por timeout (interval de 1s)
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Lê o arquivo JSONL diretamente (sem shutdown)
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let file_path = temp_dir.path().join(format!("audit-{today}.jsonl"));
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "entry must be flushed by timeout");
+
+        let persisted: AuditEntry = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(persisted.user_id, "timeout-user");
+        assert_eq!(persisted.action, "login");
+
+        // Cleanup: shutdown gracefully
+        logger.shutdown().await;
     }
 }

@@ -69,7 +69,7 @@ async fn setup_server() -> TestServer {
         .with_state(app_state);
 
     // Cria o listener
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     // Canal para shutdown
@@ -87,13 +87,13 @@ async fn setup_server() -> TestServer {
     // Aguarda um pouco para o servidor iniciar
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let base_url = format!("http://127.0.0.1:{}", port);
+    let base_url = format!("http://127.0.0.1:{port}");
 
     // Cliente com API key default em todos os requests
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "Authorization",
-        format!("Bearer {}", TEST_API_KEY).parse().unwrap(),
+        format!("Bearer {TEST_API_KEY}").parse().unwrap(),
     );
     let client = reqwest::Client::builder()
         .default_headers(headers)
@@ -144,7 +144,7 @@ async fn test_create_collection_success() {
     let status = response.status();
     if status != reqwest::StatusCode::CREATED {
         let error_body = response.text().await.unwrap();
-        panic!("Expected 201 CREATED, got {}: {}", status, error_body);
+        panic!("Expected 201 CREATED, got {status}: {error_body}");
     }
 
     let body: serde_json::Value = response.json().await.unwrap();
@@ -474,7 +474,7 @@ async fn test_explain_search_endpoint() {
     let status = response.status();
     let body: serde_json::Value = response.json().await.unwrap();
 
-    assert_eq!(status, reqwest::StatusCode::OK, "body: {:?}", body);
+    assert_eq!(status, reqwest::StatusCode::OK, "body: {body:?}");
 
     // Verifica schema da resposta
     assert!(body["query_vector_norm"].is_number());
@@ -525,7 +525,7 @@ async fn test_explain_search_endpoint() {
     let status = response.status();
     let body: serde_json::Value = response.json().await.unwrap();
 
-    assert_eq!(status, reqwest::StatusCode::OK, "body: {:?}", body);
+    assert_eq!(status, reqwest::StatusCode::OK, "body: {body:?}");
 
     // Com filtro, cada resultado deve ter filter_evaluation
     let results = body["results"].as_array().unwrap();
@@ -601,7 +601,7 @@ async fn test_estimate_search_endpoint() {
 
     let status = response.status();
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(status, reqwest::StatusCode::OK, "body: {:?}", body);
+    assert_eq!(status, reqwest::StatusCode::OK, "body: {body:?}");
 
     // Verifica schema
     assert!(body["estimated_ms"].is_number());
@@ -635,7 +635,7 @@ async fn test_estimate_search_endpoint() {
 
     let status = response.status();
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(status, reqwest::StatusCode::OK, "body: {:?}", body);
+    assert_eq!(status, reqwest::StatusCode::OK, "body: {body:?}");
 
     // Com filtro, filter_cost deve ser > 0
     assert!(

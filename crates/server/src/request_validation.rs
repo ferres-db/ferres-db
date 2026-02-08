@@ -27,16 +27,13 @@ pub const MAX_SEARCH_LIMIT: usize = 10_000;
 pub fn validate_upsert_request(body: &UpsertPointsRequest) -> ApiResult<()> {
     if body.points.len() > MAX_POINTS_PER_BATCH {
         return Err(ApiError::invalid_payload(format!(
-            "batch too large: max {} points per request",
-            MAX_POINTS_PER_BATCH
+            "batch too large: max {MAX_POINTS_PER_BATCH} points per request"
         )));
     }
     for (i, p) in body.points.iter().enumerate() {
         if p.vector.len() > MAX_VECTOR_DIM {
             return Err(ApiError::invalid_payload(format!(
-                "vector dimension too large at point index {}: max {}",
-                i,
-                MAX_VECTOR_DIM
+                "vector dimension too large at point index {i}: max {MAX_VECTOR_DIM}"
             )));
         }
     }
@@ -47,8 +44,7 @@ pub fn validate_upsert_request(body: &UpsertPointsRequest) -> ApiResult<()> {
 pub fn validate_vector_dimension(vector: &[f32]) -> ApiResult<()> {
     if vector.len() > MAX_VECTOR_DIM {
         return Err(ApiError::invalid_payload(format!(
-            "vector dimension too large: max {}",
-            MAX_VECTOR_DIM
+            "vector dimension too large: max {MAX_VECTOR_DIM}"
         )));
     }
     Ok(())
@@ -61,8 +57,7 @@ pub fn validate_delete_batch_size(ids_len: usize) -> ApiResult<()> {
     }
     if ids_len > MAX_IDS_PER_DELETE_BATCH {
         return Err(ApiError::invalid_payload(format!(
-            "batch too large: max {} ids per delete request",
-            MAX_IDS_PER_DELETE_BATCH
+            "batch too large: max {MAX_IDS_PER_DELETE_BATCH} ids per delete request"
         )));
     }
     Ok(())
@@ -72,8 +67,7 @@ pub fn validate_delete_batch_size(ids_len: usize) -> ApiResult<()> {
 pub fn validate_search_limit(limit: usize) -> ApiResult<()> {
     if limit > MAX_SEARCH_LIMIT {
         return Err(ApiError::invalid_payload(format!(
-            "limit too large: max {}",
-            MAX_SEARCH_LIMIT
+            "limit too large: max {MAX_SEARCH_LIMIT}"
         )));
     }
     if limit == 0 {
@@ -92,7 +86,7 @@ mod tests {
         let mut points = Vec::new();
         for i in 0..MAX_POINTS_PER_BATCH + 1 {
             points.push(PointInput {
-                id: format!("id-{}", i),
+                id: format!("id-{i}"),
                 vector: vec![0.0; 4],
                 metadata: serde_json::Value::Null,
             });

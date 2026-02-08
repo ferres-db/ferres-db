@@ -27,8 +27,8 @@ fn hash_key(key: &str) -> String {
 fn generate_raw_key() -> String {
     let mut bytes = [0u8; KEY_RANDOM_BYTES];
     getrandom::getrandom(&mut bytes).expect("getrandom");
-    let hex_part: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("{}{}", KEY_PREFIX, hex_part)
+    let hex_part: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{KEY_PREFIX}{hex_part}")
 }
 
 #[derive(Debug, Error)]
@@ -115,10 +115,8 @@ impl ApiKeyStore {
         hashes.clear();
         let mut stmt = conn.prepare("SELECT key_hash FROM api_keys")?;
         let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        for h in iter {
-            if let Ok(h) = h {
-                hashes.insert(h);
-            }
+        for h in iter.flatten() {
+            hashes.insert(h);
         }
         Ok(())
     }

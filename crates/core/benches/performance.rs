@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ferres_db_core::{
-    CollectionConfig, DistanceMetric, Point, VectorDB,
+    fusion::reciprocal_rank_fusion,
+    ANNIndex, CollectionConfig, DistanceMetric, Point, VectorDB,
 };
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -461,6 +462,57 @@ fn benchmark_sq8(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_indexing, benchmark_search, benchmark_upsert, benchmark_sq8);
+// ─── Benchmark RRF: 2 rankings (fast path) vs genérico ────────────────────
+
+fn benchmark_rrf_two_vs_generic(c: &mut Criterion) {
+    const N: usize = 100;
+    let k = 60usize;
+    let limit = 50usize;
+
+    // Ranking A: doc-0 .. doc-99 com scores decrescentes
+    let ranking_a: Vec<(String, f32)> = (0..N)
+        .map(|i| (format!("doc-{}", i), 100.0 - i as f32))
+        .collect();
+    // Ranking B: doc-50 .. doc-149 (overlap 50–99) para simular hybrid
+    let ranking_b: Vec<(String, f32)> = (50..50 + N)
+        .map(|i| (format!("doc-{}", i), 100.0 - (i - 50) as f32))
+        .collect();
+    let empty: Vec<(String, f32)> = vec![];
+
+    let mut group = c.benchmark_group("rrf");
+    group.sample_size(100);
+    group.measurement_time(Duration::from_secs(5));
+
+    group.bench_function("rrf_two_rankings_100_each", |b| {
+        b.iter(|| {
+            black_box(reciprocal_rank_fusion(
+                black_box(&[ranking_a.clone(), ranking_b.clone()]),
+                k,
+                limit,
+            ))
+        });
+    });
+
+    group.bench_function("rrf_generic_100_each", |b| {
+        b.iter(|| {
+            black_box(reciprocal_rank_fusion(
+                black_box(&[ranking_a.clone(), ranking_b.clone(), empty.clone()]),
+                k,
+                limit,
+            ))
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    benchmark_indexing,
+    benchmark_search,
+    benchmark_upsert,
+    benchmark_sq8,
+    benchmark_rrf_two_vs_generic
+);
 criterion_main!(benches);
 

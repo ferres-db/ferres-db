@@ -9,6 +9,7 @@ use argon2::{
 use rand_core::OsRng;
 use rusqlite::Connection;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Mutex;
 use thiserror::Error;
 
@@ -32,12 +33,17 @@ impl Role {
             Role::Admin => "admin",
         }
     }
-    pub fn from_str(s: &str) -> Option<Self> {
+}
+
+impl FromStr for Role {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "viewer" => Some(Role::Viewer),
-            "editor" => Some(Role::Editor),
-            "admin" => Some(Role::Admin),
-            _ => None,
+            "viewer" => Ok(Role::Viewer),
+            "editor" => Ok(Role::Editor),
+            "admin" => Ok(Role::Admin),
+            _ => Err(()),
         }
     }
 }
@@ -158,7 +164,7 @@ impl UserStore {
             Err(e) => return Err(e.into()),
         };
         drop(conn);
-        Ok(Role::from_str(&role))
+        Ok(role.parse().ok())
     }
 
     /// Valida credenciais e retorna true se ok.

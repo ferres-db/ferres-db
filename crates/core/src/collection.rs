@@ -140,7 +140,7 @@ pub struct Collection {
     bm25_index: Option<BM25Index>,
     /// Cache LRU opcional para resultados de busca.
     /// Mutex é necessário porque search() é &self mas precisa mutar o cache.
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::type_complexity)]
     search_cache: Option<Mutex<LruCache<CacheKey, Vec<(String, f32)>>>>,
     /// Flag indicando se a coleção foi modificada e precisa ser salva.
     dirty: AtomicBool,
@@ -548,6 +548,37 @@ impl Collection {
         Ok(combined)
     }
 
+    /// Remove os dados de um ponto do HashMap sem tombstoning no índice HNSW.
+    ///
+    /// Usado pelo tiered storage para liberar RAM de pontos demovidos
+    /// enquanto mantém o nó no grafo HNSW. O HNSW continua retornando
+    /// o ID do ponto nos resultados de busca, e a hidratação resolve
+    /// os dados de Warm (mmap) ou Cold (disco).
+    ///
+    /// **Não use para exclusão real** — use [`remove`] para isso, que
+    /// também tombstona no HNSW e impede que o ponto apareça em buscas.
+    pub fn remove_data_only(&mut self, id: &str) -> Option<Point> {
+        let point = self.points.remove(id);
+        if point.is_some() {
+            // Remove do BM25 mas NÃO do HNSW
+            if let Some(ref mut bm25) = self.bm25_index {
+                bm25.remove_document(id);
+            }
+            self.invalidate_search_cache();
+            self.dirty.store(true, Ordering::Release);
+        }
+        point
+    }
+
+    /// Tombstona um ponto no índice HNSW sem remover do HashMap.
+    ///
+    /// Usado pelo tiered storage ao promover um ponto de volta para Hot:
+    /// o nó antigo no HNSW é tombstonado antes de inserir o nó atualizado,
+    /// evitando duplicatas no grafo.
+    pub fn tombstone_in_index(&mut self, id: &str) {
+        self.index.remove_point(id);
+    }
+
     /// Remove um ponto pelo ID (da coleção e do índice).
     pub fn remove(&mut self, id: &str) -> Result<(), FerresError> {
         if self.points.remove(id).is_none() {
@@ -626,10 +657,22 @@ impl Collection {
         self.index.tombstone_count()
     }
 
+    /// Returns estimated memory (bytes) wasted by tombstoned points until the next reindex.
+    ///
+    /// Non-zero only for quantized index; non-quantized backends return 0.
+    pub fn tombstone_memory_waste(&self) -> usize {
+        self.index.tombstone_memory_waste()
+    }
+
     /// Takes a snapshot of the current points for background reindexing.
     ///
     /// Returns `(owned_points, set_of_ids)`. The caller builds a new index
     /// from the owned points and later uses the ID set to compute the delta.
+    ///
+    /// **Memory note:** Reindex temporarily requires approximately 2× the
+    /// collection's memory: one copy for the existing index (serving queries)
+    /// and one for the new index being built from the snapshot.
+    /// For a 1M × 384 collection (~1.5 GB), expect ~3 GB peak usage.
     pub fn points_snapshot(&self) -> (Vec<Point>, std::collections::HashSet<String>) {
         let points: Vec<Point> = self.points.values().cloned().collect();
         let ids: std::collections::HashSet<String> =
@@ -830,7 +873,7 @@ mod tests {
             .map(|i| {
                 let mut vector = vec![0.0; 8];
                 vector[i % 8] = 1.0;
-                make_point(&format!("p{}", i), vector)
+                make_point(&format!("p{i}"), vector)
             })
             .collect();
 
@@ -1009,7 +1052,7 @@ mod tests {
 
             // O ponto inserido deve aparecer nos resultados
             let found = results.iter().any(|(result_id, _)| result_id == &id);
-            TestResult::from_bool(found || k == 0 || col.len() == 0)
+            TestResult::from_bool(found || k == 0 || col.is_empty())
         }
 
         /// Propriedade: o número de pontos na coleção deve ser igual ao número de inserções.

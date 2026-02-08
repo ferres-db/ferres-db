@@ -194,6 +194,19 @@ message ExplainSearchRequest {
   string         filter_json = 4;
 }
 
+message ConditionResult {
+  string field         = 1;
+  string operator      = 2;
+  string expected_json = 3;  // JSON string do valor esperado
+  string actual_json   = 4;  // JSON string do valor real
+  bool   passed        = 5;
+}
+
+message FilterEvaluation {
+  repeated ConditionResult conditions = 1;
+  bool passed                         = 2;
+}
+
 message ExplainResult {
   string id                         = 1;
   float  score                      = 2;
@@ -202,6 +215,10 @@ message ExplainResult {
   map<string, float> score_breakdown = 5;
   uint32 rank_before_filter         = 6;
   uint32 rank_after_filter          = 7;
+  // Similarity in [0,1] (higher = more similar). Present for Cosine/DotProduct, absent for Euclidean.
+  optional float similarity         = 8;
+  // Avaliação detalhada do filtro de metadata (presente apenas quando filtro é aplicado).
+  FilterEvaluation filter_evaluation = 9;
 }
 
 message IndexStats {

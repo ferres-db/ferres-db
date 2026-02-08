@@ -45,6 +45,7 @@ impl QueryLogger {
 
     /// Loga uma query de busca.
     /// Se `query_id` for `Some`, usa esse id; caso contrário gera um novo UUID.
+    #[allow(clippy::too_many_arguments)]
     pub async fn log_query(
         &self,
         query_id: Option<&str>,
@@ -59,7 +60,7 @@ impl QueryLogger {
         let vector_preview = if vector.len() >= 3 {
             format!("[{:.4}, {:.4}, {:.4}, ...]", vector[0], vector[1], vector[2])
         } else {
-            format!("{:?}", vector)
+            format!("{vector:?}")
         };
 
         let entry = QueryLogEntry {
@@ -105,7 +106,7 @@ impl QueryLogger {
 
         // Escreve no arquivo (com newline)
         if let Some(ref mut file) = *writer_guard {
-            let line = format!("{}\n", json);
+            let line = format!("{json}\n");
             if let Err(e) = file.write_all(line.as_bytes()).await {
                 tracing::warn!(error = %e, "failed to write query log entry");
             }

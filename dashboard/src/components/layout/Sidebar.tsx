@@ -22,7 +22,7 @@ export const Sidebar = () => {
   return (
     <div className="flex h-full w-64 flex-col bg-bg-secondary text-gray-50">
       <div className="flex h-16 items-center px-6 border-b border-bg-tertiary">
-        <h1 className="text-xl font-bold">FerresDB</h1>
+        <img src="/logo.png" alt="FerresDB" className="h-8 w-auto object-contain" />
       </div>
       <nav className="flex-1 space-y-1 px-3 py-4">
         {navigation.map((item) => {

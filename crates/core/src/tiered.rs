@@ -19,11 +19,12 @@ use std::fs;
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use memmap2::Mmap;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::collection::Collection;
 use crate::error::FerresError;
@@ -226,6 +227,11 @@ impl AccessTracker {
         self.last_access.remove(id);
         self.access_count.remove(id);
     }
+
+    /// Snapshot de last_access para uso em compactação paralela (sem manter o lock).
+    pub fn last_access_snapshot(&self) -> HashMap<String, u64> {
+        self.last_access.clone()
+    }
 }
 
 impl Default for AccessTracker {
@@ -303,46 +309,43 @@ impl WarmStorage {
             })?;
         }
 
-        // Carrega mmap se arquivo de vetores existir e não estiver vazio
-        if storage.vectors_path.exists() {
-            let file = fs::File::open(&storage.vectors_path).map_err(|e| {
-                FerresError::Storage(format!("failed to open warm vectors: {e}"))
-            })?;
-            let metadata = file.metadata().map_err(|e| {
-                FerresError::Storage(format!("failed to get warm vectors metadata: {e}"))
-            })?;
-            if metadata.len() > 0 {
-                let mmap = unsafe {
-                    Mmap::map(&file).map_err(|e| {
-                        FerresError::Storage(format!("failed to mmap warm vectors: {e}"))
-                    })?
-                };
-                storage.mmap = Some(mmap);
-            }
-        }
+        // Carrega mmap com verificação de consistência (crash recovery)
+        storage.reload_mmap()?;
 
         Ok(storage)
     }
 
     /// Adiciona um vetor ao armazenamento warm.
     pub fn add_vector(&mut self, id: &str, vector: &[f32]) -> Result<(), FerresError> {
-        // Calcula o offset no final do arquivo
+        // Calcula o offset no final do arquivo (antes de inserir no mapa)
         let offset = self.offsets.len() * self.dimension * 4;
+
+        // Escreve o vetor no arquivo e faz fsync antes de atualizar estado em memória
+        {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.vectors_path)
+                .map_err(|e| {
+                    FerresError::Storage(format!("failed to open warm vectors: {e}"))
+                })?;
+
+            for &val in vector {
+                file.write_all(&val.to_le_bytes()).map_err(|e| {
+                    FerresError::Storage(format!("failed to write warm vector: {e}"))
+                })?;
+            }
+
+            // fsync garante que os bytes estão no disco antes de atualizar o índice
+            file.sync_all().map_err(|e| {
+                FerresError::Storage(format!("failed to sync warm vectors: {e}"))
+            })?;
+        } // file handle é fechado aqui
+
+        // Agora é seguro atualizar o mapa de offsets
         self.offsets.insert(id.to_string(), offset);
 
-        // Escreve o vetor no arquivo
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.vectors_path)
-            .map_err(|e| FerresError::Storage(format!("failed to open warm vectors: {e}")))?;
-
-        for &val in vector {
-            file.write_all(&val.to_le_bytes())
-                .map_err(|e| FerresError::Storage(format!("failed to write warm vector: {e}")))?;
-        }
-
-        // Atualiza o índice
+        // Atualiza o índice (escrita atômica: tmp + sync + rename)
         self.save_index()?;
 
         // Re-mmap
@@ -405,6 +408,36 @@ impl WarmStorage {
         self.offsets.is_empty()
     }
 
+    /// Força sync de ambos os arquivos (vetores e índice) para disco.
+    ///
+    /// Garante que todos os dados escritos até o momento estão persistidos
+    /// de forma durável. Útil antes de confirmações críticas.
+    pub fn flush(&mut self) -> Result<(), FerresError> {
+        // Soltar o mmap antes de sync (necessário no Windows)
+        self.mmap = None;
+
+        // Sync do arquivo de vetores (requer write access para FlushFileBuffers)
+        if self.vectors_path.exists() {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(&self.vectors_path)
+                .map_err(|e| {
+                    FerresError::Storage(format!("failed to open warm vectors for flush: {e}"))
+                })?;
+            file.sync_all().map_err(|e| {
+                FerresError::Storage(format!("failed to flush warm vectors: {e}"))
+            })?;
+        }
+
+        // Escrita atômica do índice (tmp + sync + rename)
+        self.save_index()?;
+
+        // Recriar o mmap
+        self.reload_mmap()?;
+
+        Ok(())
+    }
+
     /// Reconstrói o arquivo mmap com apenas os vetores ativos.
     pub fn compact(
         &mut self,
@@ -422,11 +455,17 @@ impl WarmStorage {
         for (id, vector) in vectors {
             new_offsets.insert(id.clone(), offset);
             for &val in vector {
-                file.write_all(&val.to_le_bytes())
-                    .map_err(|e| FerresError::Storage(format!("failed to write warm vector: {e}")))?;
+                file.write_all(&val.to_le_bytes()).map_err(|e| {
+                    FerresError::Storage(format!("failed to write warm vector: {e}"))
+                })?;
             }
             offset += vector.len() * 4;
         }
+
+        // Sync antes de rename para garantir integridade
+        file.sync_all().map_err(|e| {
+            FerresError::Storage(format!("failed to sync warm vectors during compact: {e}"))
+        })?;
 
         // Atomic rename
         fs::rename(&tmp_path, &self.vectors_path).map_err(|e| {
@@ -444,10 +483,20 @@ impl WarmStorage {
         let index_json = serde_json::to_string(&self.offsets).map_err(|e| {
             FerresError::Storage(format!("failed to serialize warm index: {e}"))
         })?;
-        let tmp_path = self.index_path.with_extension("tmp");
-        fs::write(&tmp_path, &index_json).map_err(|e| {
+
+        // Escrita atômica: warm_index.json.tmp → sync_all → rename → warm_index.json
+        let tmp_path = PathBuf::from(format!("{}.tmp", self.index_path.display()));
+
+        let mut tmp_file = fs::File::create(&tmp_path).map_err(|e| {
+            FerresError::Storage(format!("failed to create warm index tmp: {e}"))
+        })?;
+        tmp_file.write_all(index_json.as_bytes()).map_err(|e| {
             FerresError::Storage(format!("failed to write warm index: {e}"))
         })?;
+        tmp_file.sync_all().map_err(|e| {
+            FerresError::Storage(format!("failed to sync warm index: {e}"))
+        })?;
+
         fs::rename(&tmp_path, &self.index_path).map_err(|e| {
             FerresError::Storage(format!("failed to rename warm index: {e}"))
         })?;
@@ -455,22 +504,82 @@ impl WarmStorage {
     }
 
     fn reload_mmap(&mut self) -> Result<(), FerresError> {
-        if self.vectors_path.exists() {
-            let file = fs::File::open(&self.vectors_path).map_err(|e| {
-                FerresError::Storage(format!("failed to open warm vectors: {e}"))
-            })?;
-            let metadata = file.metadata().map_err(|e| {
-                FerresError::Storage(format!("failed to get metadata: {e}"))
-            })?;
-            if metadata.len() > 0 {
-                let mmap = unsafe {
-                    Mmap::map(&file).map_err(|e| {
-                        FerresError::Storage(format!("failed to mmap warm vectors: {e}"))
-                    })?
-                };
-                self.mmap = Some(mmap);
-            }
+        if !self.vectors_path.exists() {
+            self.mmap = None;
+            return Ok(());
         }
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.vectors_path)
+            .map_err(|e| FerresError::Storage(format!("failed to open warm vectors: {e}")))?;
+
+        let file_len = file
+            .metadata()
+            .map_err(|e| FerresError::Storage(format!("failed to get metadata: {e}")))?
+            .len() as usize;
+
+        // ── Crash recovery: verificar consistência entre índice e arquivo ──
+        let vector_bytes = self.dimension * 4;
+        let before_count = self.offsets.len();
+
+        // Remove entradas cujo vetor extrapola o tamanho real do arquivo
+        self.offsets
+            .retain(|_, offset| *offset + vector_bytes <= file_len);
+
+        if self.offsets.len() < before_count {
+            warn!(
+                removed = before_count - self.offsets.len(),
+                kept = self.offsets.len(),
+                file_len = file_len,
+                "warm storage crash recovery: removed entries beyond file bounds"
+            );
+        }
+
+        // Último byte válido segundo o índice
+        let max_valid_end = self
+            .offsets
+            .values()
+            .map(|&offset| offset + vector_bytes)
+            .max()
+            .unwrap_or(0);
+
+        // Truncar lixo residual (escrita parcial que não chegou ao índice)
+        let needs_truncate = file_len > max_valid_end && max_valid_end > 0;
+        let lost_entries = self.offsets.len() < before_count;
+
+        if needs_truncate {
+            file.set_len(max_valid_end as u64).map_err(|e| {
+                FerresError::Storage(format!("failed to truncate warm vectors: {e}"))
+            })?;
+            file.sync_all().map_err(|e| {
+                FerresError::Storage(format!("failed to sync after truncate: {e}"))
+            })?;
+        }
+
+        if lost_entries || needs_truncate {
+            self.save_index()?;
+        }
+
+        // Mapear o arquivo (pode ter sido truncado)
+        let final_len = if needs_truncate {
+            max_valid_end as u64
+        } else {
+            file_len as u64
+        };
+
+        if final_len > 0 {
+            let mmap = unsafe {
+                Mmap::map(&file).map_err(|e| {
+                    FerresError::Storage(format!("failed to mmap warm vectors: {e}"))
+                })?
+            };
+            self.mmap = Some(mmap);
+        } else {
+            self.mmap = None;
+        }
+
         Ok(())
     }
 }
@@ -481,6 +590,19 @@ impl WarmStorage {
 ///
 /// Cada ponto é serializado como JSON em um arquivo individual
 /// em `<dir>/cold/<point_id>.json`.
+///
+/// # Migração (v0.x → percent-encoding)
+///
+/// Versões anteriores usavam `str::replace` para sanitizar IDs, substituindo
+/// caracteres especiais por `_`. Isso causava colisões silenciosas — por exemplo,
+/// `"doc/1"` e `"doc_1"` mapeavam para o mesmo arquivo `doc_1.json`.
+///
+/// A partir desta versão, `point_path` usa percent-encoding (e.g. `"doc/1"` →
+/// `"doc%2F1.json"`), eliminando colisões. Dados salvos com a versão anterior
+/// **não** são migrados automaticamente e podem não ser encontrados com o novo
+/// esquema de nomes. Como pontos cold podem ser reconstruídos promovendo de volta
+/// e re-demovendo, a perda é aceitável. Uma migração futura poderia varrer o
+/// diretório `cold/` e renomear arquivos conforme necessário.
 pub struct ColdStorage {
     dir: PathBuf,
 }
@@ -539,10 +661,55 @@ impl ColdStorage {
     }
 
     fn point_path(&self, id: &str) -> PathBuf {
-        // Usa hash simples para evitar problemas com caracteres especiais em IDs
-        let safe_name = id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
-        self.dir.join(format!("{safe_name}.json"))
+        // Percent-encoding para evitar colisões entre IDs distintos.
+        // Caracteres seguros (alfanuméricos, '-', '_', '.') são mantidos;
+        // todos os outros são codificados como %XX por byte UTF-8.
+        let mut safe = String::with_capacity(id.len() * 2);
+        for c in id.chars() {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                safe.push(c);
+            } else {
+                // percent-encode: '/' -> "%2F", ':' -> "%3A", etc.
+                for byte in c.to_string().as_bytes() {
+                    use std::fmt::Write;
+                    write!(&mut safe, "%{byte:02X}").unwrap();
+                }
+            }
+        }
+        self.dir.join(format!("{safe}.json"))
     }
+}
+
+// ─── Helpers para compactação paralela ─────────────────────────────────
+
+/// Calcula o tier ideal a partir do último acesso (para uso em rayon sem lock).
+fn get_tier_at_from_last_access(
+    last_ts: Option<u64>,
+    config: &TieredStorageConfig,
+    now: u64,
+) -> StorageTier {
+    let last = match last_ts {
+        Some(ts) => ts,
+        None => return StorageTier::Cold,
+    };
+    let hours_since = now.saturating_sub(last) / 3600;
+    if hours_since < config.hot_threshold_hours {
+        StorageTier::Hot
+    } else if hours_since < config.warm_threshold_hours {
+        StorageTier::Warm
+    } else {
+        StorageTier::Cold
+    }
+}
+
+/// Indica se o ponto deve ser demovido (Hot→Warm, Hot→Cold, Warm→Cold).
+fn should_demote(current: &StorageTier, ideal: &StorageTier) -> bool {
+    matches!(
+        (current, ideal),
+        (StorageTier::Hot, StorageTier::Warm)
+            | (StorageTier::Hot, StorageTier::Cold)
+            | (StorageTier::Warm, StorageTier::Cold)
+    )
 }
 
 // ─── TieredCollection ─────────────────────────────────────────────────
@@ -783,6 +950,9 @@ impl TieredCollection {
     }
 
     /// Promove um ponto para Hot (chamado automaticamente no acesso).
+    ///
+    /// Hidrata o ponto do tier atual (Warm ou Cold), tombstona o nó antigo
+    /// no HNSW para evitar duplicatas, e re-insere na Collection.
     pub fn promote_to_hot(&mut self, id: &str) -> Result<(), FerresError> {
         let current_tier = self.point_tiers.read()
             .map_err(|_| FerresError::Storage("failed to read tiers".into()))?
@@ -793,6 +963,9 @@ impl TieredCollection {
             Some(StorageTier::Warm) => {
                 // Lê do warm e insere na collection
                 if let Ok(Some(point)) = self.hydrate_from_warm(id) {
+                    // Tombstona o nó antigo no HNSW antes de re-inserir,
+                    // evitando duplicatas no grafo.
+                    self.collection.tombstone_in_index(id);
                     self.collection.insert(point)?;
                     // Remove do warm
                     if let Some(ref warm) = self.warm_storage {
@@ -811,6 +984,8 @@ impl TieredCollection {
             Some(StorageTier::Cold) => {
                 // Lê do cold e insere na collection
                 if let Ok(Some(point)) = self.hydrate_from_cold(id) {
+                    // Tombstona o nó antigo no HNSW antes de re-inserir
+                    self.collection.tombstone_in_index(id);
                     self.collection.insert(point)?;
                     // Remove do cold
                     if let Some(ref cold) = self.cold_storage {
@@ -831,6 +1006,14 @@ impl TieredCollection {
     }
 
     /// Demove um ponto de Hot para Warm.
+    ///
+    /// O vetor é movido para mmap (WarmStorage) e a metadata permanece em
+    /// memória (HashMap separado). O ponto é removido do HashMap da Collection
+    /// para liberar RAM, mas **NÃO** é tombstonado no HNSW — o nó permanece
+    /// ativo no grafo para que buscas continuem retornando este ponto.
+    ///
+    /// A hidratação posterior via [`get_from_any_tier`] reconstrói o ponto
+    /// a partir do warm storage.
     pub fn demote_to_warm(&mut self, id: &str) -> Result<(), FerresError> {
         // Busca o ponto na collection
         let point = self.collection.get(id).cloned();
@@ -851,8 +1034,9 @@ impl TieredCollection {
                 });
             }
 
-            // Remove da collection (libera Vec<f32> da RAM)
-            let _ = self.collection.remove(id);
+            // Remove dados da Collection (libera Vec<f32> da RAM) mas NÃO
+            // tombstona no HNSW — o nó permanece no grafo para buscas.
+            let _ = self.collection.remove_data_only(id);
 
             // Atualiza tier
             if let Ok(mut tiers) = self.point_tiers.write() {
@@ -903,58 +1087,210 @@ impl TieredCollection {
         Ok(())
     }
 
+    /// Processa em batch todos os pontos que devem ir para Warm (um único lock no warm_storage).
+    fn demote_batch_to_warm(&mut self, ids: &[String]) -> Result<usize, FerresError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        // Coleta pontos da collection (sem segurar warm lock)
+        let points: Vec<(String, Point)> = ids
+            .iter()
+            .filter_map(|id| {
+                self.collection
+                    .get(id)
+                    .cloned()
+                    .map(|p| (id.clone(), p))
+            })
+            .collect();
+        let count = points.len();
+
+        // Um único lock: escreve todos os vetores no warm
+        if let Some(ref warm) = self.warm_storage {
+            let mut ws = warm.lock().map_err(|_| {
+                FerresError::Storage("failed to lock warm storage".into())
+            })?;
+            for (id, ref point) in &points {
+                ws.add_vector(id, &point.vector)?;
+            }
+        }
+
+        // Atualiza metadata, remove da collection e atualiza tiers
+        for (id, point) in &points {
+            if let Ok(mut wm) = self.warm_metadata.write() {
+                wm.insert(
+                    id.clone(),
+                    WarmPointMeta {
+                        metadata: point.metadata.clone(),
+                        created_at: point.created_at,
+                    },
+                );
+            }
+            let _ = self.collection.remove_data_only(id);
+            if let Ok(mut tiers) = self.point_tiers.write() {
+                tiers.insert(id.clone(), StorageTier::Warm);
+            }
+            debug!(point_id = id, "demoted point to warm tier");
+        }
+
+        Ok(count)
+    }
+
+    /// Processa em batch todos os pontos que devem ir para Cold (um único lock no warm para remoções).
+    fn demote_batch_to_cold(&mut self, ids: &[String]) -> Result<usize, FerresError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        // Lê metadata warm (read lock) para todos os ids
+        let meta_map: HashMap<String, WarmPointMeta> = {
+            let wm = self.warm_metadata.read().map_err(|_| {
+                FerresError::Storage("failed to read warm metadata".into())
+            })?;
+            ids.iter()
+                .filter_map(|id| wm.get(id).cloned().map(|m| (id.clone(), m)))
+                .collect()
+        };
+
+        // Um único lock no warm: lê vetores e remove todos
+        let points: Vec<(String, Point)> = if let Some(ref warm) = self.warm_storage {
+            let mut ws = warm.lock().map_err(|_| {
+                FerresError::Storage("failed to lock warm storage".into())
+            })?;
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let (Some(vec), Some(meta)) = (
+                    ws.contains(id).then(|| ws.read_vector(id)).and_then(|r| r.ok()),
+                    meta_map.get(id),
+                ) {
+                    out.push((
+                        id.clone(),
+                        Point {
+                            id: id.clone(),
+                            vector: vec,
+                            metadata: meta.metadata.clone(),
+                            created_at: meta.created_at,
+                        },
+                    ));
+                }
+            }
+            for (id, _) in &out {
+                ws.remove_vector(id);
+            }
+            out
+        } else {
+            Vec::new()
+        };
+
+        // Remove metadata warm e persiste em cold
+        for (id, ref point) in &points {
+            if let Ok(mut wm) = self.warm_metadata.write() {
+                wm.remove(id);
+            }
+            if let Some(ref cold) = self.cold_storage {
+                cold.save_point(point)?;
+            }
+            if let Ok(mut ci) = self.cold_ids.write() {
+                ci.insert(
+                    id.clone(),
+                    ColdPointMeta {
+                        created_at: point.created_at,
+                    },
+                );
+            }
+            if let Ok(mut tiers) = self.point_tiers.write() {
+                tiers.insert(id.clone(), StorageTier::Cold);
+            }
+            debug!(point_id = id, "demoted point to cold tier");
+        }
+
+        Ok(points.len())
+    }
+
     /// Roda a compactação: demove pontos baseado no AccessTracker.
     ///
     /// Chamado periodicamente pelo background task.
+    /// Cálculo de points_to_demote é paralelizado com rayon; writes são em batch por tier.
     pub fn run_compaction(&mut self) -> Result<CompactionResult, FerresError> {
         if !self.config.enabled {
             return Ok(CompactionResult::default());
         }
 
-        let changes = {
+        let compaction_start = Instant::now();
+
+        // Snapshot para cálculo paralelo (locks breves)
+        let (tiers_vec, last_access_snapshot, config_clone) = {
             let tracker = self.access_tracker.lock().map_err(|_| {
                 FerresError::Storage("failed to lock access tracker".into())
             })?;
             let tiers = self.point_tiers.read().map_err(|_| {
                 FerresError::Storage("failed to read tiers".into())
             })?;
-            tracker.points_to_demote(&self.config, &tiers)
+            let tiers_vec: Vec<(String, StorageTier)> = tiers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let last_access_snapshot = tracker.last_access_snapshot();
+            (tiers_vec, last_access_snapshot, self.config.clone())
         };
 
-        let mut demoted_to_warm = 0usize;
-        let mut demoted_to_cold = 0usize;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
-        for (id, new_tier) in &changes {
-            match new_tier {
-                StorageTier::Warm => {
-                    self.demote_to_warm(id)?;
-                    demoted_to_warm += 1;
+        // Cálculo paralelo de points_to_demote
+        let changes: Vec<(String, StorageTier)> = tiers_vec
+            .par_iter()
+            .filter_map(|(id, current_tier)| {
+                let ideal = get_tier_at_from_last_access(
+                    last_access_snapshot.get(id.as_str()).copied(),
+                    &config_clone,
+                    now,
+                );
+                if should_demote(current_tier, &ideal) {
+                    Some((id.clone(), ideal))
+                } else {
+                    None
                 }
-                StorageTier::Cold => {
-                    // Verifica tier atual
-                    let current = self.point_tiers.read()
-                        .map_err(|_| FerresError::Storage("failed to read tiers".into()))?
-                        .get(id)
-                        .cloned();
+            })
+            .collect();
 
-                    match current {
-                        Some(StorageTier::Hot) => {
-                            // Hot → Warm primeiro, depois Warm → Cold
-                            self.demote_to_warm(id)?;
-                            self.demote_to_cold(id)?;
-                            demoted_to_cold += 1;
-                        }
-                        Some(StorageTier::Warm) => {
-                            self.demote_to_cold(id)?;
-                            demoted_to_cold += 1;
-                        }
-                        _ => {}
-                    }
+        // Snapshot do tier atual para decidir batches (Hot→Warm vs Hot→Cold vs Warm→Cold)
+        let tiers_snapshot: HashMap<String, StorageTier> = self
+            .point_tiers
+            .read()
+            .map_err(|_| FerresError::Storage("failed to read tiers".into()))?
+            .clone();
+
+        // IDs para demote_to_warm: (Hot→Warm) e (Hot→Cold, pois precisa Warm primeiro)
+        let to_warm_ids: Vec<String> = changes
+            .iter()
+            .filter_map(|(id, new_tier)| {
+                let current = tiers_snapshot.get(id)?;
+                match (current, new_tier) {
+                    (StorageTier::Hot, StorageTier::Warm) => Some(id.clone()),
+                    (StorageTier::Hot, StorageTier::Cold) => Some(id.clone()),
+                    _ => None,
                 }
-                _ => {}
-            }
-        }
+            })
+            .collect();
 
+        // IDs para demote_to_cold: todos que devem terminar em Cold (já Warm após batch warm)
+        let to_cold_ids: Vec<String> = changes
+            .iter()
+            .filter_map(|(id, new_tier)| {
+                if *new_tier == StorageTier::Cold {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Batch: primeiro todos para Warm, depois todos para Cold
+        let demoted_to_warm = self.demote_batch_to_warm(&to_warm_ids)?;
+        let demoted_to_cold = self.demote_batch_to_cold(&to_cold_ids)?;
+
+        let compaction_ms = compaction_start.elapsed().as_millis();
         let result = CompactionResult {
             demoted_to_warm,
             demoted_to_cold,
@@ -963,6 +1299,7 @@ impl TieredCollection {
 
         if result.total_changes > 0 {
             info!(
+                compaction_ms,
                 demoted_warm = demoted_to_warm,
                 demoted_cold = demoted_to_cold,
                 "tiered compaction completed"
@@ -1005,6 +1342,61 @@ impl TieredCollection {
             warm_memory_bytes: warm * (metadata_est + 64),
             cold_memory_bytes: cold * 64,
         }
+    }
+
+    /// Recupera um ponto de qualquer tier **sem promoção automática**.
+    ///
+    /// Diferente de [`get`], este método NÃO promove o ponto para Hot.
+    /// É projetado para hidratação de resultados de busca, onde queremos
+    /// os dados do ponto (especialmente metadata para filtros) mas sem
+    /// adicionar latência de escrita (promoção) no caminho de leitura.
+    ///
+    /// Em vez disso, registra o acesso no [`AccessTracker`] para que o
+    /// próximo ciclo de compactação possa promover pontos acessados com
+    /// frequência (promoção lazy/implícita).
+    ///
+    /// # Performance
+    ///
+    /// | Tier | Latência | Operação |
+    /// |------|----------|----------|
+    /// | Hot  | ~0 µs    | HashMap lookup (RAM) |
+    /// | Warm | ~1-10 µs | mmap read + HashMap lookup |
+    /// | Cold | ~100+ µs | Disk I/O (JSON deserialization) |
+    ///
+    /// **Atenção**: carregar pontos Cold durante busca adiciona latência
+    /// significativa. Para workloads com muitos pontos Cold nos resultados,
+    /// considere ajustar `warm_threshold_hours` para manter mais pontos
+    /// em Warm (mmap), que tem latência muito menor que disco.
+    ///
+    /// # Retorno
+    ///
+    /// `Some(Point)` se encontrado em qualquer tier, `None` se o ponto
+    /// não existe em nenhum tier.
+    pub fn get_from_any_tier(&self, id: &str) -> Option<Point> {
+        // 1. Tenta Hot (in-memory, via Collection HashMap)
+        if let Some(p) = self.collection.get(id) {
+            return Some(p.clone());
+        }
+
+        // 2. Tenta Warm (mmap vector + in-memory metadata)
+        if let Ok(Some(p)) = self.hydrate_from_warm(id) {
+            // Registra acesso para promoção lazy no próximo ciclo de compactação
+            if let Ok(mut tracker) = self.access_tracker.lock() {
+                tracker.record_access(id);
+            }
+            return Some(p);
+        }
+
+        // 3. Tenta Cold (disk I/O)
+        if let Ok(Some(p)) = self.hydrate_from_cold(id) {
+            // Registra acesso para promoção lazy
+            if let Ok(mut tracker) = self.access_tracker.lock() {
+                tracker.record_access(id);
+            }
+            return Some(p);
+        }
+
+        None
     }
 
     /// Retorna referência à coleção interna.
@@ -1263,6 +1655,110 @@ mod tests {
     }
 
     #[test]
+    fn test_cold_point_path_no_collision() {
+        let tmp = std::env::temp_dir().join("ferres_test_cold_no_collision");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let cold = ColdStorage::new(&tmp).unwrap();
+
+        // "doc/1" e "doc_1" devem gerar paths diferentes (antes collidiam)
+        let path_slash = cold.point_path("doc/1");
+        let path_underscore = cold.point_path("doc_1");
+
+        assert_ne!(
+            path_slash, path_underscore,
+            "IDs 'doc/1' and 'doc_1' must map to different file paths"
+        );
+
+        // Verificação extra: os nomes devem ser os esperados
+        assert!(path_slash.to_string_lossy().contains("doc%2F1.json"));
+        assert!(path_underscore.to_string_lossy().contains("doc_1.json"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_cold_point_path_special_chars() {
+        let tmp = std::env::temp_dir().join("ferres_test_cold_special");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let cold = ColdStorage::new(&tmp).unwrap();
+
+        let ids = [
+            "simple",
+            "with/slash",
+            "with:colon",
+            "with space",
+            "with/multiple/slashes",
+            "unicode_café",
+            "mix/of:special chars!",
+        ];
+
+        // Todos devem gerar paths distintas
+        let paths: Vec<PathBuf> = ids.iter().map(|id| cold.point_path(id)).collect();
+        for (i, p1) in paths.iter().enumerate() {
+            for (j, p2) in paths.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        p1, p2,
+                        "IDs '{}' and '{}' must map to different paths",
+                        ids[i], ids[j]
+                    );
+                }
+            }
+        }
+
+        // Verificar que os paths não contêm caracteres problemáticos de filesystem
+        for (id, path) in ids.iter().zip(paths.iter()) {
+            let filename = path.file_name().unwrap().to_string_lossy();
+            assert!(
+                !filename.contains('/') && !filename.contains('\\'),
+                "path for ID '{}' contains filesystem separators: {}",
+                id,
+                filename
+            );
+            assert!(
+                filename.ends_with(".json"),
+                "path for ID '{}' must end with .json: {}",
+                id,
+                filename
+            );
+        }
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_cold_roundtrip_special_id() {
+        let tmp = std::env::temp_dir().join("ferres_test_cold_special_rt");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let cold = ColdStorage::new(&tmp).unwrap();
+
+        let special_ids = [
+            "doc/1",
+            "ns:item:42",
+            "hello world",
+            "café☕",
+        ];
+
+        for id in &special_ids {
+            let point = make_point(id, vec![1.0, 2.0, 3.0]);
+            cold.save_point(&point).unwrap();
+            assert!(cold.contains(id), "cold storage should contain '{}'", id);
+
+            let loaded = cold.load_point(id).unwrap();
+            assert_eq!(loaded.id, *id);
+            assert_eq!(loaded.vector, vec![1.0, 2.0, 3.0]);
+
+            cold.remove_point(id);
+            assert!(!cold.contains(id), "cold storage should not contain '{}' after removal", id);
+        }
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_warm_storage_roundtrip() {
         let tmp = std::env::temp_dir().join("ferres_test_warm_rt");
         let _ = fs::remove_dir_all(&tmp);
@@ -1284,6 +1780,59 @@ mod tests {
     }
 
     #[test]
+    fn test_warm_storage_flush() {
+        let tmp = std::env::temp_dir().join("ferres_test_warm_flush");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let mut warm = WarmStorage::new(&tmp, 3).unwrap();
+
+        warm.add_vector("f1", &[1.0, 2.0, 3.0]).unwrap();
+        warm.add_vector("f2", &[4.0, 5.0, 6.0]).unwrap();
+
+        // Flush força tudo para disco
+        warm.flush().unwrap();
+
+        // Reabre e verifica que dados persistem
+        let warm2 = WarmStorage::new(&tmp, 3).unwrap();
+        assert_eq!(warm2.len(), 2);
+        assert!(warm2.contains("f1"));
+        assert!(warm2.contains("f2"));
+        assert_eq!(warm2.read_vector("f1").unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(warm2.read_vector("f2").unwrap(), vec![4.0, 5.0, 6.0]);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_warm_storage_atomic_index() {
+        let tmp = std::env::temp_dir().join("ferres_test_warm_atomic_idx");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let mut warm = WarmStorage::new(&tmp, 3).unwrap();
+        warm.add_vector("a1", &[1.0, 2.0, 3.0]).unwrap();
+
+        // Após add_vector, o arquivo .tmp deve ter sido renomeado (não deve existir)
+        let tmp_index = tmp.join("warm_index.json.tmp");
+        assert!(
+            !tmp_index.exists(),
+            "warm_index.json.tmp should not exist after successful save"
+        );
+
+        // O índice final deve existir
+        let index_path = tmp.join("warm_index.json");
+        assert!(index_path.exists(), "warm_index.json should exist");
+
+        // Verifica conteúdo do índice
+        let index_data: HashMap<String, usize> =
+            serde_json::from_str(&fs::read_to_string(&index_path).unwrap()).unwrap();
+        assert!(index_data.contains_key("a1"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_search_across_tiers() {
         let config = test_config();
         let collection = Collection::new(config);
@@ -1300,8 +1849,11 @@ mod tests {
 
         let mut tc = TieredCollection::new(collection, tiered_config, Some(&tmp)).unwrap();
 
-        // Insere 3 pontos
+        // Insere 5 pontos (mais pontos = grafo HNSW mais bem conectado,
+        // evitando flakiness com grafos muito pequenos).
         tc.insert(make_point("hot1", vec![1.0, 0.0, 0.0])).unwrap();
+        tc.insert(make_point("hot2", vec![0.5, 0.5, 0.0])).unwrap();
+        tc.insert(make_point("hot3", vec![0.0, 0.0, 1.0])).unwrap();
         tc.insert(make_point("warm1", vec![0.0, 1.0, 0.0])).unwrap();
         tc.insert(make_point("cold1", vec![0.9, 0.1, 0.0])).unwrap();
 
@@ -1311,20 +1863,161 @@ mod tests {
         tc.demote_to_cold("cold1").unwrap();
 
         assert_eq!(tc.point_tier("hot1"), Some(StorageTier::Hot));
+        assert_eq!(tc.point_tier("hot2"), Some(StorageTier::Hot));
+        assert_eq!(tc.point_tier("hot3"), Some(StorageTier::Hot));
         assert_eq!(tc.point_tier("warm1"), Some(StorageTier::Warm));
         assert_eq!(tc.point_tier("cold1"), Some(StorageTier::Cold));
 
-        // Busca deve retornar resultados de TODOS os tiers
-        // (porque o HNSW tem o grafo completo)
-        let results = tc.search(&[1.0, 0.0, 0.0], 3).unwrap();
-        // Nota: HNSW retorna resultados baseado no grafo que tem todos os pontos indexados.
-        // Pontos que foram removidos da collection ficam como tombstone no HNSW,
-        // então warm1 e cold1 não aparecerão na busca via collection.search().
-        // O resultado real é apenas hot1 (os outros foram removidos da collection ao demover).
-        // Isso é o comportamento esperado: o HNSW mantém o grafo mas a collection
-        // filtra pelos pontos existentes.
-        assert!(!results.is_empty());
+        // Busca HNSW retorna IDs de pontos em TODOS os tiers
+        // (porque demote usa remove_data_only, sem tombstone no HNSW).
+        let results = tc.search(&[1.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(results.len(), 5, "HNSW search must return points from all tiers");
+
+        // hot1 deve ser o mais próximo de [1,0,0]
         assert_eq!(results[0].0, "hot1");
+
+        // Pontos em todos os tiers devem estar presentes
+        let result_ids: std::collections::HashSet<&str> =
+            results.iter().map(|r| r.0.as_str()).collect();
+        assert!(result_ids.contains("hot1"), "hot point must appear in results");
+        assert!(result_ids.contains("warm1"), "warm point must appear in results");
+        assert!(result_ids.contains("cold1"), "cold point must appear in results");
+
+        // get_from_any_tier deve encontrar pontos em todos os tiers
+        let hot_point = tc.get_from_any_tier("hot1");
+        assert!(hot_point.is_some(), "get_from_any_tier must find hot points");
+        assert_eq!(hot_point.unwrap().vector, vec![1.0, 0.0, 0.0]);
+
+        let warm_point = tc.get_from_any_tier("warm1");
+        assert!(warm_point.is_some(), "get_from_any_tier must find warm points");
+        assert_eq!(warm_point.unwrap().vector, vec![0.0, 1.0, 0.0]);
+
+        let cold_point = tc.get_from_any_tier("cold1");
+        assert!(cold_point.is_some(), "get_from_any_tier must find cold points");
+        assert_eq!(cold_point.unwrap().vector, vec![0.9, 0.1, 0.0]);
+
+        // Ponto inexistente retorna None
+        assert!(tc.get_from_any_tier("nonexistent").is_none());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_search_with_filter_across_tiers() {
+        use serde_json::json;
+
+        let config = CollectionConfig {
+            name: "test_filter_tiered".to_string(),
+            dimension: 3,
+            distance: DistanceMetric::Euclidean,
+            hnsw: HnswConfig::default(),
+            search_cache_size: 0,
+            enable_bm25: false,
+            bm25_text_field: "text".to_string(),
+            quantization: QuantizationConfig::default(),
+            tiered_storage: TieredStorageConfig::default(),
+        };
+        let collection = Collection::new(config);
+        let tiered_cfg = TieredStorageConfig {
+            enabled: true,
+            hot_threshold_hours: 24,
+            warm_threshold_hours: 168,
+            compaction_interval_secs: 3600,
+        };
+
+        let tmp = std::env::temp_dir().join("ferres_test_tiered_filter_search");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let mut tc = TieredCollection::new(collection, tiered_cfg, Some(&tmp)).unwrap();
+
+        // Insere pontos com metadata variada
+        let p_hot = Point::new("hot_tech", vec![1.0, 0.0, 0.0], json!({"category": "tech", "status": "active"})).unwrap();
+        let p_warm = Point::new("warm_tech", vec![0.9, 0.1, 0.0], json!({"category": "tech", "status": "inactive"})).unwrap();
+        let p_cold = Point::new("cold_sci", vec![0.0, 1.0, 0.0], json!({"category": "science", "status": "active"})).unwrap();
+        let p_warm2 = Point::new("warm_tech2", vec![0.8, 0.2, 0.0], json!({"category": "tech", "status": "active"})).unwrap();
+
+        tc.insert(p_hot).unwrap();
+        tc.insert(p_warm).unwrap();
+        tc.insert(p_cold).unwrap();
+        tc.insert(p_warm2).unwrap();
+
+        // Demove pontos para diferentes tiers
+        tc.demote_to_warm("warm_tech").unwrap();
+        tc.demote_to_warm("warm_tech2").unwrap();
+        tc.demote_to_warm("cold_sci").unwrap();
+        tc.demote_to_cold("cold_sci").unwrap();
+
+        assert_eq!(tc.point_tier("hot_tech"), Some(StorageTier::Hot));
+        assert_eq!(tc.point_tier("warm_tech"), Some(StorageTier::Warm));
+        assert_eq!(tc.point_tier("warm_tech2"), Some(StorageTier::Warm));
+        assert_eq!(tc.point_tier("cold_sci"), Some(StorageTier::Cold));
+
+        // HNSW search deve retornar todos os 4 pontos
+        let all_results = tc.search(&[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(all_results.len(), 4, "HNSW must return all 4 points");
+
+        // Simula busca com filtro: category=tech
+        // Deve encontrar hot_tech (Hot), warm_tech (Warm), warm_tech2 (Warm)
+        // Não deve encontrar cold_sci (category=science)
+        let mut tech_results = Vec::new();
+        for (id, score) in &all_results {
+            if let Some(point) = tc.get_from_any_tier(id) {
+                if point.metadata.get("category") == Some(&json!("tech")) {
+                    tech_results.push((id.clone(), *score, point));
+                }
+            }
+        }
+
+        assert_eq!(
+            tech_results.len(), 3,
+            "filter category=tech must match 3 points (1 hot + 2 warm), got: {:?}",
+            tech_results.iter().map(|r| &r.0).collect::<Vec<_>>()
+        );
+
+        // Verifica que os pontos corretos foram encontrados
+        let tech_ids: std::collections::HashSet<&str> =
+            tech_results.iter().map(|r| r.0.as_str()).collect();
+        assert!(tech_ids.contains("hot_tech"), "hot_tech must pass category=tech filter");
+        assert!(tech_ids.contains("warm_tech"), "warm_tech must pass category=tech filter");
+        assert!(tech_ids.contains("warm_tech2"), "warm_tech2 must pass category=tech filter");
+
+        // Filtro mais restritivo: category=tech AND status=active
+        // Deve encontrar hot_tech (Hot) e warm_tech2 (Warm)
+        // warm_tech tem status=inactive, então não deve passar
+        let mut active_tech = Vec::new();
+        for (id, score) in &all_results {
+            if let Some(point) = tc.get_from_any_tier(id) {
+                let is_tech = point.metadata.get("category") == Some(&json!("tech"));
+                let is_active = point.metadata.get("status") == Some(&json!("active"));
+                if is_tech && is_active {
+                    active_tech.push((id.clone(), *score));
+                }
+            }
+        }
+
+        assert_eq!(
+            active_tech.len(), 2,
+            "filter category=tech AND status=active must match 2 points, got: {:?}",
+            active_tech.iter().map(|r| &r.0).collect::<Vec<_>>()
+        );
+
+        let active_ids: std::collections::HashSet<&str> =
+            active_tech.iter().map(|r| r.0.as_str()).collect();
+        assert!(active_ids.contains("hot_tech"));
+        assert!(active_ids.contains("warm_tech2"));
+
+        // Filtro que só matcheia ponto Cold: category=science
+        let mut sci_results = Vec::new();
+        for (id, _score) in &all_results {
+            if let Some(point) = tc.get_from_any_tier(id) {
+                if point.metadata.get("category") == Some(&json!("science")) {
+                    sci_results.push(id.clone());
+                }
+            }
+        }
+        assert_eq!(sci_results.len(), 1, "only cold_sci should match category=science");
+        assert_eq!(sci_results[0], "cold_sci");
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1402,6 +2095,68 @@ mod tests {
         // "old" deve ter sido demovido para Warm (2h > hot_threshold=1h, < warm_threshold=5h)
         assert_eq!(tc.point_tier("old"), Some(StorageTier::Warm));
         assert_eq!(tc.point_tier("recent"), Some(StorageTier::Hot));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_compaction_large_collection() {
+        let config = test_config();
+        let collection = Collection::new(config);
+        let tiered_cfg = TieredStorageConfig {
+            enabled: true,
+            hot_threshold_hours: 24,
+            warm_threshold_hours: 168,
+            compaction_interval_secs: 1,
+        };
+
+        let tmp = std::env::temp_dir().join("ferres_test_compaction_large");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let mut tc = TieredCollection::new(collection, tiered_cfg, Some(&tmp)).unwrap();
+
+        // Insere 1000 pontos
+        for i in 0..1000 {
+            let mut vec = vec![0.0f32; 3];
+            vec[i % 3] = 1.0;
+            tc.insert(make_point(&format!("p{i}"), vec)).unwrap();
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Simula acessos variados: 0..300 recentes (Hot), 300..700 há 2 dias (Warm), 700..1000 há 10 dias (Cold)
+        if let Ok(mut tracker) = tc.access_tracker.lock() {
+            for i in 0..300 {
+                tracker.record_access_at(&format!("p{i}"), now);
+            }
+            for i in 300..700 {
+                tracker.record_access_at(&format!("p{i}"), now - 48 * 3600);
+            }
+            for i in 700..1000 {
+                tracker.record_access_at(&format!("p{i}"), now - 240 * 3600);
+            }
+        }
+
+        // Roda compactação
+        let result = tc.run_compaction().unwrap();
+
+        // Verifica distribuição: ~300 hot, ~400 warm, ~300 cold
+        let dist = tc.tier_distribution();
+        assert_eq!(dist.hot, 300, "expected 300 hot");
+        assert_eq!(dist.warm, 400, "expected 400 warm");
+        assert_eq!(dist.cold, 300, "expected 300 cold");
+
+        assert_eq!(result.demoted_to_warm, 700, "400 hot->warm + 300 hot->cold (then cold batch)");
+        assert_eq!(result.demoted_to_cold, 300, "300 demoted to cold");
+
+        // Amostra: p0 deve estar Hot, p400 Warm, p700 Cold
+        assert_eq!(tc.point_tier("p0"), Some(StorageTier::Hot));
+        assert_eq!(tc.point_tier("p400"), Some(StorageTier::Warm));
+        assert_eq!(tc.point_tier("p700"), Some(StorageTier::Cold));
 
         let _ = fs::remove_dir_all(&tmp);
     }

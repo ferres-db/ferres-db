@@ -90,7 +90,7 @@ pub fn normalize_endpoint(path: &str) -> String {
             let collection_name = &after_collections[..next_slash];
             // Substitui o nome da coleção por :name
             return path.replace(
-                &format!("/collections/{}", collection_name),
+                &format!("/collections/{collection_name}"),
                 "/collections/:name"
             );
         }
