@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Carrega configuração
     let config = ServerConfig::load().map_err(|e| {
-        eprintln!("Failed to load configuration: {}", e);
+        eprintln!("Failed to load configuration: {e}");
         e
     })?;
 
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_level = config.log_level.clone();
     let log_dir = config.storage_path.join("logs");
     std::fs::create_dir_all(&log_dir).map_err(|e| {
-        eprintln!("Failed to create log directory: {}", e);
+        eprintln!("Failed to create log directory: {e}");
         e
     })?;
 
@@ -88,6 +88,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("FerresDB server starting...");
 
+    if config.api_keys.as_ref().map_or(true, |s| s.trim().is_empty()) {
+        warn!(
+            "No API keys configured. Set api_keys in config.toml or FERRESDB_API_KEYS env; \
+             all protected routes will return 403 Invalid API key."
+        );
+    }
+
     // Inicializa store de API keys (SQLite) e opcionalmente chaves bootstrap do config/env
     let api_keys_path = config.storage_path.join("api_keys.db");
     let api_key_store = ApiKeyStore::new(&api_keys_path).map_err(|e| {
@@ -95,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         e
     })?;
     api_key_store.init(config.api_keys.as_deref()).map_err(|e| {
-        eprintln!("Failed to initialize API key store: {}", e);
+        eprintln!("Failed to initialize API key store: {e}");
         e
     })?;
     let api_key_store = Some(Arc::new(api_key_store));
@@ -111,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         e
     })?;
     user_store.ensure_default_user().map_err(|e| {
-        eprintln!("Failed to ensure default user: {}", e);
+        eprintln!("Failed to ensure default user: {e}");
         e
     })?;
     let user_store = Some(Arc::new(user_store));
@@ -164,28 +171,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Limite de body: default do Axum é 2MB; upserts com muitos pontos (vetores + metadata) podem exceder.
     const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 
-    // Configura CORS: CORS_ORIGINS (vírgula) em runtime, senão defaults (localhost)
+    // Configura CORS: CORS_ORIGINS (vírgula) em runtime; senão aceita qualquer localhost/127.0.0.1 (qualquer porta)
+    use axum::http::request::Parts as RequestParts;
     use axum::http::{Method, HeaderValue};
-    let default_origins: Vec<HeaderValue> = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ]
-    .iter()
-    .map(|s| s.parse().unwrap())
-    .collect();
-    let cors_origins: Vec<HeaderValue> = std::env::var("CORS_ORIGINS")
-        .ok()
-        .map(|s| {
-            s.split(',')
+    let cors_origin = match std::env::var("CORS_ORIGINS") {
+        Ok(s) => {
+            let origins: Vec<HeaderValue> = s
+                .split(',')
                 .filter_map(|o| o.trim().parse::<HeaderValue>().ok())
-                .collect()
-        })
-        .filter(|v: &Vec<_>| !v.is_empty())
-        .unwrap_or(default_origins);
+                .collect();
+            if origins.is_empty() {
+                tower_http::cors::AllowOrigin::predicate(
+                    |origin: &HeaderValue, _: &RequestParts| {
+                        origin.to_str().map_or(false, |s| {
+                            s.starts_with("http://localhost:")
+                                || s.starts_with("http://127.0.0.1:")
+                        })
+                    },
+                )
+            } else {
+                tower_http::cors::AllowOrigin::list(origins)
+            }
+        }
+        Err(_) => tower_http::cors::AllowOrigin::predicate(
+            |origin: &HeaderValue, _: &RequestParts| {
+                origin.to_str().map_or(false, |s| {
+                    s.starts_with("http://localhost:")
+                        || s.starts_with("http://127.0.0.1:")
+                })
+            },
+        ),
+    };
     let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::list(cors_origins))
+        .allow_origin(cors_origin)
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -198,6 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
+            axum::http::header::HeaderName::from_static("x-requested-with"),
         ])
         .allow_credentials(true);
 
@@ -299,6 +318,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = app_state.save_all_collections() {
         error!(error = %e, "failed to save collections during shutdown");
     }
+
+    // Flush final do audit logger (garante que nenhuma entry pendente é perdida)
+    app_state.audit_logger.shutdown().await;
 
     info!("server shutdown complete");
     Ok(())

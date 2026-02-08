@@ -387,7 +387,7 @@ impl FileStorage {
 
         // 3. checksum.md5
         let digest = md5::compute(lines.as_bytes());
-        let checksum = format!("{:x}", digest);
+        let checksum = format!("{digest:x}");
         Self::atomic_write(&path.join("checksum.md5"), checksum.as_bytes())?;
 
         // 4. index.bin — snapshot binário de metadados do índice

@@ -56,7 +56,7 @@ async fn setup_server() -> TestServer {
         )
         .with_state(app_state);
 
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -71,7 +71,7 @@ async fn setup_server() -> TestServer {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let base_url = format!("http://127.0.0.1:{}", port);
+    let base_url = format!("http://127.0.0.1:{port}");
 
     TestServer {
         base_url,
@@ -89,7 +89,7 @@ async fn test_requires_api_key() {
 
     // Sem API key = 401
     let res = client
-        .get(&format!("{}/api/v1/collections", server.base_url))
+        .get(format!("{}/api/v1/collections", server.base_url))
         .send()
         .await
         .unwrap();
@@ -97,7 +97,7 @@ async fn test_requires_api_key() {
 
     // Com API key inválida = 403
     let res = client
-        .get(&format!("{}/api/v1/collections", server.base_url))
+        .get(format!("{}/api/v1/collections", server.base_url))
         .header("Authorization", "Bearer wrong-key")
         .send()
         .await
@@ -106,8 +106,8 @@ async fn test_requires_api_key() {
 
     // Com API key válida = 200
     let res = client
-        .get(&format!("{}/api/v1/collections", server.base_url))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .get(format!("{}/api/v1/collections", server.base_url))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .send()
         .await
         .unwrap();
@@ -121,7 +121,7 @@ async fn test_health_endpoint_public() {
 
     // Health não requer API key
     let res = client
-        .get(&format!("{}/health", server.base_url))
+        .get(format!("{}/health", server.base_url))
         .send()
         .await
         .unwrap();
@@ -135,7 +135,7 @@ async fn test_metrics_endpoint_public() {
 
     // Metrics não requer API key
     let res = client
-        .get(&format!("{}/metrics", server.base_url))
+        .get(format!("{}/metrics", server.base_url))
         .send()
         .await
         .unwrap();
@@ -149,7 +149,7 @@ async fn test_save_endpoint_protected() {
 
     // Save sem API key = 401
     let res = client
-        .post(&format!("{}/api/v1/save", server.base_url))
+        .post(format!("{}/api/v1/save", server.base_url))
         .send()
         .await
         .unwrap();
@@ -157,8 +157,8 @@ async fn test_save_endpoint_protected() {
 
     // Save com API key válida = 200
     let res = client
-        .post(&format!("{}/api/v1/save", server.base_url))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .post(format!("{}/api/v1/save", server.base_url))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .send()
         .await
         .unwrap();
@@ -172,7 +172,7 @@ async fn test_malformed_auth_header() {
 
     // Sem prefixo "Bearer " = 401
     let res = client
-        .get(&format!("{}/api/v1/collections", server.base_url))
+        .get(format!("{}/api/v1/collections", server.base_url))
         .header("Authorization", TEST_API_KEY)
         .send()
         .await
@@ -181,8 +181,8 @@ async fn test_malformed_auth_header() {
 
     // Prefixo errado = 401
     let res = client
-        .get(&format!("{}/api/v1/collections", server.base_url))
-        .header("Authorization", format!("Basic {}", TEST_API_KEY))
+        .get(format!("{}/api/v1/collections", server.base_url))
+        .header("Authorization", format!("Basic {TEST_API_KEY}"))
         .send()
         .await
         .unwrap();

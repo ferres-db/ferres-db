@@ -22,16 +22,14 @@ pub async fn save_collections(
     api_err!(app_state.save_all_collections(), "failed to save collections")?;
 
     // Audit trail
-    let audit_logger = app_state.audit_logger.clone();
-    let username = user.username.clone();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &username, "save", "system:collections",
+            &user.username, "save", "system:collections",
             json!({}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        app_state.audit_logger.log(&entry);
+    }
 
     Ok(Json(json!({ "ok": true })))
 }

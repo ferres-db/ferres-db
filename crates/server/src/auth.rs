@@ -122,7 +122,7 @@ pub async fn require_api_key(
             if let Ok(token_data) =
                 decode::<JwtClaims>(api_key, &DecodingKey::from_secret(secret), &validation)
             {
-                let role = Role::from_str(&token_data.claims.role).unwrap_or(Role::Viewer);
+                let role = token_data.claims.role.parse().unwrap_or(Role::Viewer);
 
                 // Carrega permissões granulares do UserStore (se disponível)
                 // Admin bypassa: não precisa de permissões granulares
@@ -300,8 +300,7 @@ pub fn check_user_permission(
             match action {
                 Action::Read => PermissionResult::Allowed,
                 _ => PermissionResult::Denied(format!(
-                    "viewers can only read; action '{}' denied",
-                    action
+                    "viewers can only read; action '{action}' denied"
                 )),
             }
         }

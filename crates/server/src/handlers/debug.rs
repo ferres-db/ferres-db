@@ -21,7 +21,7 @@ pub async fn get_query_profile(
         .get(&query_id)
         .map(|r| r.value().clone())
         .ok_or_else(|| ApiError::QueryProfileNotFound {
-            message: format!("query profile '{}' not found", query_id),
+            message: format!("query profile '{query_id}' not found"),
         })?;
     Ok(Json(profile))
 }

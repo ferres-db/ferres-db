@@ -142,7 +142,7 @@ fn extract_collection_and_operation(path: &str) -> (Option<String>, Option<Strin
                 } else {
                     Some("points".to_string())
                 }
-            } else if path.ends_with(&format!("/collections/{}", collection_name)) {
+            } else if path.ends_with(&format!("/collections/{collection_name}")) {
                 Some("get_collection".to_string())
             } else {
                 None

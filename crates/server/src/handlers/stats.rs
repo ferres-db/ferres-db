@@ -19,6 +19,8 @@ pub struct CollectionStatsResponse {
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
     pub p99_latency_ms: f64,
+    /// Estimated bytes held by tombstoned points until next reindex (quantized index only).
+    pub tombstone_memory_waste_bytes: usize,
 }
 
 // ─── Global stats (analytics: lê de queries.log, cache 1h) ───────────────
@@ -97,10 +99,10 @@ pub async fn get_collection_stats(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    // Obtém número de pontos
-    let num_points = {
+    // Obtém número de pontos e waste de tombstones
+    let (num_points, tombstone_memory_waste_bytes) = {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-        collection.len()
+        (collection.len(), collection.tombstone_memory_waste())
     };
 
     // Obtém estatísticas de queries
@@ -122,6 +124,7 @@ pub async fn get_collection_stats(
         p50_latency_ms,
         p95_latency_ms,
         p99_latency_ms,
+        tombstone_memory_waste_bytes,
     }))
 }
 

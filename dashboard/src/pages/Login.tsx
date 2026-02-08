@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { authApi, setStoredToken, setStoredRole } from '@/api/ferresdb';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
+import { Card, CardContent, CardHeader } from '@/components/ui/Card';
 
 export const Login = () => {
   const navigate = useNavigate();
@@ -16,7 +16,7 @@ export const Login = () => {
     e.preventDefault();
     setError('');
     if (!username.trim() || !password) {
-      setError('Preencha usuário e senha');
+      setError('Enter username and password');
       return;
     }
     setLoading(true);
@@ -28,7 +28,7 @@ export const Login = () => {
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-        'Usuário ou senha inválidos';
+        'Invalid username or password';
       setError(msg);
     } finally {
       setLoading(false);
@@ -39,13 +39,15 @@ export const Login = () => {
     <div className="flex min-h-screen items-center justify-center bg-bg-primary p-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle className="text-center text-xl">FerresDB Dashboard</CardTitle>
-          <p className="text-center text-sm text-gray-500">Entre com sua conta</p>
+          <div className="flex justify-center mb-2">
+            <img src="/logo.png" alt="FerresDB" className="h-10 w-auto object-contain" />
+          </div>
+          <p className="text-center text-sm text-gray-500">Sign in to your account</p>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="mb-1 block text-sm font-medium">Usuário</label>
+              <label className="mb-1 block text-sm font-medium">Username</label>
               <Input
                 type="text"
                 value={username}
@@ -56,7 +58,7 @@ export const Login = () => {
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium">Senha</label>
+              <label className="mb-1 block text-sm font-medium">Password</label>
               <Input
                 type="password"
                 value={password}
@@ -67,11 +69,11 @@ export const Login = () => {
             </div>
             {error && <p className="text-sm text-red-400">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? 'Entrando…' : 'Entrar'}
+              {loading ? 'Signing in…' : 'Sign in'}
             </Button>
           </form>
           <p className="mt-4 text-center text-xs text-gray-500">
-            Padrão: usuário <code className="rounded bg-bg-tertiary px-1">root</code>, senha{' '}
+            Default: username <code className="rounded bg-bg-tertiary px-1">root</code>, password{' '}
             <code className="rounded bg-bg-tertiary px-1">ferresdb</code>
           </p>
         </CardContent>

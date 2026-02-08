@@ -22,9 +22,18 @@ use ferres_db_core::{
     Point,
 };
 
+use dashmap::DashMap;
+
 use crate::api_err;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+
+/// Maximum number of completed/failed reindex jobs to keep in memory.
+/// When this limit is exceeded, the oldest completed/failed jobs are evicted.
+const MAX_COMPLETED_REINDEX_JOBS: usize = 50;
+
+/// Threshold in bytes above which reindex logs a memory warning (~2 GB).
+const REINDEX_MEMORY_WARNING_THRESHOLD: usize = 2_000_000_000;
 
 // ─── Response types ──────────────────────────────────────────────────────
 
@@ -88,12 +97,53 @@ fn has_running_job(app_state: &AppState, collection: &str) -> bool {
     false
 }
 
+/// Remove old completed/failed reindex jobs when the count exceeds `max_completed`.
+///
+/// Jobs with status `Queued`, `Building`, or `Swapping` are **never** removed.
+/// Among finished jobs (Completed/Failed), the oldest ones (by `completed_at`)
+/// are evicted first.
+fn cleanup_old_reindex_jobs(
+    jobs: &DashMap<String, Arc<RwLock<ReindexJob>>>,
+    max_completed: usize,
+) {
+    // 1. Collect all finished jobs with their completed_at timestamps
+    let mut finished: Vec<(String, u64)> = Vec::new();
+
+    for entry in jobs.iter() {
+        if let Ok(job) = entry.value().read() {
+            if matches!(job.status, ReindexStatus::Completed | ReindexStatus::Failed) {
+                let ts = job.completed_at.unwrap_or(0);
+                finished.push((entry.key().clone(), ts));
+            }
+        }
+    }
+
+    // 2. If within limits, nothing to do
+    if finished.len() <= max_completed {
+        return;
+    }
+
+    // 3. Sort by completed_at ascending (oldest first)
+    finished.sort_by_key(|&(_, ts)| ts);
+
+    // 4. Remove the oldest entries that exceed the limit
+    let to_remove = finished.len() - max_completed;
+    for (job_id, _) in finished.into_iter().take(to_remove) {
+        jobs.remove(&job_id);
+    }
+}
+
 // ─── Handlers ────────────────────────────────────────────────────────────
 
 /// Handler for POST /api/v1/collections/{name}/reindex
 ///
 /// Starts a background reindex job for the specified collection.
 /// Returns 409 if a reindex is already running for this collection.
+///
+/// **Memory note:** Reindex temporarily requires approximately 2× the
+/// collection's memory: one copy for the existing index (serving queries)
+/// and one for the new index being built from the snapshot.
+/// For a 1M × 384 collection (~1.5 GB), expect ~3 GB peak usage.
 pub async fn start_reindex(
     State(app_state): State<AppState>,
     Path(name): Path<String>,
@@ -126,6 +176,18 @@ pub async fn start_reindex(
         (pts, ids, cfg, tc)
     };
 
+    let estimated_memory = estimate_index_size(
+        snapshot_points.len(),
+        config.dimension,
+        config.hnsw.max_nb_connection,
+    ) * 2;
+    if estimated_memory > REINDEX_MEMORY_WARNING_THRESHOLD {
+        warn!(
+            estimated_memory_gb = estimated_memory as f64 / 1e9,
+            "reindex will require significant memory"
+        );
+    }
+
     // Populate initial stats
     job.stats.points_total = snapshot_points.len();
     job.stats.tombstones_cleaned = tombstone_count_before;
@@ -137,6 +199,9 @@ pub async fn start_reindex(
     app_state
         .reindex_jobs
         .insert(job_id.clone(), job_arc.clone());
+
+    // Evict old completed/failed jobs to prevent unbounded memory growth
+    cleanup_old_reindex_jobs(&app_state.reindex_jobs, MAX_COMPLETED_REINDEX_JOBS);
 
     info!(
         job_id = %job_id,
@@ -399,6 +464,9 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
         .reindex_jobs
         .insert(job_id.clone(), job_arc.clone());
 
+    // Evict old completed/failed jobs to prevent unbounded memory growth
+    cleanup_old_reindex_jobs(&app_state.reindex_jobs, MAX_COMPLETED_REINDEX_JOBS);
+
     let job_id_bg = job_id;
     let name_bg = collection_name.to_string();
     let collection_arc_bg = collection_arc;
@@ -475,4 +543,146 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
             }
         }
     });
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create a completed job with a specific `completed_at` timestamp.
+    fn make_completed_job(id: &str, completed_at: u64) -> Arc<RwLock<ReindexJob>> {
+        let mut job = ReindexJob::new(id.to_string(), "test_col".to_string());
+        job.status = ReindexStatus::Completed;
+        job.progress = 1.0;
+        job.completed_at = Some(completed_at);
+        Arc::new(RwLock::new(job))
+    }
+
+    /// Helper: create a failed job with a specific `completed_at` timestamp.
+    fn make_failed_job(id: &str, completed_at: u64) -> Arc<RwLock<ReindexJob>> {
+        let mut job = ReindexJob::new(id.to_string(), "test_col".to_string());
+        job.status = ReindexStatus::Failed;
+        job.error = Some("test error".to_string());
+        job.completed_at = Some(completed_at);
+        Arc::new(RwLock::new(job))
+    }
+
+    #[test]
+    fn test_cleanup_removes_old_completed_jobs() {
+        let jobs: DashMap<String, Arc<RwLock<ReindexJob>>> = DashMap::new();
+
+        // Insert 60 completed jobs with sequential timestamps
+        for i in 0..60 {
+            let id = format!("job-{i}");
+            jobs.insert(id.clone(), make_completed_job(&id, 1000 + i as u64));
+        }
+
+        assert_eq!(jobs.len(), 60);
+
+        cleanup_old_reindex_jobs(&jobs, 50);
+
+        // Should keep exactly 50
+        assert_eq!(jobs.len(), 50);
+
+        // The 10 oldest (job-0 .. job-9) should have been removed
+        for i in 0..10 {
+            assert!(
+                !jobs.contains_key(&format!("job-{i}")),
+                "job-{i} should have been removed (oldest)"
+            );
+        }
+
+        // The 50 newest (job-10 .. job-59) should still be present
+        for i in 10..60 {
+            assert!(
+                jobs.contains_key(&format!("job-{i}")),
+                "job-{i} should still be present"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cleanup_preserves_running_jobs() {
+        let jobs: DashMap<String, Arc<RwLock<ReindexJob>>> = DashMap::new();
+
+        // Insert 55 completed jobs
+        for i in 0..55 {
+            let id = format!("completed-{i}");
+            jobs.insert(id.clone(), make_completed_job(&id, 1000 + i as u64));
+        }
+
+        // Insert active jobs (Queued, Building, Swapping) — these must NEVER be removed
+        let mut queued_job = ReindexJob::new("queued-1".to_string(), "test_col".to_string());
+        queued_job.status = ReindexStatus::Queued;
+        jobs.insert("queued-1".to_string(), Arc::new(RwLock::new(queued_job)));
+
+        let mut building_job = ReindexJob::new("building-1".to_string(), "test_col".to_string());
+        building_job.status = ReindexStatus::Building;
+        jobs.insert("building-1".to_string(), Arc::new(RwLock::new(building_job)));
+
+        let mut swapping_job = ReindexJob::new("swapping-1".to_string(), "test_col".to_string());
+        swapping_job.status = ReindexStatus::Swapping;
+        jobs.insert("swapping-1".to_string(), Arc::new(RwLock::new(swapping_job)));
+
+        // Also add a few failed jobs
+        for i in 0..5 {
+            let id = format!("failed-{i}");
+            jobs.insert(id.clone(), make_failed_job(&id, 500 + i as u64));
+        }
+
+        // Total: 55 completed + 3 active + 5 failed = 63
+        assert_eq!(jobs.len(), 63);
+
+        // Finished = 55 completed + 5 failed = 60, limit = 50 → remove 10 oldest finished
+        cleanup_old_reindex_jobs(&jobs, 50);
+
+        // Active jobs must still be present
+        assert!(jobs.contains_key("queued-1"), "queued job must not be removed");
+        assert!(jobs.contains_key("building-1"), "building job must not be removed");
+        assert!(jobs.contains_key("swapping-1"), "swapping job must not be removed");
+
+        // Count remaining finished jobs
+        let finished_count: usize = jobs
+            .iter()
+            .filter(|entry| {
+                if let Ok(job) = entry.value().read() {
+                    matches!(job.status, ReindexStatus::Completed | ReindexStatus::Failed)
+                } else {
+                    false
+                }
+            })
+            .count();
+
+        assert_eq!(finished_count, 50, "should keep exactly 50 finished jobs");
+
+        // Total = 50 finished + 3 active = 53
+        assert_eq!(jobs.len(), 53);
+    }
+
+    #[test]
+    fn test_cleanup_noop_under_limit() {
+        let jobs: DashMap<String, Arc<RwLock<ReindexJob>>> = DashMap::new();
+
+        // Insert only 30 completed jobs (under limit of 50)
+        for i in 0..30 {
+            let id = format!("job-{i}");
+            jobs.insert(id.clone(), make_completed_job(&id, 1000 + i as u64));
+        }
+
+        assert_eq!(jobs.len(), 30);
+
+        cleanup_old_reindex_jobs(&jobs, 50);
+
+        // Nothing should be removed — all 30 should remain
+        assert_eq!(jobs.len(), 30);
+
+        for i in 0..30 {
+            assert!(
+                jobs.contains_key(&format!("job-{i}")),
+                "job-{i} should still be present (under limit)"
+            );
+        }
+    }
 }

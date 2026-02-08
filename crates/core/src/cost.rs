@@ -80,6 +80,8 @@ pub struct CostEstimateParams {
     pub historical_p50: f64,
     /// P95 histórico de latência da coleção (ms). 0.0 se não há histórico.
     pub historical_p95: f64,
+    /// Se o índice usa quantização (ex: SQ8). Reduz custo de scan e memória estimada.
+    pub is_quantized: bool,
 }
 
 // ─── Constantes de calibração ───────────────────────────────────────────
@@ -132,6 +134,7 @@ const FILTER_EXPANSION_FACTOR: usize = 10;
 ///     filter_conditions_count: 0,
 ///     historical_p50: 2.0,
 ///     historical_p95: 8.0,
+///     is_quantized: false,
 /// };
 ///
 /// let estimate = estimate_search_cost(&params);
@@ -146,9 +149,15 @@ pub fn estimate_search_cost(params: &CostEstimateParams) -> QueryCostEstimate {
     // ── Index scan cost ─────────────────────────────────────────────
     // HNSW busca: O(log(n) * ef_search * dimension) comparações de distância.
     // Cada comparação envolve `dimension` operações f32 (multiply + add).
+    // SQ8 usa distância assimétrica (f32 query vs u8 candidatos)
+    // que é ~3x mais rápido que f32 vs f32 por conta de:
+    // - 4x menos bytes para ler (cache friendly)
+    // - operações u8 mais rápidas
     let log_n = n.ln().max(1.0);
     let index_ops = log_n * ef * dim * 4.0; // 4 bytes por f32
-    let index_scan_cost = index_ops * OPS_TO_MS_FACTOR;
+    let base_scan_cost = index_ops * OPS_TO_MS_FACTOR;
+    let quantization_speedup = if params.is_quantized { 0.35 } else { 1.0 };
+    let index_scan_cost = base_scan_cost * quantization_speedup;
 
     // Nós visitados: ~log(n) * ef_search (cada nó é avaliado no beam search)
     let estimated_nodes_visited = (log_n * ef).ceil() as usize;
@@ -194,9 +203,10 @@ pub fn estimate_search_cost(params: &CostEstimateParams) -> QueryCostEstimate {
     };
 
     // ── Memória estimada ────────────────────────────────────────────
-    // Memória = nós visitados × (vetor + ponteiros HNSW) + resultados finais
-    let visited_memory = estimated_nodes_visited * (params.dimension * 4 + 64); // vetor + overhead
-    let result_memory = limit * (params.dimension * 4 + AVG_METADATA_SIZE_BYTES);
+    // SQ8 usa ~4x menos memória para vetores (u8 vs f32).
+    let bytes_per_dim = if params.is_quantized { 1 } else { 4 };
+    let visited_memory = estimated_nodes_visited * (params.dimension * bytes_per_dim + 64); // vetor + overhead
+    let result_memory = limit * (params.dimension * bytes_per_dim + AVG_METADATA_SIZE_BYTES);
     let estimated_memory_bytes = visited_memory + result_memory;
 
     // ── is_expensive ────────────────────────────────────────────────
@@ -240,6 +250,12 @@ pub fn estimate_search_cost(params: &CostEstimateParams) -> QueryCostEstimate {
         );
     }
 
+    if !params.is_quantized && params.collection_size > 100_000 && params.dimension >= 256 {
+        recommendations.push(
+            "Consider enabling Scalar Quantization (SQ8) for ~4x memory reduction with <5% recall loss".into(),
+        );
+    }
+
     let breakdown = CostBreakdown {
         index_scan_cost,
         filter_cost,
@@ -274,6 +290,7 @@ mod tests {
             filter_conditions_count: 0,
             historical_p50: 0.0,
             historical_p95: 0.0,
+            is_quantized: false,
         }
     }
 
@@ -373,6 +390,7 @@ mod tests {
             filter_conditions_count: 0,
             historical_p50: 0.1,
             historical_p95: 0.2,
+            is_quantized: false,
         };
 
         let estimate = estimate_search_cost(&params);
@@ -392,6 +410,7 @@ mod tests {
             filter_conditions_count: 10,
             historical_p50: 0.0,
             historical_p95: 0.0,
+            is_quantized: false,
         };
 
         let estimate = estimate_search_cost(&params);
@@ -547,5 +566,82 @@ mod tests {
         assert_eq!(restored.estimated_nodes_visited, estimate.estimated_nodes_visited);
         assert_eq!(restored.is_expensive, estimate.is_expensive);
         assert_eq!(restored.recommendations.len(), estimate.recommendations.len());
+    }
+
+    #[test]
+    fn test_quantized_reduces_estimate() {
+        let params_no_sq = CostEstimateParams {
+            collection_size: 200_000,
+            dimension: 384,
+            limit: 10,
+            ef_search: 64,
+            has_filter: false,
+            filter_conditions_count: 0,
+            historical_p50: 0.0,
+            historical_p95: 0.0,
+            is_quantized: false,
+        };
+        let params_with_sq = CostEstimateParams {
+            is_quantized: true,
+            ..params_no_sq.clone()
+        };
+
+        let est_no_sq = estimate_search_cost(&params_no_sq);
+        let est_with_sq = estimate_search_cost(&params_with_sq);
+
+        assert!(
+            est_with_sq.estimated_ms < est_no_sq.estimated_ms,
+            "quantized estimate should be lower: no_sq={}, with_sq={}",
+            est_no_sq.estimated_ms,
+            est_with_sq.estimated_ms
+        );
+        assert!(
+            est_with_sq.breakdown.index_scan_cost < est_no_sq.breakdown.index_scan_cost,
+            "quantized index_scan_cost should be lower"
+        );
+        assert!(
+            est_with_sq.estimated_memory_bytes < est_no_sq.estimated_memory_bytes,
+            "quantized memory estimate should be lower"
+        );
+    }
+
+    #[test]
+    fn test_quantization_recommendation() {
+        let params = CostEstimateParams {
+            collection_size: 150_000,
+            dimension: 256,
+            has_filter: false,
+            is_quantized: false,
+            ..base_params()
+        };
+
+        let estimate = estimate_search_cost(&params);
+        assert!(
+            estimate
+                .recommendations
+                .iter()
+                .any(|r| r.contains("Scalar Quantization") || r.contains("SQ8")),
+            "should recommend SQ8 for large non-quantized collection with dim >= 256"
+        );
+    }
+
+    #[test]
+    fn test_no_quantization_recommendation_when_sq8() {
+        let params = CostEstimateParams {
+            collection_size: 150_000,
+            dimension: 256,
+            has_filter: false,
+            is_quantized: true,
+            ..base_params()
+        };
+
+        let estimate = estimate_search_cost(&params);
+        let has_sq8_rec = estimate.recommendations.iter().any(|r| {
+            r.contains("Scalar Quantization") || r.contains("SQ8")
+        });
+        assert!(
+            !has_sq8_rec,
+            "should NOT recommend SQ8 when collection is already quantized"
+        );
     }
 }

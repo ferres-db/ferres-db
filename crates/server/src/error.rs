@@ -241,25 +241,24 @@ impl From<FerresError> for ApiError {
                 ApiError::collection_already_exists(name.clone())
             }
             FerresError::PointNotFound(id) => {
-                ApiError::collection_not_found(format!("point '{}' not found", id))
+                ApiError::collection_not_found(format!("point '{id}' not found"))
             }
             FerresError::DimensionMismatch { expected, got } => {
                 ApiError::invalid_dimension(format!(
-                    "dimension mismatch: expected {}, got {}",
-                    expected, got
+                    "dimension mismatch: expected {expected}, got {got}"
                 ))
             }
             FerresError::InvalidVector { reason } => {
-                ApiError::invalid_dimension(format!("invalid vector: {}", reason))
+                ApiError::invalid_dimension(format!("invalid vector: {reason}"))
             }
             FerresError::Storage(msg) => {
-                ApiError::internal_error(format!("storage error: {}", msg))
+                ApiError::internal_error(format!("storage error: {msg}"))
             }
             FerresError::IndexNotBuilt => {
                 ApiError::internal_error("index not built: call build() before searching")
             }
             FerresError::InvalidPointId(id) => {
-                ApiError::invalid_payload(format!("invalid point id: {}", id))
+                ApiError::invalid_payload(format!("invalid point id: {id}"))
             }
             FerresError::EmptyVector => {
                 ApiError::invalid_dimension("vector cannot be empty")

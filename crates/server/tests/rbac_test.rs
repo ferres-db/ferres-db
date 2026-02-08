@@ -123,7 +123,7 @@ async fn setup_server() -> TestServer {
         )
         .with_state(app_state);
 
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -137,7 +137,7 @@ async fn setup_server() -> TestServer {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     TestServer {
-        base_url: format!("http://127.0.0.1:{}", port),
+        base_url: format!("http://127.0.0.1:{port}"),
         _temp_dir: temp_dir,
         _shutdown: shutdown_tx,
         user_store,
@@ -147,12 +147,12 @@ async fn setup_server() -> TestServer {
 /// Helper: login and get JWT token
 async fn login(client: &reqwest::Client, base_url: &str, username: &str, password: &str) -> String {
     let res = client
-        .post(&format!("{}/api/v1/auth/login", base_url))
+        .post(format!("{base_url}/api/v1/auth/login"))
         .json(&serde_json::json!({"username": username, "password": password}))
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), 200, "login failed for {}", username);
+    assert_eq!(res.status(), 200, "login failed for {username}");
     let body: serde_json::Value = res.json().await.unwrap();
     body["token"].as_str().unwrap().to_string()
 }
@@ -160,8 +160,8 @@ async fn login(client: &reqwest::Client, base_url: &str, username: &str, passwor
 /// Helper: create a test collection using admin API key
 async fn create_test_collection(client: &reqwest::Client, base_url: &str, name: &str) {
     let res = client
-        .post(&format!("{}/api/v1/collections", base_url))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .post(format!("{base_url}/api/v1/collections"))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&serde_json::json!({
             "name": name,
             "dimension": 3,
@@ -181,8 +181,8 @@ async fn create_test_collection(client: &reqwest::Client, base_url: &str, name: 
 /// Helper: upsert test points
 async fn upsert_test_points(client: &reqwest::Client, base_url: &str, collection: &str) {
     let res = client
-        .post(&format!("{}/api/v1/collections/{}/points", base_url, collection))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .post(format!("{base_url}/api/v1/collections/{collection}/points"))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&serde_json::json!({
             "points": [
                 {"id": "p1", "vector": [0.1, 0.2, 0.3], "metadata": {"department": "sales", "category": "A"}},
@@ -210,8 +210,8 @@ async fn test_viewer_cannot_upsert() {
 
     // Try to upsert — should be denied (403)
     let res = client
-        .post(&format!("{}/api/v1/collections/test-coll/points", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .post(format!("{}/api/v1/collections/test-coll/points", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "points": [{"id": "p1", "vector": [0.1, 0.2, 0.3]}]
         }))
@@ -234,8 +234,8 @@ async fn test_viewer_can_search() {
 
     // Search — should work (viewer has Read by default)
     let res = client
-        .post(&format!("{}/api/v1/collections/test-coll/search", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .post(format!("{}/api/v1/collections/test-coll/search", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
             "limit": 10
@@ -256,8 +256,8 @@ async fn test_admin_bypasses_all_restrictions() {
     upsert_test_points(&client, &server.base_url, "admin-test").await;
 
     let res = client
-        .post(&format!("{}/api/v1/collections/admin-test/search", server.base_url))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .post(format!("{}/api/v1/collections/admin-test/search", server.base_url))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
             "limit": 10
@@ -284,8 +284,8 @@ async fn test_metadata_restriction_filters_results() {
 
     // Search — should only see points with department=sales
     let res = client
-        .post(&format!("{}/api/v1/collections/filtered-test/search", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .post(format!("{}/api/v1/collections/filtered-test/search", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
             "limit": 10
@@ -323,8 +323,8 @@ async fn test_granular_permissions_collection_specific() {
 
     // Search on test-coll — should work
     let res = client
-        .post(&format!("{}/api/v1/collections/test-coll/search", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .post(format!("{}/api/v1/collections/test-coll/search", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
             "limit": 10
@@ -336,8 +336,8 @@ async fn test_granular_permissions_collection_specific() {
 
     // Search on other-coll — should be denied
     let res = client
-        .post(&format!("{}/api/v1/collections/other-coll/search", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .post(format!("{}/api/v1/collections/other-coll/search", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
             "limit": 10
@@ -361,8 +361,8 @@ async fn test_granular_write_permission() {
 
     // Upsert to test-coll — should work
     let res = client
-        .post(&format!("{}/api/v1/collections/test-coll/points", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .post(format!("{}/api/v1/collections/test-coll/points", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "points": [{"id": "rp1", "vector": [0.1, 0.2, 0.3]}]
         }))
@@ -373,8 +373,8 @@ async fn test_granular_write_permission() {
 
     // Upsert to other-coll — should be denied
     let res = client
-        .post(&format!("{}/api/v1/collections/other-coll/points", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .post(format!("{}/api/v1/collections/other-coll/points", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "points": [{"id": "rp1", "vector": [0.1, 0.2, 0.3]}]
         }))
@@ -394,8 +394,8 @@ async fn test_audit_trail_records_actions() {
 
     // Do a search with the admin API key
     let _ = client
-        .post(&format!("{}/api/v1/collections/audit-test/search", server.base_url))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .post(format!("{}/api/v1/collections/audit-test/search", server.base_url))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
             "limit": 5
@@ -404,13 +404,13 @@ async fn test_audit_trail_records_actions() {
         .await
         .unwrap();
 
-    // Wait for async audit writes to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Wait for buffered audit writes to flush (1s flush interval + margin)
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     // Query the audit trail
     let res = client
-        .get(&format!("{}/api/v1/audit?action=search&limit=10", server.base_url))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .get(format!("{}/api/v1/audit?action=search&limit=10", server.base_url))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .send()
         .await
         .unwrap();
@@ -441,8 +441,8 @@ async fn test_audit_trail_records_denied_actions() {
 
     // Try to upsert (will be denied)
     let _ = client
-        .post(&format!("{}/api/v1/collections/deny-test/points", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .post(format!("{}/api/v1/collections/deny-test/points", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "points": [{"id": "p1", "vector": [0.1, 0.2, 0.3]}]
         }))
@@ -450,13 +450,13 @@ async fn test_audit_trail_records_denied_actions() {
         .await
         .unwrap();
 
-    // Wait for audit writes
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Wait for buffered audit writes to flush (1s flush interval + margin)
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     // Query audit trail for denied actions
     let res = client
-        .get(&format!("{}/api/v1/audit?action=upsert&limit=10", server.base_url))
-        .header("Authorization", format!("Bearer {}", TEST_API_KEY))
+        .get(format!("{}/api/v1/audit?action=upsert&limit=10", server.base_url))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .send()
         .await
         .unwrap();
@@ -480,8 +480,8 @@ async fn test_audit_requires_admin() {
 
     // Try to access audit trail
     let res = client
-        .get(&format!("{}/api/v1/audit", server.base_url))
-        .header("Authorization", format!("Bearer {}", token))
+        .get(format!("{}/api/v1/audit", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();

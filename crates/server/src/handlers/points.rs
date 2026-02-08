@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-use ferres_db_core::{MetadataFilter, Point, evaluate_condition, QueryCostEstimate};
+use ferres_db_core::{MetadataFilter, Point, QueryCostEstimate, build_search_explanation};
 
 use crate::api_err;
 use crate::auth::{AuthenticatedUser, check_user_permission};
@@ -173,15 +173,14 @@ pub async fn upsert_points(
     let perm_result = check_user_permission(&user, &name, &Action::Write);
     if !perm_result.is_allowed() {
         // Audit: ação negada
-        let audit_logger = app_state.audit_logger.clone();
         let entry = audit::audit_entry(
-            &user.username, "upsert", &format!("collection:{}", name),
+            &user.username, "upsert", &format!("collection:{name}"),
             serde_json::json!({"points_count": payload.points.len(), "denied": true}),
             AuditResult::Denied, None, None,
         );
-        tokio::spawn(async move { audit_logger.log(&entry).await });
+        app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
-            "permission denied: write on collection '{}'", name
+            "permission denied: write on collection '{name}'"
         )));
     }
 
@@ -197,7 +196,7 @@ pub async fn upsert_points(
                     .message
                     .as_ref()
                     .map(|m| m.to_string())
-                    .unwrap_or_else(|| format!("invalid {}", field));
+                    .unwrap_or_else(|| format!("invalid {field}"));
                 messages.push(msg);
             }
         }
@@ -239,7 +238,7 @@ pub async fn upsert_points(
             if let Some(pos) = input.vector.iter().position(|v| !v.is_finite()) {
                 failed.push(FailedPoint {
                     id: input.id.clone(),
-                    reason: format!("non-finite value at index {}", pos),
+                    reason: format!("non-finite value at index {pos}"),
                 });
                 continue;
             }
@@ -300,19 +299,16 @@ pub async fn upsert_points(
         app_state.emit_event(event);
     }
 
-    // Audit trail (async, não bloqueia)
-    let audit_logger = app_state.audit_logger.clone();
-    let username = user.username.clone();
-    let coll_name = name.clone();
-    let failed_count = batch_failed.len();
-    tokio::spawn(async move {
+    // Audit trail
+    {
+        let failed_count = batch_failed.len();
         let entry = audit::audit_entry(
-            &username, "upsert", &format!("collection:{}", coll_name),
+            &user.username, "upsert", &format!("collection:{name}"),
             serde_json::json!({"points_submitted": points_count, "upserted": upserted, "failed": failed_count}),
             AuditResult::Success, None, Some(took_ms),
         );
-        audit_logger.log(&entry).await;
-    });
+        app_state.audit_logger.log(&entry);
+    }
 
     Ok(Json(UpsertPointsResponse {
         upserted,
@@ -334,15 +330,14 @@ pub async fn delete_points(
     // Verificação de permissão granular (Write na collection)
     let perm_result = check_user_permission(&user, &name, &Action::Write);
     if !perm_result.is_allowed() {
-        let audit_logger = app_state.audit_logger.clone();
         let entry = audit::audit_entry(
-            &user.username, "delete_points", &format!("collection:{}", name),
+            &user.username, "delete_points", &format!("collection:{name}"),
             serde_json::json!({"ids_count": payload.ids.len(), "denied": true}),
             AuditResult::Denied, None, None,
         );
-        tokio::spawn(async move { audit_logger.log(&entry).await });
+        app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
-            "permission denied: write on collection '{}'", name
+            "permission denied: write on collection '{name}'"
         )));
     }
 
@@ -378,17 +373,14 @@ pub async fn delete_points(
     }
 
     // Audit trail
-    let audit_logger = app_state.audit_logger.clone();
-    let username = user.username.clone();
-    let coll_name = name.clone();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &username, "delete_points", &format!("collection:{}", coll_name),
+            &user.username, "delete_points", &format!("collection:{name}"),
             serde_json::json!({"ids_submitted": ids_count, "deleted": deleted}),
             AuditResult::Success, None, Some(took_ms),
         );
-        audit_logger.log(&entry).await;
-    });
+        app_state.audit_logger.log(&entry);
+    }
 
     Ok(Json(DeletePointsResponse { deleted }))
 }
@@ -420,15 +412,14 @@ pub async fn search_points(
     // Verificação de permissão granular (Read na collection)
     let perm_result = check_user_permission(&user, &name, &Action::Read);
     if !perm_result.is_allowed() {
-        let audit_logger = app_state.audit_logger.clone();
         let entry = audit::audit_entry(
-            &user.username, "search", &format!("collection:{}", name),
+            &user.username, "search", &format!("collection:{name}"),
             serde_json::json!({"denied": true}),
             AuditResult::Denied, None, None,
         );
-        tokio::spawn(async move { audit_logger.log(&entry).await });
+        app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
-            "permission denied: read on collection '{}'", name
+            "permission denied: read on collection '{name}'"
         )));
     }
 
@@ -485,6 +476,7 @@ pub async fn search_points(
                 .unwrap_or((0.0, 0.0))
         };
 
+        let is_quantized = !matches!(config.quantization, ferres_db_core::QuantizationConfig::None);
         let params = ferres_db_core::CostEstimateParams {
             collection_size: num_points,
             dimension: config.dimension,
@@ -494,6 +486,7 @@ pub async fn search_points(
             filter_conditions_count,
             historical_p50: p50,
             historical_p95: p95,
+            is_quantized,
         };
 
         let estimate = ferres_db_core::estimate_search_cost(&params);
@@ -551,10 +544,7 @@ pub async fn search_points(
             Err(e) => return Err(ApiError::invalid_payload(e.to_string())),
         };
         if !filter.is_empty() {
-            filtered_results = filtered_results
-                .into_iter()
-                .filter(|result| filter.matches(&result.metadata))
-                .collect();
+            filtered_results.retain(|result| filter.matches(&result.metadata));
         }
     }
 
@@ -619,7 +609,7 @@ pub async fn search_points(
 
     app_state.query_stats
         .entry(collection_name.clone())
-        .or_insert_with(|| crate::state::QueryStats::new())
+        .or_insert_with(crate::state::QueryStats::new)
         .record_query(took_ms);
 
     app_state.global_query_stats.record(&collection_name, took_ms);
@@ -650,19 +640,15 @@ pub async fn search_points(
             .await;
     });
 
-    // Audit trail (async)
-    let audit_logger = app_state.audit_logger.clone();
-    let username = user.username.clone();
-    let coll_name_audit = name.clone();
-    let query_id_audit = query_id.clone();
-    tokio::spawn(async move {
+    // Audit trail
+    {
         let entry = audit::audit_entry(
-            &username, "search", &format!("collection:{}", coll_name_audit),
-            serde_json::json!({"query_id": query_id_audit, "limit": payload.limit, "results_count": results_count}),
+            &user.username, "search", &format!("collection:{name}"),
+            serde_json::json!({"query_id": &query_id, "limit": payload.limit, "results_count": results_count}),
             AuditResult::Success, None, Some(took_ms),
         );
-        audit_logger.log(&entry).await;
-    });
+        app_state.audit_logger.log(&entry);
+    }
 
     Ok(Json(SearchPointsResponse {
         results,
@@ -702,15 +688,14 @@ pub async fn search_hybrid(
     // Verificação de permissão granular (Read na collection)
     let perm_result = check_user_permission(&user, &name, &Action::Read);
     if !perm_result.is_allowed() {
-        let audit_logger = app_state.audit_logger.clone();
         let entry = audit::audit_entry(
-            &user.username, "search_hybrid", &format!("collection:{}", name),
+            &user.username, "search_hybrid", &format!("collection:{name}"),
             serde_json::json!({"denied": true}),
             AuditResult::Denied, None, None,
         );
-        tokio::spawn(async move { audit_logger.log(&entry).await });
+        app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
-            "permission denied: read on collection '{}'", name
+            "permission denied: read on collection '{name}'"
         )));
     }
 
@@ -734,7 +719,7 @@ pub async fn search_hybrid(
         }
         Some(other) => {
             return Err(ApiError::invalid_payload(format!(
-                "unknown fusion strategy '{}': must be 'weighted' or 'rrf'", other
+                "unknown fusion strategy '{other}': must be 'weighted' or 'rrf'"
             )));
         }
     };
@@ -851,7 +836,7 @@ pub async fn search_hybrid(
 
     app_state.query_stats
         .entry(collection_name.clone())
-        .or_insert_with(|| crate::state::QueryStats::new())
+        .or_insert_with(crate::state::QueryStats::new)
         .record_query(took_ms);
     app_state.global_query_stats.record(&collection_name, took_ms);
     crate::metrics::QUERIES_TOTAL
@@ -880,18 +865,14 @@ pub async fn search_hybrid(
     });
 
     // Audit trail
-    let audit_logger = app_state.audit_logger.clone();
-    let username = user.username.clone();
-    let coll_name_audit = name.clone();
-    let query_id_audit = query_id.clone();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &username, "search_hybrid", &format!("collection:{}", coll_name_audit),
-            serde_json::json!({"query_id": query_id_audit, "results_count": results_count}),
+            &user.username, "search_hybrid", &format!("collection:{name}"),
+            serde_json::json!({"query_id": &query_id, "results_count": results_count}),
             AuditResult::Success, None, Some(took_ms),
         );
-        audit_logger.log(&entry).await;
-    });
+        app_state.audit_logger.log(&entry);
+    }
 
     Ok(Json(SearchPointsResponse {
         results,
@@ -934,10 +915,10 @@ pub async fn list_points(
         if !filter_str.is_empty() {
             // Parse do JSON string para serde_json::Value
             let filter_value: serde_json::Value = serde_json::from_str(filter_str)
-                .map_err(|e| ApiError::invalid_payload(format!("invalid JSON filter: {}", e)))?;
+                .map_err(|e| ApiError::invalid_payload(format!("invalid JSON filter: {e}")))?;
             
             let filter = MetadataFilter::from_json(filter_value)
-                .map_err(|e| ApiError::invalid_payload(format!("invalid metadata filter: {}", e)))?;
+                .map_err(|e| ApiError::invalid_payload(format!("invalid metadata filter: {e}")))?;
 
             all_points.retain(|point| {
                 filter.matches(&point.metadata)
@@ -1041,7 +1022,7 @@ pub async fn estimate_search(
     let perm_result = check_user_permission(&user, &name, &Action::Read);
     if !perm_result.is_allowed() {
         return Err(ApiError::forbidden(format!(
-            "permission denied: read on collection '{}'", name
+            "permission denied: read on collection '{name}'"
         )));
     }
 
@@ -1082,6 +1063,7 @@ pub async fn estimate_search(
     };
 
     // Calcula a estimativa
+    let is_quantized = !matches!(config.quantization, ferres_db_core::QuantizationConfig::None);
     let params = ferres_db_core::CostEstimateParams {
         collection_size: num_points,
         dimension: config.dimension,
@@ -1091,6 +1073,7 @@ pub async fn estimate_search(
         filter_conditions_count,
         historical_p50: p50,
         historical_p95: p95,
+        is_quantized,
     };
 
     let estimate = ferres_db_core::estimate_search_cost(&params);
@@ -1129,6 +1112,8 @@ pub struct ExplainSearchRequest {
 ///
 /// Retorna uma explicação detalhada de cada resultado da busca vetorial,
 /// incluindo score breakdown, avaliação de filtros e estatísticas do índice.
+///
+/// Delega toda a lógica de explain ao core via [`build_search_explanation`].
 #[tracing::instrument(
     name = "explain_search",
     skip(app_state, payload),
@@ -1144,7 +1129,7 @@ pub async fn explain_search(
     let perm_result = check_user_permission(&user, &name, &Action::Read);
     if !perm_result.is_allowed() {
         return Err(ApiError::forbidden(format!(
-            "permission denied: read on collection '{}'", name
+            "permission denied: read on collection '{name}'"
         )));
     }
 
@@ -1153,131 +1138,32 @@ pub async fn explain_search(
 
     let start = Instant::now();
 
+    // Parse do filtro
+    let filter = if let Some(filter_value) = &payload.filter {
+        Some(MetadataFilter::from_json(filter_value.clone())
+            .map_err(|e| ApiError::invalid_payload(e.to_string()))?)
+    } else {
+        None
+    };
+
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-
-    // Valida dimensão
-    collection.validate_dimension(&payload.vector)
-        .map_err(ApiError::from)?;
-
-    // Calcula norma L2 do vetor de consulta
-    let query_vector_norm = payload.vector
-        .iter()
-        .map(|x| (*x as f64) * (*x as f64))
-        .sum::<f64>()
-        .sqrt() as f32;
-
-    let distance_metric = format!("{:?}", collection.config().distance);
-
-    // Parse do filtro
-    let filter = if let Some(filter_value) = &payload.filter {
-        match MetadataFilter::from_json(filter_value.clone()) {
-            Ok(f) => f,
-            Err(e) => return Err(ApiError::invalid_payload(e.to_string())),
-        }
-    } else {
-        MetadataFilter::empty()
+    let explanation = {
+        let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+        build_search_explanation(&collection, &payload.vector, payload.limit, filter)
+            .map_err(ApiError::from)?
     };
-
-    // Busca mais candidatos quando há filtro
-    let search_limit = if filter.is_empty() {
-        payload.limit
-    } else {
-        let expanded = payload.limit.saturating_mul(10);
-        let max_points = collection.len().max(payload.limit);
-        expanded.min(max_points)
-    };
-
-    // Busca com metadata de explain
-    let raw_results = collection.search_explain(&payload.vector, search_limit)
-        .map_err(ApiError::from)?;
-    let candidates_scanned = raw_results.len();
-
-    // Constrói ExplainResult para cada candidato
-    let mut explain_results = Vec::with_capacity(raw_results.len());
-    let mut rank_after_counter = 0usize;
-    let mut total_tombstones_skipped = 0usize;
-
-    for (rank_before_idx, (id, score, meta)) in raw_results.iter().enumerate() {
-        let point = match collection.get(id) {
-            Some(p) => p,
-            None => continue,
-        };
-
-        total_tombstones_skipped = meta.tombstones_skipped;
-
-        // Avalia cada condição do filtro individualmente
-        let filter_eval = if !filter.is_empty() {
-            let condition_results: Vec<ferres_db_core::ConditionResult> = filter
-                .conditions()
-                .iter()
-                .map(|cond| evaluate_condition(cond, &point.metadata))
-                .collect();
-            let passed = condition_results.iter().all(|c| c.passed);
-            Some(ferres_db_core::FilterExplanation {
-                conditions: condition_results,
-                passed,
-            })
-        } else {
-            None
-        };
-
-        let passed_filter = filter_eval.as_ref().map_or(true, |f| f.passed);
-        if passed_filter {
-            rank_after_counter += 1;
-        }
-
-        let mut score_breakdown = std::collections::HashMap::new();
-        score_breakdown.insert("vector_score".to_string(), *score);
-
-        explain_results.push(ferres_db_core::ExplainResult {
-            id: id.clone(),
-            score: *score,
-            distance_metric: distance_metric.clone(),
-            raw_distance: *score,
-            score_breakdown,
-            filter_evaluation: filter_eval,
-            rank_before_filter: rank_before_idx + 1,
-            rank_after_filter: if passed_filter { rank_after_counter } else { 0 },
-        });
-    }
-
-    let candidates_after_filter = explain_results
-        .iter()
-        .filter(|r| r.filter_evaluation.as_ref().map_or(true, |f| f.passed))
-        .count();
-
-    let index_stats = ferres_db_core::IndexStats {
-        total_points: collection.len(),
-        hnsw_layers: collection.config().hnsw.max_layer,
-        ef_search_used: collection.config().hnsw.ef_search,
-        tombstones_skipped: total_tombstones_skipped,
-    };
-
-    // Drop lock antes de registrar métricas
-    drop(collection);
-    drop(collection_arc);
 
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
-    // Métricas Prometheus (reusa QUERIES_TOTAL com label da coleção)
+    // Métricas Prometheus
     crate::metrics::QUERIES_TOTAL
         .with_label_values(&[&name])
         .inc();
     crate::metrics::QUERY_DURATION_MS
         .with_label_values(&[&name])
         .observe(took_ms as f64);
-
-    let explanation = ferres_db_core::SearchExplanation {
-        query_vector_norm,
-        distance_metric,
-        candidates_scanned,
-        candidates_after_filter,
-        results: explain_results,
-        index_stats,
-    };
 
     Ok(Json(explanation))
 }

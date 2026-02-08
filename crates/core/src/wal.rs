@@ -321,11 +321,9 @@ impl Wal {
         })?;
         let reader = BufReader::new(file);
         let mut count = 0;
-        for line_result in reader.lines() {
-            if let Ok(line) = line_result {
-                if !line.trim().is_empty() {
-                    count += 1;
-                }
+        for line in reader.lines().map_while(Result::ok) {
+            if !line.trim().is_empty() {
+                count += 1;
             }
         }
         Ok(count)
@@ -551,7 +549,7 @@ mod tests {
         };
         let valid_json = serde_json::to_string(&valid_entry).unwrap();
 
-        let content = format!("{}\n{{invalid json\n{}\n", valid_json, valid_json);
+        let content = format!("{valid_json}\n{{invalid json\n{valid_json}\n");
         fs::write(&wal_path, content).unwrap();
 
         let entries = Wal::read_entries(&dir).unwrap();
@@ -769,7 +767,7 @@ mod tests {
         let valid_json = serde_json::to_string(&valid_entry).unwrap();
 
         let wal_path = dir.join("wal.log");
-        let content = format!("{}\n{{\"timestamp\":2,\"operati", valid_json);
+        let content = format!("{valid_json}\n{{\"timestamp\":2,\"operati");
         fs::write(&wal_path, content).unwrap();
 
         // Recovery deve aplicar C e ignorar a linha truncada
@@ -920,7 +918,7 @@ mod tests {
         // Simula batch de 50 operações, crash após 30
         let mut wal = Wal::open(&dir, 1000).unwrap();
         for i in 0..30 {
-            wal.append_upsert(&make_point(&format!("p{}", i), vec![i as f32, 0.0, 0.0])).unwrap();
+            wal.append_upsert(&make_point(&format!("p{i}"), vec![i as f32, 0.0, 0.0])).unwrap();
         }
         drop(wal);
 
@@ -931,7 +929,7 @@ mod tests {
         let recovered = recover_collection(&dir).unwrap().unwrap();
         assert_eq!(recovered.len(), 30);
         for i in 0..30 {
-            assert!(recovered.get(&format!("p{}", i)).is_some());
+            assert!(recovered.get(&format!("p{i}")).is_some());
         }
     }
 
@@ -985,7 +983,7 @@ mod tests {
         // WAL com exatamente 1000 operações (threshold)
         let mut wal = Wal::open(&dir, 1000).unwrap();
         for i in 0..1000 {
-            wal.append_upsert(&make_point(&format!("p{}", i), vec![i as f32, 0.0, 0.0])).unwrap();
+            wal.append_upsert(&make_point(&format!("p{i}"), vec![i as f32, 0.0, 0.0])).unwrap();
         }
         assert!(wal.should_snapshot());
         drop(wal);
@@ -1062,7 +1060,7 @@ mod tests {
         let _json3 = serde_json::to_string(&entry3).unwrap();
 
         // Simula crash: última entrada parcialmente escrita
-        let content = format!("{}\n{}\n{{\"timestamp\":3,\"operation\":{{\"op\":\"upsert\"", json1, json2);
+        let content = format!("{json1}\n{json2}\n{{\"timestamp\":3,\"operation\":{{\"op\":\"upsert\"");
         fs::write(&wal_path, content).unwrap();
 
         // Recovery deve aplicar apenas as 2 entradas válidas

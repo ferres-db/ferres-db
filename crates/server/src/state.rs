@@ -42,6 +42,12 @@ pub struct GlobalQueryStats {
     events: RwLock<VecDeque<GlobalQueryEvent>>,
 }
 
+impl Default for GlobalQueryStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalQueryStats {
     pub fn new() -> Self {
         Self {
@@ -190,12 +196,27 @@ impl ServerConfig {
     /// 1. Variáveis de ambiente (HOST, PORT, STORAGE_PATH, LOG_LEVEL)
     /// 2. Arquivo config.toml (se existir)
     /// 3. Valores padrão
+    /// Procura config.toml no diretório atual e em diretórios pais (para quando
+    /// o servidor é iniciado de subpastas como dashboard/ ou crates/server/).
+    fn find_config_path() -> Option<PathBuf> {
+        let candidates = ["config.toml", "../config.toml", "../../config.toml"];
+        for p in candidates {
+            if std::path::Path::new(p).is_file() {
+                return Some(PathBuf::from(p));
+            }
+        }
+        None
+    }
+
     pub fn load() -> Result<Self, ConfigError> {
-        let mut config = if let Ok(toml_str) = std::fs::read_to_string("config.toml") {
-            info!("loading configuration from config.toml");
+        let mut config = if let Some(config_path) = Self::find_config_path() {
+            let toml_str = std::fs::read_to_string(&config_path).map_err(|e| {
+                ConfigError::InvalidToml(format!("failed to read {}: {}", config_path.display(), e))
+            })?;
+            info!(path = %config_path.display(), "loading configuration from config.toml");
             toml::from_str(&toml_str).map_err(|e| ConfigError::InvalidToml(e.to_string()))?
         } else {
-            info!("using default configuration (config.toml not found)");
+            info!("using default configuration (config.toml not found in ., .. or ../..)");
             Self::default()
         };
 
@@ -272,6 +293,12 @@ pub struct QueryStats {
     pub num_queries: Arc<AtomicU64>,
     /// Histórico de latências (mantém últimas 1000 para cálculo de percentis).
     pub latencies_ms: Arc<RwLock<VecDeque<u64>>>,
+}
+
+impl Default for QueryStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl QueryStats {
@@ -595,8 +622,7 @@ impl AppState {
 
             let collection = collection_arc.read().map_err(|e| {
                 ferres_db_core::FerresError::Storage(format!(
-                    "failed to acquire read lock for collection {}: {e}",
-                    name
+                    "failed to acquire read lock for collection {name}: {e}"
                 ))
             })?;
 
@@ -630,8 +656,7 @@ impl AppState {
             let collection_dir = collections_dir.join(name);
             let collection = collection_arc.read().map_err(|e| {
                 ferres_db_core::FerresError::Storage(format!(
-                    "failed to acquire read lock for collection {}: {e}",
-                    name
+                    "failed to acquire read lock for collection {name}: {e}"
                 ))
             })?;
             FileStorage::save_collection(&collection, &collection_dir)?;

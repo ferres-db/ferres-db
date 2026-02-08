@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use ferres_db_core::{
@@ -108,7 +108,7 @@ fn main() {
 
     if let Err(e) = result {
         error!(error = %e, "command failed");
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }
@@ -128,14 +128,14 @@ fn init_storage(path: &PathBuf) -> Result<(), FerresError> {
 }
 
 fn create_collection(
-    storage_path: &PathBuf,
+    storage_path: &Path,
     name: String,
     dimension: usize,
     distance_str: String,
 ) -> Result<(), FerresError> {
     let distance = parse_distance(&distance_str)?;
 
-    let mut db = VectorDB::new(storage_path.clone())?;
+    let mut db = VectorDB::new(storage_path.to_path_buf())?;
 
     let config = CollectionConfig {
         name: name.clone(),
@@ -151,14 +151,14 @@ fn create_collection(
 
     db.create_collection(config)?;
 
-    println!("✓ Collection '{}' created successfully", name);
-    println!("  Dimension: {}", dimension);
-    println!("  Distance metric: {:?}", distance);
+    println!("✓ Collection '{name}' created successfully");
+    println!("  Dimension: {dimension}");
+    println!("  Distance metric: {distance:?}");
     Ok(())
 }
 
 fn insert_points(
-    storage_path: &PathBuf,
+    storage_path: &Path,
     collection: String,
     file_path: PathBuf,
 ) -> Result<(), FerresError> {
@@ -168,7 +168,7 @@ fn insert_points(
         "inserting points from file"
     );
 
-    let mut db = VectorDB::new(storage_path.clone())?;
+    let mut db = VectorDB::new(storage_path.to_path_buf())?;
 
     // Lê o arquivo JSONL
     let file = fs::File::open(&file_path).map_err(|e| {
@@ -177,10 +177,9 @@ fn insert_points(
 
     let reader = BufReader::new(file);
     let mut points = Vec::new();
-    let mut line_num = 0;
 
-    for line in reader.lines() {
-        line_num += 1;
+    for (line_idx, line) in reader.lines().enumerate() {
+        let line_num = line_idx + 1;
         let line = line.map_err(|e| {
             FerresError::Storage(format!(
                 "failed to read line {} from {}: {e}",
@@ -259,7 +258,7 @@ fn insert_points(
 }
 
 fn search_points(
-    storage_path: &PathBuf,
+    storage_path: &Path,
     collection: String,
     vector_str: String,
     limit: usize,
@@ -270,7 +269,7 @@ fn search_points(
         "performing search"
     );
 
-    let db = VectorDB::new(storage_path.clone())?;
+    let db = VectorDB::new(storage_path.to_path_buf())?;
 
     // Parse do vetor (valores separados por vírgula)
     let vector: Vec<f32> = vector_str
@@ -296,12 +295,12 @@ fn search_points(
     Ok(())
 }
 
-fn show_stats(storage_path: &PathBuf, collection: String) -> Result<(), FerresError> {
-    let db = VectorDB::new(storage_path.clone())?;
+fn show_stats(storage_path: &Path, collection: String) -> Result<(), FerresError> {
+    let db = VectorDB::new(storage_path.to_path_buf())?;
 
     let stats = db.get_collection_stats(&collection)?;
 
-    println!("\nCollection: {}", collection);
+    println!("\nCollection: {collection}");
     println!("{:-<50}", "");
     println!("Points:           {}", stats.num_points);
     println!("Index size:       {} bytes ({:.2} MB)", 
@@ -318,12 +317,12 @@ fn show_stats(storage_path: &PathBuf, collection: String) -> Result<(), FerresEr
     Ok(())
 }
 
-fn delete_collection(storage_path: &PathBuf, collection: String) -> Result<(), FerresError> {
-    let mut db = VectorDB::new(storage_path.clone())?;
+fn delete_collection(storage_path: &Path, collection: String) -> Result<(), FerresError> {
+    let mut db = VectorDB::new(storage_path.to_path_buf())?;
 
     db.delete_collection(&collection)?;
 
-    println!("✓ Collection '{}' deleted successfully", collection);
+    println!("✓ Collection '{collection}' deleted successfully");
     Ok(())
 }
 
@@ -333,8 +332,7 @@ fn parse_distance(s: &str) -> Result<DistanceMetric, FerresError> {
         "euclidean" => Ok(DistanceMetric::Euclidean),
         "dotproduct" | "dot" => Ok(DistanceMetric::DotProduct),
         _ => Err(FerresError::Storage(format!(
-            "invalid distance metric: {}. Valid options: cosine, euclidean, dotproduct",
-            s
+            "invalid distance metric: {s}. Valid options: cosine, euclidean, dotproduct"
         ))),
     }
 }

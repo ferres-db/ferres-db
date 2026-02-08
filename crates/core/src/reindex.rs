@@ -11,6 +11,13 @@
 //!    Delta operations (inserts/deletes during building) are applied to the new index.
 //! 3. **Cleanup**: Old index is dropped, freeing memory.
 //!
+//! ## Memory
+//!
+//! Reindex temporarily requires approximately 2× the collection's memory: one
+//! copy for the existing index (serving queries) and one for the new index
+//! being built from the snapshot. For a 1M × 384 collection (~1.5 GB), expect
+//! ~3 GB peak usage.
+//!
 //! ## Auto-reindex
 //!
 //! When tombstones exceed 20 % of indexed points, a reindex is recommended.

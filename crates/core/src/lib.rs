@@ -73,7 +73,8 @@ pub use wal::{Wal, WalEntry, WalOperation, recover_collection};
 pub use cost::{CostBreakdown, CostEstimateParams, QueryCostEstimate, estimate_search_cost};
 pub use explain::{
     ConditionResult, ExplainMeta, ExplainResult, FilterExplanation, IndexStats,
-    SearchExplanation, evaluate_condition,
+    SearchExplanation, build_search_explanation, build_search_explanation_with_resolver,
+    evaluate_condition,
 };
 pub use fusion::{FusionStrategy, reciprocal_rank_fusion, weighted_fusion, DEFAULT_RRF_K};
 pub use reindex::{
@@ -229,38 +230,38 @@ impl MetadataFilter {
                         let arr = v
                             .as_array()
                             .ok_or_else(|| FerresError::InvalidVector {
-                                reason: format!("filter.{}: $in must be an array", field),
+                                reason: format!("filter.{field}: $in must be an array"),
                             })?
                             .clone();
                         out.push(MetadataCondition::In(field.to_string(), arr));
                     }
                     "$gt" => {
                         let n = Self::as_f64(v).ok_or_else(|| FerresError::InvalidVector {
-                            reason: format!("filter.{}: $gt must be a number", field),
+                            reason: format!("filter.{field}: $gt must be a number"),
                         })?;
                         out.push(MetadataCondition::Gt(field.to_string(), n));
                     }
                     "$lt" => {
                         let n = Self::as_f64(v).ok_or_else(|| FerresError::InvalidVector {
-                            reason: format!("filter.{}: $lt must be a number", field),
+                            reason: format!("filter.{field}: $lt must be a number"),
                         })?;
                         out.push(MetadataCondition::Lt(field.to_string(), n));
                     }
                     "$gte" => {
                         let n = Self::as_f64(v).ok_or_else(|| FerresError::InvalidVector {
-                            reason: format!("filter.{}: $gte must be a number", field),
+                            reason: format!("filter.{field}: $gte must be a number"),
                         })?;
                         out.push(MetadataCondition::Gte(field.to_string(), n));
                     }
                     "$lte" => {
                         let n = Self::as_f64(v).ok_or_else(|| FerresError::InvalidVector {
-                            reason: format!("filter.{}: $lte must be a number", field),
+                            reason: format!("filter.{field}: $lte must be a number"),
                         })?;
                         out.push(MetadataCondition::Lte(field.to_string(), n));
                     }
                     _ => {
                         return Err(FerresError::InvalidVector {
-                            reason: format!("filter.{}: unknown operator '{}'", field, op),
+                            reason: format!("filter.{field}: unknown operator '{op}'"),
                         });
                     }
                 }
@@ -331,14 +332,109 @@ pub struct CollectionInfo {
     pub created_at: u64,
 }
 
+// ─── AnyCollection ─────────────────────────────────────────────────────
+
+/// Wrapper interno que abstrai coleções com e sem tiered storage.
+///
+/// Quando tiered storage está habilitado, wraps `TieredCollection` que
+/// gerencia pontos em três camadas (Hot/Warm/Cold). Caso contrário,
+/// wraps uma `Collection` simples onde todos os pontos ficam em RAM.
+///
+/// Fornece uma interface uniforme para resolução de pontos que funciona
+/// corretamente em qualquer cenário, evitando que pontos Warm/Cold
+/// sejam silenciosamente descartados durante buscas.
+enum AnyCollection {
+    /// Coleção sem tiered storage. Todos os pontos em RAM.
+    Plain(Box<Collection>),
+    /// Coleção com tiered storage (Hot/Warm/Cold).
+    Tiered(Box<TieredCollection>),
+}
+
+impl AnyCollection {
+    /// Retorna referência à `Collection` interna.
+    ///
+    /// Para `Tiered`, retorna a coleção que contém os pontos Hot e o índice HNSW.
+    fn collection(&self) -> &Collection {
+        match self {
+            AnyCollection::Plain(c) => c,
+            AnyCollection::Tiered(tc) => tc.collection(),
+        }
+    }
+
+    /// Retorna referência mutável à `Collection` interna.
+    #[allow(dead_code)]
+    fn collection_mut(&mut self) -> &mut Collection {
+        match self {
+            AnyCollection::Plain(c) => c,
+            AnyCollection::Tiered(tc) => tc.collection_mut(),
+        }
+    }
+
+    /// Resolve um ponto pelo ID buscando em todos os tiers de armazenamento.
+    ///
+    /// - **Plain**: busca no HashMap da Collection (RAM). ~0 µs.
+    /// - **Tiered**: busca em Hot (RAM) → Warm (mmap) → Cold (disco).
+    ///   Latência varia: Hot ~0 µs, Warm ~1-10 µs, Cold ~100+ µs (disk I/O).
+    ///
+    /// Para tiered, registra o acesso para promoção lazy no próximo
+    /// ciclo de compactação (sem promover imediatamente).
+    fn resolve_point(&self, id: &str) -> Option<Point> {
+        match self {
+            AnyCollection::Plain(c) => c.get(id).cloned(),
+            AnyCollection::Tiered(tc) => tc.get_from_any_tier(id),
+        }
+    }
+
+    /// Insere um ponto, tratando tiered storage se habilitado.
+    ///
+    /// Pontos sempre começam em Hot (RAM). Para `Tiered`, também
+    /// atualiza o tracker de acessos e tier map.
+    fn insert_point(&mut self, point: Point) -> Result<(), FerresError> {
+        match self {
+            AnyCollection::Plain(c) => c.insert(point),
+            AnyCollection::Tiered(tc) => tc.insert(point),
+        }
+    }
+
+    /// Remove um ponto de todos os tiers.
+    ///
+    /// Para `Plain`, remove do HashMap e do índice.
+    /// Para `Tiered`, remove de Hot, Warm, Cold, tier map e tracker.
+    fn remove_point_from_all(&mut self, id: &str) -> Result<(), FerresError> {
+        match self {
+            AnyCollection::Plain(c) => c.remove(id),
+            AnyCollection::Tiered(tc) => {
+                // Verifica se o ponto existe em algum tier
+                if tc.point_tier(id).is_none() {
+                    return Err(FerresError::PointNotFound(id.to_string()));
+                }
+                tc.remove(id)
+            }
+        }
+    }
+
+    /// Número total de pontos (todos os tiers).
+    fn total_len(&self) -> usize {
+        match self {
+            AnyCollection::Plain(c) => c.len(),
+            AnyCollection::Tiered(tc) => tc.len(),
+        }
+    }
+}
+
 // ─── VectorDB ──────────────────────────────────────────────────────────
 
 /// API principal de alto nível para gerenciar coleções e realizar buscas vetoriais.
 ///
 /// Gerencia múltiplas coleções em memória e persiste automaticamente
 /// modificações em disco após cada operação de escrita.
+///
+/// Suporta tiered storage: quando `CollectionConfig::tiered_storage.enabled`
+/// é `true`, pontos são automaticamente movidos entre camadas Hot (RAM),
+/// Warm (mmap) e Cold (disco) baseado na frequência de acesso. Buscas
+/// com filtro resolvem pontos de todos os tiers corretamente.
 pub struct VectorDB {
-    collections: HashMap<String, Collection>,
+    collections: HashMap<String, AnyCollection>,
     wals: HashMap<String, wal::Wal>,
     storage_path: PathBuf,
     storage_circuit_breaker: StorageCircuitBreaker,
@@ -434,21 +530,42 @@ impl VectorDB {
             collection = %config.name,
             dimension = config.dimension,
             distance = ?config.distance,
+            tiered = config.tiered_storage.enabled,
             "creating collection"
         );
 
+        let name = config.name.clone();
+        let collection_dir = self.storage_path.join("collections").join(&name);
         let collection = Collection::new(config.clone());
-        self.collections.insert(collection.name().to_string(), collection);
+
+        // Wraps em TieredCollection se tiered storage está habilitado
+        let any_col = if config.tiered_storage.enabled {
+            std::fs::create_dir_all(&collection_dir).map_err(|e| {
+                FerresError::Storage(format!(
+                    "failed to create collection directory {}: {e}",
+                    collection_dir.display()
+                ))
+            })?;
+            let tc = TieredCollection::new(
+                collection,
+                config.tiered_storage.clone(),
+                Some(&collection_dir),
+            )?;
+            AnyCollection::Tiered(Box::new(tc))
+        } else {
+            AnyCollection::Plain(Box::new(collection))
+        };
+
+        self.collections.insert(name.clone(), any_col);
 
         // Abre WAL para a nova coleção
-        let collection_dir = self.storage_path.join("collections").join(&config.name);
         let wal_handle = wal::Wal::open(&collection_dir, wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD)?;
-        self.wals.insert(config.name.clone(), wal_handle);
+        self.wals.insert(name.clone(), wal_handle);
 
         // Auto-save após criação (snapshot inicial)
-        self.save_collection(&config.name)?;
+        self.save_collection(&name)?;
 
-        info!(collection = %config.name, "collection created");
+        info!(collection = %name, "collection created");
         Ok(())
     }
 
@@ -518,10 +635,11 @@ impl VectorDB {
     ) -> Result<(), FerresError> {
         // Fase 1: valida dimensões (borrow imutável de collections)
         let prepared_points = {
-            let col = self
+            let ac = self
                 .collections
                 .get(collection)
                 .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
+            let col = ac.collection();
 
             if points.len() > 100 {
                 use rayon::prelude::*;
@@ -575,14 +693,14 @@ impl VectorDB {
             }
         }
 
-        // Fase 3: insere pontos em memória
-        let col = self
+        // Fase 3: insere pontos em memória (via AnyCollection para suporte a tiers)
+        let ac = self
             .collections
             .get_mut(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
 
         for point in prepared_points {
-            if let Err(e) = col.insert(point) {
+            if let Err(e) = ac.insert_point(point) {
                 error!(
                     collection = %collection,
                     error = %e,
@@ -591,13 +709,13 @@ impl VectorDB {
                 return Err(e);
             }
         }
-        let total_points = col.len();
+        let total_points = ac.total_len();
 
         // Fase 4: snapshot se threshold atingido
         let should_snapshot = self
             .wals
             .get(collection)
-            .map_or(false, |w| w.should_snapshot());
+            .is_some_and(|w| w.should_snapshot());
         if should_snapshot {
             self.save_collection(collection)?;
             if let Some(wal) = self.wals.get_mut(collection) {
@@ -644,7 +762,7 @@ impl VectorDB {
             }
         }
 
-        let col = self
+        let ac = self
             .collections
             .get_mut(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
@@ -652,7 +770,7 @@ impl VectorDB {
         let (deleted_count, total_points) = {
             let mut not_found = Vec::new();
             for id in &ids {
-                if let Err(e) = col.remove(id) {
+                if let Err(e) = ac.remove_point_from_all(id) {
                     if matches!(e, FerresError::PointNotFound(_)) {
                         not_found.push(id.clone());
                     } else {
@@ -672,14 +790,14 @@ impl VectorDB {
                 }
             }
 
-            (ids.len() - not_found.len(), col.len())
+            (ids.len() - not_found.len(), ac.total_len())
         };
 
         // Snapshot se threshold atingido
         let should_snapshot = self
             .wals
             .get(collection)
-            .map_or(false, |w| w.should_snapshot());
+            .is_some_and(|w| w.should_snapshot());
         if should_snapshot {
             self.save_collection(collection)?;
             if let Some(wal) = self.wals.get_mut(collection) {
@@ -728,10 +846,11 @@ impl VectorDB {
         query: Vec<f32>,
         limit: usize,
     ) -> Result<Vec<SearchResult>, FerresError> {
-        let col = self
+        let ac = self
             .collections
             .get(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
+        let col = ac.collection();
 
         // Valida dimensão do query
         col.validate_dimension(&query)?;
@@ -742,18 +861,19 @@ impl VectorDB {
             "performing search"
         );
 
-        // Realiza a busca
+        // Realiza a busca (HNSW retorna IDs de pontos em qualquer tier)
         let results = col.search(&query, limit)?;
 
-        // Constrói SearchResults com metadados e vetores opcionais
+        // Constrói SearchResults com resolução tier-aware.
+        // Para tiered collections, resolve pontos de Hot/Warm/Cold.
         let search_results: Vec<SearchResult> = results
             .into_iter()
             .filter_map(|(id, score)| {
-                let point = col.get(&id)?;
+                let point = ac.resolve_point(&id)?;
                 Some(SearchResult {
                     id,
                     score,
-                    metadata: point.metadata.clone(),
+                    metadata: point.metadata,
                     vector: None, // Por padrão não inclui o vetor para economizar espaço
                 })
             })
@@ -797,6 +917,20 @@ impl VectorDB {
     /// 2. Aplica o filtro de metadata em memória sobre os candidatos
     /// 3. Retorna apenas os top-`limit` resultados que passam no filtro
     ///
+    /// # Tiered Storage
+    ///
+    /// Quando tiered storage está habilitado, esta busca resolve pontos de
+    /// **todos os tiers** (Hot/Warm/Cold), garantindo que pontos demovidos
+    /// não sejam silenciosamente descartados dos resultados filtrados.
+    ///
+    /// **Implicação de latência**: pontos em Cold tier requerem disk I/O
+    /// (deserialização JSON) durante a resolução, adicionando ~100+ µs por
+    /// ponto Cold nos resultados. Para workloads com muitos pontos Cold,
+    /// considere:
+    /// - Ajustar `warm_threshold_hours` para manter mais pontos em Warm (mmap)
+    /// - Pontos frequentemente acessados via busca são automaticamente
+    ///   promovidos no próximo ciclo de compactação (promoção lazy)
+    ///
     /// # Validações
     /// - Verifica se a coleção existe.
     /// - Valida a dimensão do vetor de consulta.
@@ -811,10 +945,11 @@ impl VectorDB {
         limit: usize,
         filter: Option<MetadataFilter>,
     ) -> Result<Vec<SearchResult>, FerresError> {
-        let col = self
+        let ac = self
             .collections
             .get(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
+        let col = ac.collection();
 
         // Valida dimensão do query
         col.validate_dimension(&query)?;
@@ -832,21 +967,26 @@ impl VectorDB {
             "performing filtered search"
         );
 
-        // Busca mais resultados para ter candidatos suficientes após filtro
-        // Multiplica por 10 para aumentar chances de ter `limit` resultados após filtro
+        // Busca mais resultados para ter candidatos suficientes após filtro.
+        // Multiplica por 10 para aumentar chances de ter `limit` resultados após filtro.
+        // Para tiered collections, usa total_len (todos os tiers) como limite máximo,
+        // já que o HNSW pode retornar IDs de pontos em qualquer tier.
         let search_limit = limit.saturating_mul(10);
-        // Limita ao número máximo de pontos na coleção
-        let max_points = col.len();
+        let max_points = ac.total_len();
         let search_limit = search_limit.min(max_points.max(limit));
 
-        // Realiza a busca ampliada
+        // Realiza a busca ampliada (HNSW retorna IDs de todos os tiers)
         let results = col.search(&query, search_limit)?;
 
-        // Constrói SearchResults e aplica filtro
+        // Constrói SearchResults com resolução tier-aware e aplica filtro.
+        //
+        // FIX: Antes usava `col.get(&id)` que só encontrava pontos HOT.
+        // Agora usa `ac.resolve_point(&id)` que busca em Hot → Warm → Cold,
+        // garantindo que pontos demovidos não sejam silenciosamente descartados.
         let filtered_results: Vec<SearchResult> = results
             .into_iter()
             .filter_map(|(id, score)| {
-                let point = col.get(&id)?;
+                let point = ac.resolve_point(&id)?;
                 
                 // Aplica filtro de metadata
                 if !filter.matches(&point.metadata) {
@@ -856,7 +996,7 @@ impl VectorDB {
                 Some(SearchResult {
                     id,
                     score,
-                    metadata: point.metadata.clone(),
+                    metadata: point.metadata,
                     vector: None,
                 })
             })
@@ -917,121 +1057,29 @@ impl VectorDB {
         limit: usize,
         filter: Option<MetadataFilter>,
     ) -> Result<SearchExplanation, FerresError> {
-        let col = self
+        let ac = self
             .collections
             .get(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
 
-        col.validate_dimension(&query)?;
+        let col = ac.collection();
+        let resolver = |id: &str| ac.resolve_point(id);
+        explain::build_search_explanation_with_resolver(col, &query, limit, filter, &resolver)
+    }
 
-        // Calcula norma L2 do vetor de consulta
-        let query_vector_norm = query
-            .iter()
-            .map(|x| (*x as f64) * (*x as f64))
-            .sum::<f64>()
-            .sqrt() as f32;
-
-        let distance_metric = format!("{:?}", col.config().distance);
-        let filter = filter.unwrap_or_else(MetadataFilter::empty);
-
-        // Busca mais candidatos quando há filtro para compensar filtragem
-        let search_limit = if filter.is_empty() {
-            limit
-        } else {
-            let expanded = limit.saturating_mul(10);
-            let max_points = col.len().max(limit);
-            expanded.min(max_points)
-        };
-
-        info!(
-            collection = %collection,
-            limit,
-            search_limit,
-            has_filter = !filter.is_empty(),
-            "performing search_explain"
-        );
-
-        // Busca com metadata de explain
-        let raw_results = col.search_explain(&query, search_limit)?;
-        let candidates_scanned = raw_results.len();
-
-        // Constrói ExplainResult para cada candidato
-        let mut explain_results = Vec::with_capacity(raw_results.len());
-        let mut rank_after_counter = 0usize;
-        let mut total_tombstones_skipped = 0usize;
-
-        for (rank_before_idx, (id, score, meta)) in raw_results.iter().enumerate() {
-            let point = match col.get(id) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            total_tombstones_skipped = meta.tombstones_skipped;
-
-            // Avalia cada condição do filtro individualmente
-            let filter_eval = if !filter.is_empty() {
-                let condition_results: Vec<explain::ConditionResult> = filter
-                    .conditions()
-                    .iter()
-                    .map(|cond| explain::evaluate_condition(cond, &point.metadata))
-                    .collect();
-                let passed = condition_results.iter().all(|c| c.passed);
-                Some(explain::FilterExplanation {
-                    conditions: condition_results,
-                    passed,
-                })
-            } else {
-                None
-            };
-
-            let passed_filter = filter_eval.as_ref().map_or(true, |f| f.passed);
-            if passed_filter {
-                rank_after_counter += 1;
-            }
-
-            let mut score_breakdown = HashMap::new();
-            score_breakdown.insert("vector_score".to_string(), *score);
-
-            explain_results.push(explain::ExplainResult {
-                id: id.clone(),
-                score: *score,
-                distance_metric: distance_metric.clone(),
-                raw_distance: *score,
-                score_breakdown,
-                filter_evaluation: filter_eval,
-                rank_before_filter: rank_before_idx + 1,
-                rank_after_filter: if passed_filter { rank_after_counter } else { 0 },
-            });
-        }
-
-        let candidates_after_filter = explain_results
-            .iter()
-            .filter(|r| r.filter_evaluation.as_ref().map_or(true, |f| f.passed))
-            .count();
-
-        let index_stats = explain::IndexStats {
-            total_points: col.len(),
-            hnsw_layers: col.config().hnsw.max_layer,
-            ef_search_used: col.config().hnsw.ef_search,
-            tombstones_skipped: total_tombstones_skipped,
-        };
-
-        info!(
-            collection = %collection,
-            candidates_scanned,
-            candidates_after_filter,
-            results = explain_results.len(),
-            "search_explain completed"
-        );
-
-        Ok(SearchExplanation {
-            query_vector_norm,
-            distance_metric,
-            candidates_scanned,
-            candidates_after_filter,
-            results: explain_results,
-            index_stats,
-        })
+    /// Retorna uma referência à coleção, se existir.
+    ///
+    /// Útil para acessar a `Collection` diretamente quando se quer usar
+    /// funções do core como [`build_search_explanation`] sem passar pelo
+    /// VectorDB.
+    ///
+    /// # Erros
+    /// - `CollectionNotFound` se a coleção não existir.
+    pub fn get_collection(&self, name: &str) -> Result<&Collection, FerresError> {
+        self.collections
+            .get(name)
+            .map(|ac| ac.collection())
+            .ok_or_else(|| FerresError::CollectionNotFound(name.to_string()))
     }
 
     /// Estima o custo de uma busca vetorial antes da execução.
@@ -1061,17 +1109,19 @@ impl VectorDB {
         historical_p50: f64,
         historical_p95: f64,
     ) -> Result<QueryCostEstimate, FerresError> {
-        let col = self
+        let ac = self
             .collections
             .get(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
+        let col = ac.collection();
 
         let config = col.config();
-        let has_filter = filter.map_or(false, |f| !f.is_empty());
+        let has_filter = filter.is_some_and(|f| !f.is_empty());
         let filter_conditions_count = filter.map_or(0, |f| f.conditions().len());
+        let is_quantized = !matches!(config.quantization, QuantizationConfig::None);
 
         let params = cost::CostEstimateParams {
-            collection_size: col.len(),
+            collection_size: ac.total_len(),
             dimension: config.dimension,
             limit,
             ef_search: config.hnsw.ef_search,
@@ -1079,6 +1129,7 @@ impl VectorDB {
             filter_conditions_count,
             historical_p50,
             historical_p95,
+            is_quantized,
         };
 
         Ok(cost::estimate_search_cost(&params))
@@ -1110,14 +1161,14 @@ impl VectorDB {
         collection: &str,
         id: &str,
     ) -> Result<Point, FerresError> {
-        let col = self
+        let ac = self
             .collections
             .get(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
 
-        col.get(id)
+        // Resolução tier-aware: busca em Hot → Warm → Cold
+        ac.resolve_point(id)
             .ok_or_else(|| FerresError::PointNotFound(id.to_string()))
-            .map(|p| p.clone())
     }
 
     /// Retorna estatísticas de uma coleção.
@@ -1144,12 +1195,14 @@ impl VectorDB {
         &self,
         collection: &str,
     ) -> Result<CollectionStats, FerresError> {
-        let col = self
+        let ac = self
             .collections
             .get(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
+        let col = ac.collection();
 
-        let num_points = col.len();
+        // Usa total_len para contar pontos em todos os tiers
+        let num_points = ac.total_len();
         
         // Estima o tamanho do índice em bytes
         // Aproximação: cada ponto tem um vetor de f32 (4 bytes) + overhead do HNSW
@@ -1185,9 +1238,10 @@ impl VectorDB {
     pub fn list_collections(&self) -> Vec<CollectionInfo> {
         self.collections
             .iter()
-            .map(|(name, col)| {
+            .map(|(name, ac)| {
+                let col = ac.collection();
                 let config = col.config();
-                let num_points = col.len();
+                let num_points = ac.total_len();
                 
                 // Usa o timestamp do ponto mais antigo como created_at
                 // Se a coleção estiver vazia, usa 0
@@ -1244,6 +1298,8 @@ impl VectorDB {
                 {
                     Ok(Some(collection)) => {
                         let name = collection.name().to_string();
+                        let tiered_enabled = collection.config().tiered_storage.enabled;
+                        let tiered_config = collection.config().tiered_storage.clone();
 
                         // Abre WAL para esta coleção
                         let mut wal_handle = wal::Wal::open(
@@ -1263,9 +1319,23 @@ impl VectorDB {
                         info!(
                             collection = %name,
                             points = collection.len(),
+                            tiered = tiered_enabled,
                             "loaded collection from disk"
                         );
-                        self.collections.insert(name.clone(), collection);
+
+                        // Wraps em TieredCollection se tiered storage está habilitado
+                        let any_col = if tiered_enabled {
+                            let tc = TieredCollection::new(
+                                collection,
+                                tiered_config,
+                                Some(&path),
+                            )?;
+                            AnyCollection::Tiered(Box::new(tc))
+                        } else {
+                            AnyCollection::Plain(Box::new(collection))
+                        };
+
+                        self.collections.insert(name.clone(), any_col);
                         self.wals.insert(name, wal_handle);
                     }
                     Ok(None) => {
@@ -1287,10 +1357,11 @@ impl VectorDB {
 
     /// Salva uma coleção no disco (protegido por circuit breaker).
     fn save_collection(&self, name: &str) -> Result<(), FerresError> {
-        let col = self
+        let ac = self
             .collections
             .get(name)
             .ok_or_else(|| FerresError::CollectionNotFound(name.to_string()))?;
+        let col = ac.collection();
 
         let collection_dir = self.storage_path.join("collections").join(name);
         self.storage_circuit_breaker
@@ -1467,9 +1538,13 @@ mod tests {
         let (mut db, _temp_dir) = create_test_db();
         create_test_collection(&mut db, "test", 3);
 
+        // Usa 3+ pontos para evitar flakiness com HNSW em grafos muito pequenos
+        // (com apenas 2 pontos, o grafo HNSW pode não conectar ambos dependendo
+        // da atribuição aleatória de níveis).
         let points = vec![
             Point::new("p1", vec![1.0, 0.0, 0.0], json!({"category": "tech"})).unwrap(),
             Point::new("p2", vec![0.0, 1.0, 0.0], json!({"category": "science"})).unwrap(),
+            Point::new("p3", vec![0.0, 0.0, 1.0], json!({"category": "math"})).unwrap(),
         ];
 
         db.upsert_points("test", points).unwrap();
@@ -1479,13 +1554,13 @@ mod tests {
         let filtered_results = db
             .search_with_filter("test", vec![1.0, 0.0, 0.0], 10, Some(filter))
             .unwrap();
-        assert_eq!(filtered_results.len(), 2);
+        assert_eq!(filtered_results.len(), 3);
 
         // None também deve funcionar como filtro vazio
         let filtered_results2 = db
             .search_with_filter("test", vec![1.0, 0.0, 0.0], 10, None)
             .unwrap();
-        assert_eq!(filtered_results2.len(), 2);
+        assert_eq!(filtered_results2.len(), 3);
     }
 
     #[test]

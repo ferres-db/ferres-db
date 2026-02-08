@@ -119,13 +119,12 @@ pub async fn create_collection(
     // Verificação de permissão granular (Create)
     let perm_result = check_user_permission(&user, &payload.name, &Action::Create);
     if !perm_result.is_allowed() {
-        let audit_logger = app_state.audit_logger.clone();
         let entry = audit::audit_entry(
             &user.username, "create_collection", &format!("collection:{}", payload.name),
             serde_json::json!({"denied": true}),
             AuditResult::Denied, None, None,
         );
-        tokio::spawn(async move { audit_logger.log(&entry).await });
+        app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
             "permission denied: create collection '{}'", payload.name
         )));
@@ -140,7 +139,7 @@ pub async fn create_collection(
                     "name_cannot_be_empty" => "name cannot be empty".to_string(),
                     "name_invalid_characters" => "name can only contain letters, numbers, hyphens, and underscores".to_string(),
                     "range" => "dimension must be between 1 and 4096".to_string(),
-                    _ => error.message.as_ref().map(|m| m.to_string()).unwrap_or_else(|| format!("invalid {}", field)),
+                    _ => error.message.as_ref().map(|m| m.to_string()).unwrap_or_else(|| format!("invalid {field}")),
                 };
                 messages.push(msg);
             }
@@ -204,18 +203,14 @@ pub async fn create_collection(
     }
 
     // Audit trail
-    let audit_logger = app_state.audit_logger.clone();
-    let username = user.username.clone();
-    let coll_name = config.name.clone();
-    let dim = config.dimension;
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &username, "create_collection", &format!("collection:{}", coll_name),
-            serde_json::json!({"dimension": dim}),
+            &user.username, "create_collection", &format!("collection:{}", config.name),
+            serde_json::json!({"dimension": config.dimension}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        app_state.audit_logger.log(&entry);
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -322,15 +317,14 @@ pub async fn delete_collection(
     // Verificação de permissão granular (Delete)
     let perm_result = check_user_permission(&user, &name, &Action::Delete);
     if !perm_result.is_allowed() {
-        let audit_logger = app_state.audit_logger.clone();
         let entry = audit::audit_entry(
-            &user.username, "delete_collection", &format!("collection:{}", name),
+            &user.username, "delete_collection", &format!("collection:{name}"),
             serde_json::json!({"denied": true}),
             AuditResult::Denied, None, None,
         );
-        tokio::spawn(async move { audit_logger.log(&entry).await });
+        app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
-            "permission denied: delete collection '{}'", name
+            "permission denied: delete collection '{name}'"
         )));
     }
 
@@ -357,17 +351,14 @@ pub async fn delete_collection(
     drop(collection_arc);
 
     // Audit trail
-    let audit_logger = app_state.audit_logger.clone();
-    let username = user.username.clone();
-    let coll_name = name.clone();
-    tokio::spawn(async move {
+    {
         let entry = audit::audit_entry(
-            &username, "delete_collection", &format!("collection:{}", coll_name),
+            &user.username, "delete_collection", &format!("collection:{name}"),
             serde_json::json!({}),
             AuditResult::Success, None, None,
         );
-        audit_logger.log(&entry).await;
-    });
+        app_state.audit_logger.log(&entry);
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -428,4 +419,3 @@ pub async fn get_tier_distribution(
         cold_memory_bytes: 0,
     }))
 }
-

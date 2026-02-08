@@ -119,6 +119,14 @@ pub trait ANNIndex: Send + Sync {
         0
     }
 
+    /// Returns estimated memory waste (bytes) from tombstoned points not yet reclaimed.
+    ///
+    /// Non-zero only for quantized index; reclaimed on next `build()`.
+    /// Default: 0 (backends that do not keep per-point vectors).
+    fn tombstone_memory_waste(&self) -> usize {
+        0
+    }
+
     /// Busca os `k` vizinhos mais próximos com metadados de explicação.
     ///
     /// Retorna tuplas `(point_id, distância, ExplainMeta)` com informações
@@ -193,7 +201,7 @@ impl Default for HnswConfig {
 fn normalize_vector(v: &[f32]) -> Result<Vec<f32>, FerresError> {
     if let Some(pos) = v.iter().position(|x| !x.is_finite()) {
         return Err(FerresError::InvalidVector {
-            reason: format!("non-finite value at index {}", pos),
+            reason: format!("non-finite value at index {pos}"),
         });
     }
 
@@ -228,7 +236,7 @@ pub fn normalize_vectors_parallel(vectors: &[Vec<f32>]) -> Result<Vec<Vec<f32>>,
 fn validate_vector_finite(v: &[f32]) -> Result<(), FerresError> {
     if let Some(pos) = v.iter().position(|x| !x.is_finite()) {
         return Err(FerresError::InvalidVector {
-            reason: format!("non-finite value at index {}", pos),
+            reason: format!("non-finite value at index {pos}"),
         });
     }
     Ok(())
@@ -613,6 +621,23 @@ impl QuantizedHnswIndex {
         self.params.as_ref()
     }
 
+    /// Estimates memory (bytes) wasted by tombstoned points until the next `build()`.
+    ///
+    /// Tombstoned points remain in `quantized_vectors`, `original_vectors`, and
+    /// `id_map`; this returns an approximate byte count for that unreclaimed storage.
+    pub fn tombstone_memory_waste(&self) -> usize {
+        let tombstone_count = self.inner.tombstone_count();
+        let dim = self.quantized_vectors.first().map(|v| v.len()).unwrap_or(0);
+        let quantized_waste = tombstone_count * dim; // u8 per dim
+        let original_waste = if self.original_vectors.is_some() {
+            tombstone_count * dim * 4 // f32 per dim
+        } else {
+            0
+        };
+        let id_waste = tombstone_count * 64; // estimate per ID string
+        quantized_waste + original_waste + id_waste
+    }
+
     /// Re-rankeia resultados usando distância assimétrica (f32 query vs u8 candidatos).
     ///
     /// Melhora a ordenação comparado com a distância do HNSW que usa vetores
@@ -849,10 +874,21 @@ impl ANNIndex for QuantizedHnswIndex {
         self.inner.add_point(&dq_point)
     }
 
+    /// Remove a point from the index (tombstone-based).
+    ///
+    /// **Note:** The quantized vectors, original vectors, and ID map are NOT
+    /// cleaned up immediately. They will be reclaimed on the next `build()`
+    /// (triggered by reindex when tombstones > 20%). This trades memory for
+    /// O(1) deletion speed. For workloads with heavy deletes, consider
+    /// triggering a manual reindex via the `/reindex` endpoint.
     fn remove_point(&mut self, id: &str) {
         self.inner.remove_point(id);
         // Nota: não removemos de quantized_vectors/original_vectors/id_map
         // pois HNSW usa tombstones. Serão limpos no próximo build().
+    }
+
+    fn tombstone_memory_waste(&self) -> usize {
+        QuantizedHnswIndex::tombstone_memory_waste(self)
     }
 }
 
@@ -1224,6 +1260,49 @@ mod tests {
         let results = index.search(&[1.0, 0.0, 0.0], 2).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "keep");
+    }
+
+    /// Build with 100 points, remove 50, assert tombstone_memory_waste > 0; rebuild, assert tombstone_memory_waste == 0.
+    #[test]
+    fn test_quantized_tombstone_waste() {
+        use rand::Rng;
+
+        const N: usize = 100;
+        const DIM: usize = 32;
+
+        let mut rng = rand::thread_rng();
+        let points: Vec<Point> = (0..N)
+            .map(|i| {
+                let vector: Vec<f32> = (0..DIM).map(|_| rng.gen_range(-1.0_f32..1.0)).collect();
+                make_point(&format!("p{i}"), vector)
+            })
+            .collect();
+
+        let sq_config = ScalarQuantizationConfig::default();
+        let mut index = QuantizedHnswIndex::new(
+            DistanceMetric::Euclidean,
+            HnswConfig::default(),
+            sq_config,
+        );
+
+        index.build(&points).unwrap();
+        assert_eq!(index.tombstone_memory_waste(), 0, "no tombstones after build");
+
+        for i in 0..50 {
+            index.remove_point(&format!("p{i}"));
+        }
+        assert!(
+            index.tombstone_memory_waste() > 0,
+            "tombstone_memory_waste should be > 0 after 50 removes"
+        );
+
+        let remaining: Vec<Point> = points.into_iter().skip(50).collect();
+        index.build(&remaining).unwrap();
+        assert_eq!(
+            index.tombstone_memory_waste(),
+            0,
+            "tombstone_memory_waste should be 0 after rebuild"
+        );
     }
 
     /// Testa a factory function create_ann_index.
