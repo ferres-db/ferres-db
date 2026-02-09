@@ -155,6 +155,40 @@ impl QueryLogCache {
         out
     }
 
+    /// Latência por minuto (últimas 24h): (minute_ts, avg_ms, p50_ms).
+    /// Agrupa entries por minuto e calcula média e mediana de took_ms por bucket.
+    pub fn latency_per_minute_24h(&self) -> Vec<(u64, f64, f64)> {
+        let entries = self.entries_24h();
+        let mut buckets: HashMap<u64, Vec<u64>> = HashMap::new();
+        for e in &entries {
+            let minute = e.timestamp_secs / 60;
+            buckets
+                .entry(minute)
+                .or_default()
+                .push(e.took_ms);
+        }
+        let mut out: Vec<(u64, f64, f64)> = buckets
+            .into_iter()
+            .map(|(minute_ts, mut latencies)| {
+                latencies.sort();
+                let len = latencies.len();
+                let avg_ms = if len == 0 {
+                    0.0
+                } else {
+                    latencies.iter().sum::<u64>() as f64 / len as f64
+                };
+                let p50_ms = if len == 0 {
+                    0.0
+                } else {
+                    latencies[len * 50 / 100] as f64
+                };
+                (minute_ts, avg_ms, p50_ms)
+            })
+            .collect();
+        out.sort_by_key(|&(k, _, _)| k);
+        out
+    }
+
     /// Lista de queries com filtro opcional por coleção, limit e ordenação (latency = mais lentas primeiro).
     pub fn get_queries(
         &self,

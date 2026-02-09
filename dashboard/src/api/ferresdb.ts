@@ -6,6 +6,7 @@ import type {
   GlobalStats,
   QueryEntry,
   CollectionStats,
+  AnalyticsResponse,
   ApiKeyInfo,
   CreateApiKeyResponse,
   UserInfo,
@@ -122,16 +123,19 @@ export const collectionsApi = {
   get: async (name: string): Promise<Collection> => {
     const response = await apiClient.get(`/api/v1/collections/${name}`);
     const data = response.data;
-    // Mapeia para o formato esperado pelo frontend
     return {
       name: data.name,
       dimension: data.dimension,
       num_points: data.num_points,
-      created_at: data.last_updated || data.created_at, // Backend retorna last_updated nos detalhes
+      created_at: data.last_updated ?? data.created_at,
       vector_size: data.dimension,
       point_count: data.num_points,
       distance: data.distance,
       distance_metric: data.distance,
+      quantization: data.quantization,
+      enable_bm25: data.enable_bm25,
+      bm25_text_field: data.bm25_text_field,
+      tiered_storage: data.tiered_storage,
     };
   },
 
@@ -296,6 +300,11 @@ export const pointsApi = {
 export const statsApi = {
   global: async (): Promise<GlobalStats> => {
     const response = await apiClient.get("/api/v1/stats/global");
+    return response.data;
+  },
+
+  analytics: async (): Promise<AnalyticsResponse> => {
+    const response = await apiClient.get("/api/v1/stats/analytics");
     return response.data;
   },
 

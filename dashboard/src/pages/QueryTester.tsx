@@ -320,7 +320,7 @@ function QueryTesterContent() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-gray-50">Query Tester</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-gray-50">Query Tester</h1>
         <p className="text-gray-400 mt-2">
           Test RAG queries, hybrid search, explain results, and estimate costs
         </p>

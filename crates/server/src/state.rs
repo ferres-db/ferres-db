@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Notify};
 use tracing::{info, warn};
 
-use ferres_db_core::{Collection, FileStorage, ReindexJob, SearchResult};
+use ferres_db_core::{Collection, FileStorage, ReindexJob, SearchResult, StorageCircuitBreaker};
 
 use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
@@ -384,6 +384,8 @@ pub struct AppState {
     pub max_ws_connections: u64,
     /// Active and completed reindex jobs, keyed by job ID.
     pub reindex_jobs: Arc<DashMap<String, Arc<RwLock<ReindexJob>>>>,
+    /// Circuit breaker for storage I/O (disk full, repeated failures).
+    pub storage_circuit_breaker: Arc<StorageCircuitBreaker>,
 }
 
 impl AppState {
@@ -519,6 +521,7 @@ impl AppState {
             ws_connections_active: Arc::new(AtomicU64::new(0)),
             max_ws_connections: 100,
             reindex_jobs: Arc::new(DashMap::new()),
+            storage_circuit_breaker: Arc::new(StorageCircuitBreaker::new()),
         })
     }
 
@@ -628,7 +631,9 @@ impl AppState {
 
             if collection.is_dirty() {
                 let collection_dir = collections_dir.join(name);
-                FileStorage::save_collection(&collection, &collection_dir)?;
+                self.storage_circuit_breaker.call(|| {
+                    FileStorage::save_collection(&collection, &collection_dir)
+                })?;
                 collection.mark_clean();
                 saved_count += 1;
                 info!(collection = %name, "auto-saved collection");
@@ -659,7 +664,9 @@ impl AppState {
                     "failed to acquire read lock for collection {name}: {e}"
                 ))
             })?;
-            FileStorage::save_collection(&collection, &collection_dir)?;
+            self.storage_circuit_breaker.call(|| {
+                FileStorage::save_collection(&collection, &collection_dir)
+            })?;
             collection.mark_clean();
             saved_count += 1;
         }

@@ -113,8 +113,8 @@ export const Users = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Users</h1>
-          <p className="text-gray-600 mt-2">Users who can access the dashboard</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-gray-50">Users</h1>
+          <p className="mt-1 text-sm text-gray-400">Users who can access the dashboard</p>
         </div>
         <Button onClick={() => setIsCreateModalOpen(true)}>
           <Plus className="h-4 w-4 mr-2" />

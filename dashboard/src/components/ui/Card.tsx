@@ -9,7 +9,10 @@ export const Card = forwardRef<HTMLDivElement, CardProps>(
     return (
       <div
         ref={ref}
-        className={cn('rounded-lg border border-bg-tertiary bg-bg-secondary shadow-sm', className)}
+        className={cn(
+          'rounded-xl border border-black/20 bg-bg-secondary',
+          className
+        )}
         {...props}
       />
     );
@@ -23,7 +26,7 @@ export const CardHeader = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivEleme
     return (
       <div
         ref={ref}
-        className={cn('flex flex-col space-y-1.5 p-6', className)}
+        className={cn('flex flex-col gap-1.5 px-6 py-5', className)}
         {...props}
       />
     );
@@ -37,7 +40,7 @@ export const CardTitle = forwardRef<HTMLHeadingElement, HTMLAttributes<HTMLHeadi
     return (
       <h3
         ref={ref}
-        className={cn('text-2xl font-semibold leading-none tracking-tight text-gray-50', className)}
+        className={cn('text-base font-semibold leading-none tracking-tight text-gray-50', className)}
         {...props}
       />
     );
@@ -49,7 +52,7 @@ CardTitle.displayName = 'CardTitle';
 export const CardContent = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => {
     return (
-      <div ref={ref} className={cn('p-6 pt-0', className)} {...props} />
+      <div ref={ref} className={cn('px-6 pb-5 pt-0', className)} {...props} />
     );
   }
 );

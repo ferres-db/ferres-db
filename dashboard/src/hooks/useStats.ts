@@ -9,6 +9,14 @@ export const useGlobalStats = () => {
   });
 };
 
+export const useAnalytics = () => {
+  return useQuery({
+    queryKey: ['stats', 'analytics'],
+    queryFn: statsApi.analytics,
+    refetchInterval: 10000, // Refresh every 10 seconds
+  });
+};
+
 export const useQueryStats = () => {
   return useQuery({
     queryKey: ['stats', 'queries'],

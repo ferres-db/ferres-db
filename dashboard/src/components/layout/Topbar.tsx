@@ -12,21 +12,27 @@ export const Topbar = () => {
   };
 
   return (
-    <div className="flex h-16 items-center justify-between border-b border-bg-tertiary bg-bg-secondary px-6">
-      <div className="flex items-center gap-4">
-        <h2 className="text-lg font-semibold text-gray-50">Dashboard</h2>
+    <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] bg-bg-secondary/80 px-6 backdrop-blur-sm">
+      <div className="flex min-w-0 items-center gap-4">
+        <h2 className="truncate text-sm font-semibold tracking-tight text-gray-50">Dashboard</h2>
       </div>
-      <div className="flex items-center gap-2">
-        <Button variant="ghost" size="sm">
-          <Bell className="h-5 w-5" />
+      <div className="flex items-center gap-1">
+        <Button variant="ghost" size="sm" className="h-8 w-8 rounded-md p-0" title="Notificações">
+          <Bell className="h-4 w-4" />
         </Button>
-        <Button variant="ghost" size="sm">
-          <Settings className="h-5 w-5" />
+        <Button variant="ghost" size="sm" className="h-8 w-8 rounded-md p-0" title="Configurações">
+          <Settings className="h-4 w-4" />
         </Button>
-        <Button variant="ghost" size="sm" onClick={handleLogout} title="Sair">
-          <LogOut className="h-5 w-5" />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 w-8 rounded-md p-0"
+          onClick={handleLogout}
+          title="Sair"
+        >
+          <LogOut className="h-4 w-4" />
         </Button>
       </div>
-    </div>
+    </header>
   );
 };
