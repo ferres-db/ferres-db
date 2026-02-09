@@ -10,14 +10,26 @@ use ferres_db_server::api_keys::ApiKeyStore;
 use ferres_db_server::auth;
 use ferres_db_server::state::{AppState, ServerConfig};
 use ferres_db_server::users::UserStore;
+use ferres_db_server::handlers::reindex::{run_auto_reindex_cycle, run_auto_vacuum_cycle};
 use ferres_db_server::routes;
 use ferres_db_server::middleware;
 use ferres_db_server::metrics;
+
+fn enable_mcp() -> bool {
+    std::env::args().any(|a| a == "--mcp")
+        || std::env::var("FERRESDB_ENABLE_MCP")
+            .as_deref()
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Carrega .env do diretório atual ou do workspace (para FERRESDB_API_KEYS, etc.)
     dotenvy::dotenv().ok();
+
+    // MCP via STDIO: quando ativo, logs de console devem ir para stderr para não corromper o protocolo em stdout
+    let use_stderr_console = enable_mcp();
 
     // Carrega configuração
     let config = ServerConfig::load().map_err(|e| {
@@ -47,36 +59,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json()
         .with_filter(env_filter.clone());
 
-    // Layer para console (texto formatado, apenas info+)
-    let console_layer = fmt::layer()
-        .with_writer(std::io::stdout)
-        .with_filter(EnvFilter::new("info"));
-
-    // Inicializa o subscriber (com layer OTel quando feature "otel" e init ok)
+    // Inicializa o subscriber (com layer OTel quando feature "otel" e init ok).
+    // Com MCP ativo, console usa stderr para não corromper o protocolo MCP em stdout.
     #[cfg(not(feature = "otel"))]
-    Registry::default()
-        .with(file_layer)
-        .with(console_layer)
-        .init();
+    {
+        if use_stderr_console {
+            Registry::default()
+                .with(file_layer)
+                .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                .init();
+        } else {
+            Registry::default()
+                .with(file_layer)
+                .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                .init();
+        }
+    }
 
     #[cfg(feature = "otel")]
     {
         match ferres_db_server::tracing_otel::init_otel_tracing() {
             Ok((otel_layer, otel_provider)) => {
-                info!("OpenTelemetry tracing enabled (OTLP)");
                 let _otel_provider = otel_provider; // mantém vivo para exportar spans
-                Registry::default()
-                    .with(otel_layer)
-                    .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
-                    .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
-                    .init();
+                if use_stderr_console {
+                    Registry::default()
+                        .with(otel_layer)
+                        .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
+                        .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                        .init();
+                } else {
+                    Registry::default()
+                        .with(otel_layer)
+                        .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
+                        .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                        .init();
+                }
+                info!("OpenTelemetry tracing enabled (OTLP)");
             }
             Err(e) => {
                 warn!(error = %e, "OpenTelemetry init failed, continuing without OTLP export");
-                Registry::default()
-                    .with(file_layer)
-                    .with(console_layer)
-                    .init();
+                if use_stderr_console {
+                    Registry::default()
+                        .with(file_layer)
+                        .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                        .init();
+                } else {
+                    Registry::default()
+                        .with(file_layer)
+                        .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                        .init();
+                }
             }
         }
     }
@@ -143,6 +175,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Atualiza gauge de coleções ativas
     metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
 
+    // Inicia servidor MCP via STDIO quando --mcp ou FERRESDB_ENABLE_MCP=true (requer build com --features mcp)
+    #[cfg(feature = "mcp")]
+    if use_stderr_console {
+        ferres_db_server::mcp::spawn_mcp_server(Arc::new(app_state.clone()));
+        info!("MCP server started (STDIO)");
+    }
+
     // Inicia background task para auto-save a cada 30 segundos
     let app_state_for_save = app_state.clone();
     let shutdown_notify = app_state.shutdown_notify();
@@ -162,6 +201,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ = shutdown_notify_for_task.notified() => {
                     info!("auto-save task shutting down");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Inicia background task para auto-reindex a cada 30 minutos (fragmentação por tombstones)
+    const AUTO_REINDEX_INTERVAL_SECS: u64 = 30 * 60;
+    let app_state_for_reindex = app_state.clone();
+    let shutdown_notify_reindex = app_state.shutdown_notify();
+    let is_shutting_down_reindex = app_state.is_shutting_down.clone();
+    let reindex_task_handle = tokio::spawn(async move {
+        let mut reindex_interval = interval(Duration::from_secs(AUTO_REINDEX_INTERVAL_SECS));
+        loop {
+            tokio::select! {
+                _ = reindex_interval.tick() => {
+                    if !is_shutting_down_reindex.load(std::sync::atomic::Ordering::Acquire) {
+                        run_auto_reindex_cycle(&app_state_for_reindex);
+                    }
+                }
+                _ = shutdown_notify_reindex.notified() => {
+                    info!("auto-reindex worker task shutting down");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Inicia background task para vacuum de pontos expirados (TTL) a cada 60 segundos
+    const AUTO_VACUUM_INTERVAL_SECS: u64 = 60;
+    let app_state_for_vacuum = app_state.clone();
+    let shutdown_notify_vacuum = app_state.shutdown_notify();
+    let is_shutting_down_vacuum = app_state.is_shutting_down.clone();
+    let vacuum_task_handle = tokio::spawn(async move {
+        let mut vacuum_interval = interval(Duration::from_secs(AUTO_VACUUM_INTERVAL_SECS));
+        loop {
+            tokio::select! {
+                _ = vacuum_interval.tick() => {
+                    if !is_shutting_down_vacuum.load(std::sync::atomic::Ordering::Acquire) {
+                        run_auto_vacuum_cycle(&app_state_for_vacuum);
+                    }
+                }
+                _ = shutdown_notify_vacuum.notified() => {
+                    info!("auto-vacuum worker task shutting down");
                     break;
                 }
             }
@@ -295,17 +378,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Marca shutdown ANTES de notificar (task deixa de iniciar novos saves)
+    // Marca shutdown ANTES de notificar (tasks deixam de iniciar novos saves/reindex)
     app_state.set_shutting_down();
 
-    // Notifica a task e aguarda ela terminar para evitar salvar em paralelo
-    shutdown_notify.notify_one();
+    // Notifica as tasks de background e aguarda terminarem
+    shutdown_notify.notify_waiters();
     const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_secs(10);
     match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, save_task_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => error!(error = %e, "auto-save task panicked"),
         Err(_) => warn!(
             "auto-save task did not exit within {:?}, proceeding with shutdown save",
+            SHUTDOWN_TASK_TIMEOUT
+        ),
+    }
+    match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, reindex_task_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!(error = %e, "auto-reindex worker task panicked"),
+        Err(_) => warn!(
+            "auto-reindex worker task did not exit within {:?}, proceeding with shutdown",
+            SHUTDOWN_TASK_TIMEOUT
+        ),
+    }
+    match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, vacuum_task_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!(error = %e, "auto-vacuum worker task panicked"),
+        Err(_) => warn!(
+            "auto-vacuum worker task did not exit within {:?}, proceeding with shutdown",
             SHUTDOWN_TASK_TIMEOUT
         ),
     }

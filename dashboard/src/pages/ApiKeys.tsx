@@ -79,8 +79,8 @@ export const ApiKeys = () => {
       )}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">API Keys</h1>
-          <p className="text-gray-600 mt-2">Create and manage keys for API access</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-gray-50">API Keys</h1>
+          <p className="mt-1 text-sm text-gray-400">Create and manage keys for API access</p>
         </div>
         {(role === 'admin' || role === 'editor') && (
           <Button onClick={() => setIsCreateModalOpen(true)}>

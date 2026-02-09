@@ -137,6 +137,8 @@ function QueryTesterContent() {
   const [selectedCollection, setSelectedCollection] = useState('');
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(5);
+  const [searchNamespace, setSearchNamespace] = useState('');
+  const [searchVectorField, setSearchVectorField] = useState('');
 
   // RAG state
   const [isLoading, setIsLoading] = useState(false);
@@ -206,7 +208,16 @@ function QueryTesterContent() {
       const embeddingMs = Math.round(performance.now() - embeddingStart);
 
       const searchStart = performance.now();
-      const searchResults = await pointsApi.search(selectedCollection, embedding, limit);
+      const searchResults = await pointsApi.search(
+        selectedCollection,
+        embedding,
+        limit,
+        undefined,
+        {
+          namespace: searchNamespace.trim() || undefined,
+          vector_field: searchVectorField.trim() || undefined,
+        },
+      );
       const searchMs = Math.round(performance.now() - searchStart);
       setResults(searchResults);
 
@@ -260,6 +271,7 @@ function QueryTesterContent() {
       } else {
         params.rrf_k = parseInt(hybridRrfK, 10) || 60;
       }
+      if (searchNamespace.trim()) params.namespace = searchNamespace.trim();
       const res = await pointsApi.hybridSearch(selectedCollection, params as any);
       setHybridResults(res);
     } catch (err) {
@@ -283,6 +295,8 @@ function QueryTesterContent() {
       const res = await pointsApi.explain(selectedCollection, {
         vector: embedding,
         limit,
+        namespace: searchNamespace.trim() || undefined,
+        vector_field: searchVectorField.trim() || undefined,
       });
       setExplainResult(res);
     } catch (err) {
@@ -306,6 +320,8 @@ function QueryTesterContent() {
       const res = await pointsApi.estimate(selectedCollection, {
         vector: embedding,
         limit,
+        namespace: searchNamespace.trim() || undefined,
+        vector_field: searchVectorField.trim() || undefined,
       });
       setEstimateResult(res);
     } catch (err) {
@@ -320,7 +336,7 @@ function QueryTesterContent() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-gray-50">Query Tester</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-gray-50">Query Tester</h1>
         <p className="text-gray-400 mt-2">
           Test RAG queries, hybrid search, explain results, and estimate costs
         </p>
@@ -473,6 +489,28 @@ function QueryTesterContent() {
                 onChange={(e) => setLimit(Number(e.target.value))}
                 min={1}
                 max={100}
+                className="bg-bg-secondary border-bg-tertiary text-gray-50"
+              />
+            </div>
+
+            {/* Namespace (optional, for multitenancy) */}
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Namespace (optional)</label>
+              <Input
+                value={searchNamespace}
+                onChange={(e) => setSearchNamespace(e.target.value)}
+                placeholder="Restrict search to namespace"
+                className="bg-bg-secondary border-bg-tertiary text-gray-50"
+              />
+            </div>
+
+            {/* Vector field (optional, for multi-vector collections) */}
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Vector field (optional)</label>
+              <Input
+                value={searchVectorField}
+                onChange={(e) => setSearchVectorField(e.target.value)}
+                placeholder="default or e.g. title_vector, content_vector"
                 className="bg-bg-secondary border-bg-tertiary text-gray-50"
               />
             </div>

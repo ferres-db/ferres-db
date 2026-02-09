@@ -1,5 +1,6 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCollection, useTierDistribution } from '@/hooks/useCollections';
 import { usePoints } from '@/hooks/usePoints';
 import { useCollectionStats, useCollectionQueries } from '@/hooks/useCollectionStats';
@@ -10,9 +11,11 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
 import { DropdownMenu, DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs';
-import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers } from 'lucide-react';
+import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive, RefreshCw, Loader2 } from 'lucide-react';
+import type { CollectionQuantizationResponse } from '@/types';
 import { format } from 'date-fns';
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { reindexApi } from '@/api/ferresdb';
 
 interface FilterField {
   id: string;
@@ -31,11 +34,19 @@ export const CollectionPoints = () => {
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [filterFields, setFilterFields] = useState<FilterField[]>([]);
   const [newFilter, setNewFilter] = useState<FilterField>({ id: '', field: '', operator: '$eq', value: '' });
-  
+  const [namespaceFilter, setNamespaceFilter] = useState('');
+  const [reindexStarting, setReindexStarting] = useState(false);
+
+  const queryClient = useQueryClient();
   const { data: collection, isLoading: collectionLoading } = useCollection(name || '');
   const { data: stats, isLoading: statsLoading } = useCollectionStats(name || '');
   const { data: queries, isLoading: queriesLoading } = useCollectionQueries(name || '');
   const { data: tierDistribution } = useTierDistribution(name || '');
+  const { data: reindexJobs, isLoading: reindexJobsLoading, refetch: refetchReindexJobs } = useQuery({
+    queryKey: ['reindex', name],
+    queryFn: () => reindexApi.listJobs(name || ''),
+    enabled: !!name && activeTab === 'metrics',
+  });
   
   // Construir filtro a partir dos campos de filtro
   const filter = useMemo(() => {
@@ -79,6 +90,7 @@ export const CollectionPoints = () => {
     limit,
     offset: page * limit,
     filter,
+    namespace: namespaceFilter.trim() || undefined,
   });
   
   const totalPages = points ? Math.ceil(points.total / limit) : 0;
@@ -218,6 +230,17 @@ export const CollectionPoints = () => {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
   };
 
+  const handleStartReindex = async () => {
+    if (!name) return;
+    setReindexStarting(true);
+    try {
+      await reindexApi.start(name);
+      await refetchReindexJobs();
+    } finally {
+      setReindexStarting(false);
+    }
+  };
+
   if (!name) {
     return (
       <div className="space-y-6">
@@ -239,8 +262,8 @@ export const CollectionPoints = () => {
             Back
           </Button>
           <div>
-            <h1 className="text-3xl font-bold text-gray-50">{name}</h1>
-            <p className="text-gray-400 mt-2">Collection details and points</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-gray-50">{name}</h1>
+            <p className="mt-1 text-sm text-gray-400">Collection details and points</p>
           </div>
         </div>
       </div>
@@ -281,33 +304,80 @@ export const CollectionPoints = () => {
               </div>
             </div>
 
+            {/* Features: Quantization, BM25, Tiered Storage */}
+            <div className="mt-4 pt-4 border-t border-black/20">
+              <p className="mb-3 text-sm font-medium text-gray-400">Features</p>
+              <div className="flex flex-wrap gap-3">
+                {(() => {
+                  const q = collection?.quantization as CollectionQuantizationResponse | undefined;
+                  const isScalar = q && typeof q === 'object' && 'Scalar' in q;
+                  const scalarConfig = isScalar && typeof q === 'object' && q.Scalar ? q.Scalar : null;
+                  return (
+                    <>
+                      <div className="flex items-center gap-2 rounded-lg border border-black/20 bg-black/10 px-3 py-2">
+                        <Cpu className="h-4 w-4 text-orange-500" />
+                        <div>
+                          <p className="text-xs text-gray-400">Quantization</p>
+                          <p className="text-sm font-medium text-gray-50">
+                            {isScalar && scalarConfig
+                              ? `Scalar (SQ8)${scalarConfig.always_ram ? ' · re-rank in RAM' : ''}${scalarConfig.quantile != null ? ` · quantile ${scalarConfig.quantile}` : ''}`
+                              : 'None'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 rounded-lg border border-black/20 bg-black/10 px-3 py-2">
+                        <Search className="h-4 w-4 text-orange-500" />
+                        <div>
+                          <p className="text-xs text-gray-400">BM25</p>
+                          <p className="text-sm font-medium text-gray-50">
+                            {collection?.enable_bm25
+                              ? `Enabled${collection.bm25_text_field ? ` (field: ${collection.bm25_text_field})` : ''}`
+                              : 'Disabled'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 rounded-lg border border-black/20 bg-black/10 px-3 py-2">
+                        <HardDrive className="h-4 w-4 text-orange-500" />
+                        <div>
+                          <p className="text-xs text-gray-400">Tiered Storage</p>
+                          <p className="text-sm font-medium text-gray-50">
+                            {collection?.tiered_storage?.enabled ? 'Enabled' : 'Disabled'}
+                          </p>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+
             {/* Tier Distribution */}
             {tierDistribution && (tierDistribution.warm > 0 || tierDistribution.cold > 0) && (
-              <div className="mt-4 pt-4 border-t border-bg-tertiary">
-                <div className="flex items-center gap-2 mb-3">
+              <div className="mt-4 pt-4 border-t border-black/20">
+                <div className="mb-3 flex items-center gap-2">
                   <Layers className="h-4 w-4 text-gray-400" />
                   <p className="text-sm font-medium text-gray-400">Tiered Storage</p>
                 </div>
                 <div className="grid grid-cols-3 gap-4">
-                  <div className="bg-bg-tertiary/50 rounded-md p-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="w-2 h-2 rounded-full bg-orange-500" />
+                  <div className="rounded-lg border border-black/20 bg-black/10 p-3">
+                    <div className="mb-1 flex items-center gap-2">
+                      <div className="h-2 w-2 rounded-full bg-orange-500" />
                       <p className="text-xs text-gray-400">Hot (RAM)</p>
                     </div>
                     <p className="text-lg font-semibold text-gray-50">{tierDistribution.hot.toLocaleString()}</p>
                     <p className="text-[10px] text-gray-500">{formatBytes(tierDistribution.hot_memory_bytes)}</p>
                   </div>
-                  <div className="bg-bg-tertiary/50 rounded-md p-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="w-2 h-2 rounded-full bg-yellow-500" />
+                  <div className="rounded-lg border border-black/20 bg-black/10 p-3">
+                    <div className="mb-1 flex items-center gap-2">
+                      <div className="h-2 w-2 rounded-full bg-yellow-500" />
                       <p className="text-xs text-gray-400">Warm (mmap)</p>
                     </div>
                     <p className="text-lg font-semibold text-gray-50">{tierDistribution.warm.toLocaleString()}</p>
                     <p className="text-[10px] text-gray-500">{formatBytes(tierDistribution.warm_memory_bytes)}</p>
                   </div>
-                  <div className="bg-bg-tertiary/50 rounded-md p-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="w-2 h-2 rounded-full bg-blue-500" />
+                  <div className="rounded-lg border border-black/20 bg-black/10 p-3">
+                    <div className="mb-1 flex items-center gap-2">
+                      <div className="h-2 w-2 rounded-full bg-blue-500" />
                       <p className="text-xs text-gray-400">Cold (disk)</p>
                     </div>
                     <p className="text-lg font-semibold text-gray-50">{tierDistribution.cold.toLocaleString()}</p>
@@ -316,7 +386,7 @@ export const CollectionPoints = () => {
                 </div>
                 {/* Tier distribution bar */}
                 {(tierDistribution.hot + tierDistribution.warm + tierDistribution.cold) > 0 && (
-                  <div className="mt-3 h-2 rounded-full overflow-hidden flex bg-bg-tertiary">
+                  <div className="mt-3 flex h-2 overflow-hidden rounded-full bg-black/20">
                     {tierDistribution.hot > 0 && (
                       <div
                         className="bg-orange-500 h-full"
@@ -373,6 +443,18 @@ export const CollectionPoints = () => {
                 </h2>
               </div>
               <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-gray-400">Namespace:</label>
+                  <Input
+                    placeholder="Filter by namespace"
+                    value={namespaceFilter}
+                    onChange={(e) => {
+                      setNamespaceFilter(e.target.value);
+                      setPage(0);
+                    }}
+                    className="h-8 w-32 bg-bg-secondary border-bg-tertiary text-gray-50 text-sm"
+                  />
+                </div>
                 <div className="flex items-center gap-2">
                   <label className="text-sm text-gray-400">Limit:</label>
                   <select
@@ -543,6 +625,17 @@ export const CollectionPoints = () => {
                               <div className="text-xs text-gray-400 mb-1">ID</div>
                               <div className="font-mono text-sm text-gray-50 break-all">{point.id}</div>
                             </div>
+                            {(point.namespace != null && point.namespace !== '') && (
+                              <div className="mb-2">
+                                <div className="text-xs text-gray-400 mb-0.5">Namespace</div>
+                                <Badge variant="default" className="text-xs font-normal">{point.namespace}</Badge>
+                              </div>
+                            )}
+                            {point.ttl != null && (
+                              <div className="mb-2 text-xs text-gray-400">
+                                TTL: {point.ttl}s
+                              </div>
+                            )}
 
                             {textContent && (
                               <div className="mb-4">
@@ -692,6 +785,54 @@ export const CollectionPoints = () => {
                     </CardContent>
                   </Card>
                 </div>
+
+                {/* Reindex: Tombstones + manual reindex + jobs */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <RefreshCw className="h-5 w-5" />
+                      Reindex
+                    </CardTitle>
+                    <p className="text-sm text-gray-400 mt-1">
+                      Tombstones: {stats.tombstone_count ?? 0}. Auto-reindex runs every 30 min when tombstones exceed 20% of indexed points.
+                    </p>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={handleStartReindex}
+                      disabled={reindexStarting}
+                    >
+                      {reindexStarting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
+                      Run reindex
+                    </Button>
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-gray-400">Reindex jobs</span>
+                        <Button variant="ghost" size="sm" onClick={() => refetchReindexJobs()} className="h-7 text-xs">
+                          Refresh
+                        </Button>
+                      </div>
+                      {reindexJobsLoading ? (
+                        <Skeleton className="h-20 w-full" />
+                      ) : reindexJobs && reindexJobs.length > 0 ? (
+                        <ul className="space-y-2 text-sm">
+                          {reindexJobs.map((job) => (
+                            <li key={job.id} className="flex items-center justify-between rounded border border-bg-tertiary bg-bg-secondary/50 px-3 py-2">
+                              <span className="font-mono text-xs text-gray-400 truncate max-w-[200px]" title={job.id}>{job.id}</span>
+                              <Badge variant="default">{job.status}</Badge>
+                              <span className="text-gray-500 text-xs">{Math.round(job.progress * 100)}%</span>
+                              <span className="text-gray-500 text-xs">{format(new Date(job.started_at * 1000), 'MMM d, HH:mm')}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-sm text-gray-500">No reindex jobs yet.</p>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
 
                 {/* Tier Distribution Chart */}
                 {tierDistribution && (tierDistribution.warm > 0 || tierDistribution.cold > 0) && (

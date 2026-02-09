@@ -2,10 +2,14 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import { pointsApi } from '@/api/ferresdb';
 import type { Point, SearchResult } from '@/types';
 
-export const usePoint = (collection: string, id: string) => {
+export const usePoint = (
+  collection: string,
+  id: string,
+  options?: { namespace?: string },
+) => {
   return useQuery({
-    queryKey: ['points', collection, id],
-    queryFn: () => pointsApi.get(collection, id),
+    queryKey: ['points', collection, id, options?.namespace],
+    queryFn: () => pointsApi.get(collection, id, options),
     enabled: !!collection && !!id,
   });
 };
@@ -17,12 +21,17 @@ export const useSearch = () => {
       vector,
       limit,
       filter,
+      namespace,
+      vector_field,
     }: {
       collection: string;
       vector: number[];
       limit?: number;
       filter?: Record<string, unknown>;
-    }): Promise<SearchResult[]> => pointsApi.search(collection, vector, limit, filter),
+      namespace?: string;
+      vector_field?: string;
+    }): Promise<SearchResult[]> =>
+      pointsApi.search(collection, vector, limit, filter, { namespace, vector_field }),
   });
 };
 
@@ -35,7 +44,14 @@ export const useUpsertPoints = () => {
 
 export const useDeletePoints = () => {
   return useMutation({
-    mutationFn: ({ collection, ids }: { collection: string; ids: string[] }) =>
-      pointsApi.delete(collection, ids),
+    mutationFn: ({
+      collection,
+      ids,
+      namespace,
+    }: {
+      collection: string;
+      ids: string[];
+      namespace?: string;
+    }) => pointsApi.delete(collection, ids, { namespace }),
   });
 };

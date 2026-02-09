@@ -11,7 +11,7 @@ use validator::{Validate, ValidationError};
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage, QuantizationConfig};
+use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage, QuantizationConfig, TieredStorageConfig};
 
 use crate::api_err;
 use crate::auth::{AuthenticatedUser, check_user_permission};
@@ -98,6 +98,14 @@ pub struct GetCollectionResponse {
     pub last_updated: u64,
     pub distance: DistanceMetric,
     pub stats: CollectionStatsResponse,
+    /// Quantização de vetores (None ou Scalar SQ8).
+    pub quantization: QuantizationConfig,
+    /// BM25 habilitado para busca híbrida.
+    pub enable_bm25: bool,
+    /// Campo em metadata usado como texto para BM25.
+    pub bm25_text_field: String,
+    /// Configuração de tiered storage (Hot/Warm/Cold).
+    pub tiered_storage: TieredStorageConfig,
 }
 
 /// Estatísticas da coleção na resposta.
@@ -192,8 +200,12 @@ pub async fn create_collection(
     let collection_dir = app_state.config.storage_path.join("collections").join(&payload.name);
     {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-        FileStorage::save_collection(&collection, &collection_dir)
-            .map_err(ApiError::from)?;
+        FileStorage::save_collection(
+            &collection,
+            &collection_dir,
+            app_state.config.binary_snapshot,
+        )
+        .map_err(ApiError::from)?;
     }
 
     // Marca como limpa após salvar
@@ -303,6 +315,10 @@ pub async fn get_collection(
         stats: CollectionStatsResponse {
             index_size_bytes,
         },
+        quantization: config.quantization.clone(),
+        enable_bm25: config.enable_bm25,
+        bm25_text_field: config.bm25_text_field.clone(),
+        tiered_storage: config.tiered_storage.clone(),
     }))
 }
 

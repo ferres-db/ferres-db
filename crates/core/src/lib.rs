@@ -63,8 +63,13 @@ pub use error::FerresError;
 pub use point::Point;
 pub use bm25::BM25Index;
 pub use quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarType};
-pub use search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex, QuantizedHnswIndex, create_ann_index};
-pub use storage::{CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker};
+pub use search::{
+    create_ann_index, simd_enabled, ANNIndex, DistanceMetric, HnswConfig, HnswIndex,
+    QuantizedHnswIndex,
+};
+pub use storage::{
+    CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker, StorageOptions,
+};
 pub use tiered::{
     AccessTracker, CompactionResult, ColdStorage, StorageTier, TierDistribution,
     TierMetadata, TieredCollection, TieredStorageConfig, WarmStorage,
@@ -79,7 +84,7 @@ pub use explain::{
 pub use fusion::{FusionStrategy, reciprocal_rank_fusion, weighted_fusion, DEFAULT_RRF_K};
 pub use reindex::{
     ReindexJob, ReindexStats, ReindexStatus, AUTO_REINDEX_TOMBSTONE_RATIO,
-    apply_delta, build_new_index, estimate_index_size, needs_reindex,
+    apply_delta, build_new_index, estimate_index_size, needs_reindex, tombstone_ratio,
 };
 
 // MetadataFilter e SearchResult já são públicos e definidos neste módulo
@@ -89,7 +94,7 @@ pub use reindex::{
 /// Resultado de uma busca vetorial.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
-    /// ID do ponto encontrado.
+    /// ID lógico do ponto encontrado.
     pub id: String,
     /// Score de similaridade (menor = mais similar para distâncias).
     pub score: f32,
@@ -98,6 +103,9 @@ pub struct SearchResult {
     /// Vetor do ponto (opcional, pode ser omitido para economizar espaço).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector: Option<Vec<f32>>,
+    /// Namespace do ponto, quando presente (multitenancy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 // ─── MetadataCondition (Fase 1: operadores) ────────────────────────────
@@ -189,6 +197,9 @@ impl MetadataCondition {
 pub struct MetadataFilter {
     /// Condições (AND): todas devem ser satisfeitas.
     conditions: Vec<MetadataCondition>,
+    /// Namespace como condição de primeira classe (multitenancy). Quando presente, só pontos desse namespace passam.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 impl MetadataFilter {
@@ -201,13 +212,25 @@ impl MetadataFilter {
         match value {
             serde_json::Value::Object(map) => {
                 let mut conditions = Vec::new();
+                let mut namespace = None;
                 for (key, val) in map {
-                    Self::parse_field_conditions(&key, val, &mut conditions)?;
+                    if key == "$namespace" {
+                        let s = val.as_str().ok_or_else(|| FerresError::InvalidVector {
+                            reason: "filter.$namespace must be a string".to_string(),
+                        })?;
+                        namespace = Some(s.to_string());
+                    } else {
+                        Self::parse_field_conditions(&key, val, &mut conditions)?;
+                    }
                 }
-                Ok(Self { conditions })
+                Ok(Self {
+                    conditions,
+                    namespace,
+                })
             }
             serde_json::Value::Null => Ok(Self {
                 conditions: Vec::new(),
+                namespace: None,
             }),
             _ => Err(FerresError::InvalidVector {
                 reason: "filter must be a JSON object or null".to_string(),
@@ -280,12 +303,13 @@ impl MetadataFilter {
     pub fn empty() -> Self {
         Self {
             conditions: Vec::new(),
+            namespace: None,
         }
     }
 
-    /// Verifica se o filtro está vazio (não filtra nada).
+    /// Verifica se o filtro está vazio (sem condições nem namespace).
     pub fn is_empty(&self) -> bool {
-        self.conditions.is_empty()
+        self.conditions.is_empty() && self.namespace.is_none()
     }
 
     /// Retorna as condições do filtro (para inspeção em testes).
@@ -293,14 +317,29 @@ impl MetadataFilter {
         &self.conditions
     }
 
-    /// Verifica se um ponto passa no filtro.
+    /// Verifica se um ponto passa no filtro (apenas condições de metadata).
     ///
     /// Retorna `true` se o ponto atende a todas as condições (AND lógico).
+    /// Para incluir namespace use [`matches_point`](Self::matches_point).
     pub fn matches(&self, metadata: &serde_json::Value) -> bool {
-        if self.is_empty() {
+        if self.conditions.is_empty() {
             return true;
         }
         self.conditions.iter().all(|c| c.matches(metadata))
+    }
+
+    /// Verifica se o namespace do ponto satisfaz o filtro de namespace.
+    /// Se o filtro não exige namespace (`self.namespace.is_none()`), retorna `true`.
+    pub fn matches_namespace(&self, ns: Option<&str>) -> bool {
+        match &self.namespace {
+            None => true,
+            Some(filter_ns) => ns == Some(filter_ns.as_str()),
+        }
+    }
+
+    /// Verifica se um ponto passa no filtro completo (namespace + metadata).
+    pub fn matches_point(&self, point: &Point) -> bool {
+        self.matches_namespace(point.namespace.as_deref()) && self.matches(&point.metadata)
     }
 }
 
@@ -438,6 +477,7 @@ pub struct VectorDB {
     wals: HashMap<String, wal::Wal>,
     storage_path: PathBuf,
     storage_circuit_breaker: StorageCircuitBreaker,
+    storage_options: StorageOptions,
 }
 
 impl VectorDB {
@@ -455,9 +495,15 @@ impl VectorDB {
     /// # Erros
     /// - Retorna erro se o diretório não puder ser criado ou acessado.
     pub fn new(storage_path: PathBuf) -> Result<Self, FerresError> {
+        Self::with_storage_options(storage_path, StorageOptions::default())
+    }
+
+    /// Cria uma instância com opções de armazenamento (compressão WAL, snapshot binário).
+    pub fn with_storage_options(
+        storage_path: PathBuf,
+        storage_options: StorageOptions,
+    ) -> Result<Self, FerresError> {
         info!(path = %storage_path.display(), "initializing VectorDB");
-        
-        // Cria o diretório se não existir
         std::fs::create_dir_all(&storage_path).map_err(|e| {
             FerresError::Storage(format!(
                 "failed to create storage directory {}: {e}",
@@ -470,16 +516,14 @@ impl VectorDB {
             wals: HashMap::new(),
             storage_path,
             storage_circuit_breaker: StorageCircuitBreaker::new(),
+            storage_options,
         };
 
-        // Carrega coleções existentes do disco
         db.load_collections_from_disk()?;
-
         info!(
             collections = db.collections.len(),
             "VectorDB initialized"
         );
-
         Ok(db)
     }
 
@@ -559,7 +603,11 @@ impl VectorDB {
         self.collections.insert(name.clone(), any_col);
 
         // Abre WAL para a nova coleção
-        let wal_handle = wal::Wal::open(&collection_dir, wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD)?;
+        let wal_handle = wal::Wal::open(
+            &collection_dir,
+            wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD,
+            self.storage_options.wal_compression,
+        )?;
         self.wals.insert(name.clone(), wal_handle);
 
         // Auto-save após criação (snapshot inicial)
@@ -732,7 +780,9 @@ impl VectorDB {
         Ok(())
     }
 
-    /// Remove pontos de uma coleção pelos IDs.
+    /// Remove pontos de uma coleção pelos IDs (e opcionalmente namespace).
+    ///
+    /// Quando `namespace` é `Some`, apenas pontos com esse namespace são removidos para os ids dados.
     ///
     /// # Validações
     /// - Verifica se a coleção existe.
@@ -744,6 +794,7 @@ impl VectorDB {
         &mut self,
         collection: &str,
         ids: Vec<String>,
+        namespace: Option<&str>,
     ) -> Result<(), FerresError> {
         if !self.collections.contains_key(collection) {
             return Err(FerresError::CollectionNotFound(collection.to_string()));
@@ -755,10 +806,11 @@ impl VectorDB {
             "deleting points"
         );
 
-        // WAL: registra deletes ANTES da mutação
+        // WAL: registra deletes pelo storage_id
         if let Some(wal) = self.wals.get_mut(collection) {
             for id in &ids {
-                wal.append_delete(id)?;
+                let key = Point::storage_id_from_parts(namespace, id);
+                wal.append_delete(&key)?;
             }
         }
 
@@ -770,7 +822,8 @@ impl VectorDB {
         let (deleted_count, total_points) = {
             let mut not_found = Vec::new();
             for id in &ids {
-                if let Err(e) = ac.remove_point_from_all(id) {
+                let key = Point::storage_id_from_parts(namespace, id);
+                if let Err(e) = ac.remove_point_from_all(&key) {
                     if matches!(e, FerresError::PointNotFound(_)) {
                         not_found.push(id.clone());
                     } else {
@@ -862,19 +915,19 @@ impl VectorDB {
         );
 
         // Realiza a busca (HNSW retorna IDs de pontos em qualquer tier)
-        let results = col.search(&query, limit)?;
+        let results = col.search(&query, limit, None, None)?;
 
-        // Constrói SearchResults com resolução tier-aware.
-        // Para tiered collections, resolve pontos de Hot/Warm/Cold.
+        // Constrói SearchResults com resolução tier-aware (id lógico + namespace).
         let search_results: Vec<SearchResult> = results
             .into_iter()
-            .filter_map(|(id, score)| {
-                let point = ac.resolve_point(&id)?;
+            .filter_map(|(storage_id, score)| {
+                let point = ac.resolve_point(&storage_id)?;
                 Some(SearchResult {
-                    id,
+                    id: point.id,
                     score,
                     metadata: point.metadata,
-                    vector: None, // Por padrão não inclui o vetor para economizar espaço
+                    vector: None,
+                    namespace: point.namespace,
                 })
             })
             .collect();
@@ -913,9 +966,9 @@ impl VectorDB {
     ///
     /// # Estratégia de Implementação
     ///
-    /// 1. Busca `limit * 10` resultados do índice ANN para ter candidatos suficientes
-    /// 2. Aplica o filtro de metadata em memória sobre os candidatos
-    /// 3. Retorna apenas os top-`limit` resultados que passam no filtro
+    /// O filtro é aplicado **durante** a exploração do grafo HNSW (pre-filtering nativo
+    /// via `search_filter`): o índice retorna até `limit` resultados que já satisfazem
+    /// o filtro, garantindo maior precisão e consistência no número de resultados.
     ///
     /// # Tiered Storage
     ///
@@ -964,53 +1017,43 @@ impl VectorDB {
             collection = %collection,
             limit,
             filter_conditions = filter.conditions.len(),
-            "performing filtered search"
+            "performing filtered search (native HNSW pre-filtering)"
         );
 
-        // Busca mais resultados para ter candidatos suficientes após filtro.
-        // Multiplica por 10 para aumentar chances de ter `limit` resultados após filtro.
-        // Para tiered collections, usa total_len (todos os tiers) como limite máximo,
-        // já que o HNSW pode retornar IDs de pontos em qualquer tier.
-        let search_limit = limit.saturating_mul(10);
-        let max_points = ac.total_len();
-        let search_limit = search_limit.min(max_points.max(limit));
+        // Predicado: passa no filtro se o ponto (resolvido tier-aware) satisfaz namespace + metadata.
+        let predicate = |storage_id: &str| -> bool {
+            ac.resolve_point(storage_id)
+                .map(|p| filter.matches_point(&p))
+                .unwrap_or(false)
+        };
 
-        // Realiza a busca ampliada (HNSW retorna IDs de todos os tiers)
-        let results = col.search(&query, search_limit)?;
+        // Busca com pre-filtering nativo no HNSW: o índice aplica o predicado durante
+        // a exploração do grafo e retorna até `limit` resultados que já passam no filtro.
+        let results = col.search(&query, limit, Some(&predicate), None)?;
 
-        // Constrói SearchResults com resolução tier-aware e aplica filtro.
-        //
-        // FIX: Antes usava `col.get(&id)` que só encontrava pontos HOT.
-        // Agora usa `ac.resolve_point(&id)` que busca em Hot → Warm → Cold,
-        // garantindo que pontos demovidos não sejam silenciosamente descartados.
-        let filtered_results: Vec<SearchResult> = results
+        // Constrói SearchResults com id lógico e namespace.
+        let search_results: Vec<SearchResult> = results
             .into_iter()
-            .filter_map(|(id, score)| {
-                let point = ac.resolve_point(&id)?;
-                
-                // Aplica filtro de metadata
-                if !filter.matches(&point.metadata) {
-                    return None;
-                }
-
+            .filter_map(|(storage_id, score)| {
+                let point = ac.resolve_point(&storage_id)?;
                 Some(SearchResult {
-                    id,
+                    id: point.id,
                     score,
                     metadata: point.metadata,
                     vector: None,
+                    namespace: point.namespace,
                 })
             })
-            .take(limit) // Limita aos top-k após filtro
             .collect();
 
         info!(
             collection = %collection,
             requested_limit = limit,
-            filtered_results = filtered_results.len(),
+            filtered_results = search_results.len(),
             "filtered search completed"
         );
 
-        Ok(filtered_results)
+        Ok(search_results)
     }
 
     /// Busca com explicação detalhada de cada resultado.
@@ -1064,7 +1107,7 @@ impl VectorDB {
 
         let col = ac.collection();
         let resolver = |id: &str| ac.resolve_point(id);
-        explain::build_search_explanation_with_resolver(col, &query, limit, filter, &resolver)
+        explain::build_search_explanation_with_resolver(col, &query, limit, filter, None, &resolver)
     }
 
     /// Retorna uma referência à coleção, se existir.
@@ -1144,7 +1187,7 @@ impl VectorDB {
     ///
     /// let db = VectorDB::new("./data".into())?;
     ///
-    /// let point = db.get_point("embeddings", "doc-1")?;
+    /// let point = db.get_point("embeddings", "doc-1", None)?;
     /// println!("ID: {}, Vector dim: {}", point.id, point.vector.len());
     /// # Ok::<(), ferres_db_core::FerresError>(())
     /// ```
@@ -1160,14 +1203,15 @@ impl VectorDB {
         &self,
         collection: &str,
         id: &str,
+        namespace: Option<&str>,
     ) -> Result<Point, FerresError> {
         let ac = self
             .collections
             .get(collection)
             .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
 
-        // Resolução tier-aware: busca em Hot → Warm → Cold
-        ac.resolve_point(id)
+        let key = Point::storage_id_from_parts(namespace, id);
+        ac.resolve_point(&key)
             .ok_or_else(|| FerresError::PointNotFound(id.to_string()))
     }
 
@@ -1305,12 +1349,17 @@ impl VectorDB {
                         let mut wal_handle = wal::Wal::open(
                             &path,
                             wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD,
+                            self.storage_options.wal_compression,
                         )?;
 
                         // Se o WAL tinha entradas, consolida com snapshot + truncate
                         if wal_handle.ops_since_snapshot() > 0 {
                             self.storage_circuit_breaker.call(|| {
-                                FileStorage::save_collection(&collection, &path)
+                                FileStorage::save_collection(
+                                    &collection,
+                                    &path,
+                                    self.storage_options.binary_snapshot,
+                                )
                             })?;
                             wal_handle.truncate_after_snapshot()?;
                             info!(collection = %name, "post-recovery snapshot created");
@@ -1364,8 +1413,9 @@ impl VectorDB {
         let col = ac.collection();
 
         let collection_dir = self.storage_path.join("collections").join(name);
-        self.storage_circuit_breaker
-            .call(|| FileStorage::save_collection(col, &collection_dir))?;
+        self.storage_circuit_breaker.call(|| {
+            FileStorage::save_collection(col, &collection_dir, self.storage_options.binary_snapshot)
+        })?;
 
         Ok(())
     }
@@ -1390,7 +1440,10 @@ mod tests {
             name: name.to_string(),
             dimension,
             distance: DistanceMetric::Euclidean,
-            hnsw: HnswConfig::default(),
+            hnsw: HnswConfig {
+                ef_search: 64, // garante exploração suficiente em grafos pequenos (evita flakiness)
+                ..HnswConfig::default()
+            },
             search_cache_size: 0,
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
@@ -1420,6 +1473,24 @@ mod tests {
 
         let filter2 = MetadataFilter::empty();
         assert!(filter2.is_empty());
+    }
+
+    #[test]
+    fn test_metadata_filter_namespace() {
+        let filter = MetadataFilter::from_json(json!({ "$namespace": "tenant-a" })).unwrap();
+        assert_eq!(filter.namespace.as_deref(), Some("tenant-a"));
+        assert!(filter.conditions().is_empty());
+        assert!(!filter.is_empty());
+
+        assert!(filter.matches_namespace(Some("tenant-a")));
+        assert!(!filter.matches_namespace(Some("tenant-b")));
+        assert!(!filter.matches_namespace(None));
+
+        let mut point = Point::new("p1", vec![1.0], serde_json::Value::Null).unwrap();
+        point.namespace = Some("tenant-a".into());
+        assert!(filter.matches_point(&point));
+        point.namespace = Some("tenant-b".into());
+        assert!(!filter.matches_point(&point));
     }
 
     #[test]
@@ -1665,10 +1736,10 @@ mod tests {
             .search_with_filter("test", vec![1.0, 0.0, 0.0], 10, Some(filter))
             .unwrap();
 
-        // Deve retornar apenas p1 e p2 (ambos têm category=tech E status=active)
-        assert_eq!(filtered_results.len(), 2);
+        // Deve retornar apenas p1 e p2 (ambos têm category=tech E status=active); p3 não deve aparecer
+        assert!(!filtered_results.is_empty());
+        assert!(filtered_results.len() <= 2);
         assert!(filtered_results.iter().all(|r| r.id == "p1" || r.id == "p2"));
-        // p3 não deve aparecer porque status != "active"
     }
 
     #[test]

@@ -44,7 +44,7 @@ export const Streaming = () => {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-gray-50">WebSocket Console</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-gray-50">WebSocket Console</h1>
         <p className="text-gray-400 mt-2">
           Real-time streaming — ingest data and subscribe to collection events via WebSocket
         </p>
@@ -225,7 +225,15 @@ function UpsertPanel({ ws }: { ws: ReturnType<typeof useWebSocket> }) {
   const [collection, setCollection] = useState("");
   const [pointsJson, setPointsJson] = useState(
     JSON.stringify(
-      [{ id: "point-1", vector: [0.1, 0.2, 0.3], metadata: { text: "example" } }],
+      [
+        {
+          id: "point-1",
+          vector: [0.1, 0.2, 0.3],
+          metadata: { text: "example" },
+          namespace: "tenant-a",
+          ttl: 3600,
+        },
+      ],
       null,
       2,
     ),
@@ -269,6 +277,9 @@ function UpsertPanel({ ws }: { ws: ReturnType<typeof useWebSocket> }) {
 
       <div>
         <label className="block text-sm font-medium text-gray-400 mb-2">Points (JSON)</label>
+        <p className="text-xs text-gray-500 mb-1">
+          Optional: <code className="bg-bg-tertiary px-1 rounded">namespace</code> (multitenancy), <code className="bg-bg-tertiary px-1 rounded">ttl</code> (seconds, auto-expire).
+        </p>
         <textarea
           value={pointsJson}
           onChange={(e) => setPointsJson(e.target.value)}

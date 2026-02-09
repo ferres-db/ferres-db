@@ -36,6 +36,12 @@ pub struct PointInput {
     pub vector: Vec<f32>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// Namespace lógico (multitenancy). Quando presente, o ponto fica isolado nesse namespace.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// TTL em segundos; se presente, o ponto expira após esse tempo (removido pelo worker de vacuum).
+    #[serde(default)]
+    pub ttl: Option<u64>,
 }
 
 /// Resposta de upsert de pontos.
@@ -56,6 +62,9 @@ pub struct FailedPoint {
 #[derive(Debug, Deserialize)]
 pub struct DeletePointsRequest {
     pub ids: Vec<String>,
+    /// Quando presente, remove apenas pontos deste namespace.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// Resposta de deleção de pontos.
@@ -71,6 +80,13 @@ pub struct SearchPointsRequest {
     pub limit: usize,
     #[serde(default)]
     pub filter: Option<serde_json::Value>,
+    /// Restringe resultados a este namespace (multitenancy).
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Campo vetorial contra o qual buscar. Omitido ou "default" = vetor principal;
+    /// outro nome (ex.: "title_vector", "content_vector") = índice nomeado.
+    #[serde(default)]
+    pub vector_field: Option<String>,
     /// Orçamento máximo em ms. Se a estimativa de custo exceder, retorna erro 422
     /// com a estimativa detalhada no body (sem executar a busca).
     #[serde(default)]
@@ -92,6 +108,9 @@ pub struct HybridSearchPointsRequest {
     /// Constante k para RRF (default: 60). Apenas usado quando fusion = "rrf".
     #[serde(default)]
     pub rrf_k: Option<usize>,
+    /// Restringe resultados a este namespace (multitenancy).
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 fn default_alpha() -> f32 {
@@ -114,6 +133,8 @@ pub struct SearchResult {
     pub id: String,
     pub score: f32,
     pub metadata: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 /// Resposta de obtenção de um ponto.
@@ -122,6 +143,8 @@ pub struct GetPointResponse {
     pub id: String,
     pub vector: Vec<f32>,
     pub metadata: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     pub created_at: u64,
 }
 
@@ -244,7 +267,17 @@ pub async fn upsert_points(
             }
 
             match Point::new(input.id.clone(), input.vector, input.metadata) {
-                Ok(point) => points.push(point),
+                Ok(mut point) => {
+                    point.namespace = input.namespace;
+                    if let Some(ttl) = input.ttl {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .expect("system clock before UNIX epoch")
+                            .as_secs();
+                        point.expires_at = Some(now_secs.saturating_add(ttl));
+                    }
+                    points.push(point);
+                }
                 Err(e) => {
                     failed.push(FailedPoint {
                         id: input.id,
@@ -279,6 +312,11 @@ pub async fn upsert_points(
 
     // Emite evento no broadcast channel para subscribers WebSocket
     if upserted > 0 {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        app_state.record_ingest(now_secs, upserted as u64);
         // Coleta IDs dos pontos inseridos com sucesso
         // (todos os que não estão em batch_failed)
         let failed_ids: std::collections::HashSet<&str> =
@@ -291,10 +329,7 @@ pub async fn upsert_points(
             collection: name.clone(),
             action: "upsert".to_string(),
             point_ids,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: now_secs,
         };
         app_state.emit_event(event);
     }
@@ -347,10 +382,14 @@ pub async fn delete_points(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
+    let keys: Vec<String> = payload.ids
+        .iter()
+        .map(|id| Point::storage_id_from_parts(payload.namespace.as_deref(), id))
+        .collect();
     let deleted_ids = payload.ids.clone();
     let deleted = {
         let mut collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
-        collection.delete_points_batch(&payload.ids).map_err(ApiError::from)?
+        collection.delete_points_batch(&keys).map_err(ApiError::from)?
     };
 
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -507,53 +546,62 @@ pub async fn search_points(
     let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let search_start = Instant::now();
 
-    // Fase: busca (HNSW)
+    // Fase: busca (HNSW), com pre-filtering nativo quando filtro ou namespace está presente
     let _span = tracing::info_span!("hnsw_search").entered();
-    let results = collection.search(&payload.vector, payload.limit)
-        .map_err(ApiError::from)?;
+    let mut filter = match &payload.filter {
+        Some(fv) => MetadataFilter::from_json(fv.clone()).map_err(|e| ApiError::invalid_payload(e.to_string()))?,
+        None => MetadataFilter::empty(),
+    };
+    if let Some(ns) = &payload.namespace {
+        filter.namespace = Some(ns.clone());
+    }
+    let vector_field = payload.vector_field.as_deref();
+    let results = if filter.is_empty() {
+        collection.search(&payload.vector, payload.limit, None, vector_field).map_err(ApiError::from)?
+    } else {
+        let predicate = |id: &str| {
+            collection
+                .get(id)
+                .map(|p| filter.matches_point(&p))
+                .unwrap_or(false)
+        };
+        collection
+            .search(&payload.vector, payload.limit, Some(&predicate), vector_field)
+            .map_err(ApiError::from)?
+    };
     drop(_span);
 
     let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     tracing::Span::current().record("db.duration.search_ms", search_ms);
     let hydrate_start = Instant::now();
 
-    // Fase: hydrate (construir SearchResults + filtro)
+    // Fase: hydrate (construir SearchResults com id lógico e namespace)
     let _span = tracing::info_span!("hydrate_results").entered();
     let search_results: Vec<ferres_db_core::SearchResult> = results
         .into_iter()
-        .filter_map(|(id, score)| {
-            let point = collection.get(&id)?;
+        .filter_map(|(storage_id, score)| {
+            let point = collection.get(&storage_id)?;
             Some(ferres_db_core::SearchResult {
-                id,
+                id: point.id.clone(),
                 score,
                 metadata: point.metadata.clone(),
-            vector: None,
+                vector: None,
+                namespace: point.namespace.clone(),
+            })
         })
-    })
-    .collect();
+        .collect();
 
     // Drop lock imediatamente após extrair os dados necessários da coleção.
     drop(collection);
     drop(collection_arc);
 
-    // Aplica filtro de metadata se fornecido (inclui filtros injetados por MetadataRestriction)
-    let mut filtered_results = search_results;
-    if let Some(filter_value) = &payload.filter {
-        let filter = match MetadataFilter::from_json(filter_value.clone()) {
-            Ok(f) => f,
-            Err(e) => return Err(ApiError::invalid_payload(e.to_string())),
-        };
-        if !filter.is_empty() {
-            filtered_results.retain(|result| filter.matches(&result.metadata));
-        }
-    }
-
-    let results: Vec<SearchResult> = filtered_results
+    let results: Vec<SearchResult> = search_results
         .into_iter()
         .map(|r| SearchResult {
             id: r.id,
             score: r.score,
             metadata: r.metadata,
+            namespace: r.namespace,
         })
         .collect();
     drop(_span);
@@ -775,12 +823,18 @@ pub async fn search_hybrid(
     let _span = tracing::info_span!("hydrate_results").entered();
     let results: Vec<SearchResult> = hybrid_results
         .into_iter()
-        .filter_map(|(id, score)| {
-            let point = collection.get(&id)?;
+        .filter_map(|(storage_id, score)| {
+            let point = collection.get(&storage_id)?;
+            if let Some(ref ns) = payload.namespace {
+                if point.namespace.as_deref() != Some(ns.as_str()) {
+                    return None;
+                }
+            }
             Some(SearchResult {
-                id,
+                id: point.id.clone(),
                 score,
                 metadata: point.metadata.clone(),
+                namespace: point.namespace.clone(),
             })
         })
         .collect();
@@ -906,6 +960,7 @@ pub async fn list_points(
             id: point.id.clone(),
             vector: point.vector.clone(),
             metadata: point.metadata.clone(),
+            namespace: point.namespace.clone(),
             created_at: point.created_at,
         })
         .collect();
@@ -945,26 +1000,36 @@ pub async fn list_points(
     }))
 }
 
+/// Query params para GET /api/v1/collections/{name}/points/{id}
+#[derive(Debug, Deserialize)]
+pub struct GetPointQuery {
+    /// Namespace do ponto (obrigatório se o ponto foi inserido com namespace).
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
 /// Handler para GET /api/v1/collections/{name}/points/{id}
 ///
-/// Retorna um ponto específico pelo ID.
+/// Retorna um ponto específico pelo ID. Use query param `namespace` quando o ponto tiver namespace.
 pub async fn get_point(
     State(app_state): State<AppState>,
     Path((name, id)): Path<(String, String)>,
+    Query(query): Query<GetPointQuery>,
 ) -> ApiResult<Json<GetPointResponse>> {
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
-    // Busca o ponto
-    let point = collection.get(&id)
+    let key = Point::storage_id_from_parts(query.namespace.as_deref(), &id);
+    let point = collection.get(&key)
         .ok_or_else(|| ApiError::point_not_found(&id))?;
 
     Ok(Json(GetPointResponse {
         id: point.id.clone(),
         vector: point.vector.clone(),
         metadata: point.metadata.clone(),
+        namespace: point.namespace.clone(),
         created_at: point.created_at,
     }))
 }
@@ -977,6 +1042,8 @@ pub struct EstimateSearchRequest {
     pub limit: usize,
     #[serde(default)]
     pub filter: Option<serde_json::Value>,
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Se true, inclui dados históricos de latência (p50/p95/p99) no response.
     #[serde(default)]
     pub include_history: Option<bool>,
@@ -1041,15 +1108,16 @@ pub async fn estimate_search(
     drop(collection);
     drop(collection_arc);
 
-    // Parse do filtro para contar condições
-    let (has_filter, filter_conditions_count) = if let Some(filter_value) = &payload.filter {
-        match MetadataFilter::from_json(filter_value.clone()) {
-            Ok(f) => (!f.is_empty(), f.conditions().len()),
-            Err(e) => return Err(ApiError::invalid_payload(e.to_string())),
-        }
-    } else {
-        (false, 0)
+    // Parse do filtro (inclui namespace) para contar condições
+    let mut filter = match &payload.filter {
+        Some(fv) => MetadataFilter::from_json(fv.clone()).map_err(|e| ApiError::invalid_payload(e.to_string()))?,
+        None => MetadataFilter::empty(),
     };
+    if let Some(ns) = &payload.namespace {
+        filter.namespace = Some(ns.clone());
+    }
+    let has_filter = !filter.is_empty();
+    let filter_conditions_count = filter.conditions().len();
 
     // Obtém percentis históricos do QueryStats
     let (avg, p50, p95, p99, total_queries) = {
@@ -1106,6 +1174,11 @@ pub struct ExplainSearchRequest {
     pub limit: usize,
     #[serde(default)]
     pub filter: Option<serde_json::Value>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Campo vetorial contra o qual buscar (ex.: "default", "title_vector").
+    #[serde(default)]
+    pub vector_field: Option<String>,
 }
 
 /// Handler para POST /api/v1/collections/{name}/search/explain
@@ -1138,20 +1211,23 @@ pub async fn explain_search(
 
     let start = Instant::now();
 
-    // Parse do filtro
-    let filter = if let Some(filter_value) = &payload.filter {
-        Some(MetadataFilter::from_json(filter_value.clone())
-            .map_err(|e| ApiError::invalid_payload(e.to_string()))?)
-    } else {
-        None
+    // Parse do filtro e merge de namespace
+    let mut filter = match &payload.filter {
+        Some(fv) => Some(MetadataFilter::from_json(fv.clone()).map_err(|e| ApiError::invalid_payload(e.to_string()))?),
+        None => Some(MetadataFilter::empty()),
     };
+    if let (Some(ref mut f), Some(ref ns)) = (filter.as_mut(), &payload.namespace) {
+        f.namespace = Some(ns.clone());
+    }
+    let filter = filter.filter(|f| !f.is_empty());
 
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
+    let vector_field = payload.vector_field.as_deref();
     let explanation = {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-        build_search_explanation(&collection, &payload.vector, payload.limit, filter)
+        build_search_explanation(&collection, &payload.vector, payload.limit, filter, vector_field)
             .map_err(ApiError::from)?
     };
 

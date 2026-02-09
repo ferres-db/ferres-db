@@ -1,15 +1,24 @@
 // Types for FerresDB Dashboard
 
+/** Backend pode retornar quantization como "None" ou { "Scalar": { dtype, always_ram?, quantile? } } */
+export type CollectionQuantizationResponse =
+  | "None"
+  | { Scalar: { dtype: string; always_ram?: boolean; quantile?: number } };
+
 export interface Collection {
   name: string;
-  dimension: number; // Backend usa "dimension" ao invés de "vector_size"
-  num_points: number; // Backend usa "num_points" ao invés de "point_count"
-  created_at: number; // Backend retorna como u64 (timestamp Unix)
-  distance?: string; // Backend retorna "distance" (DistanceMetric)
-  // Campos opcionais/compatibilidade
-  distance_metric?: string; // Alias para distance
-  vector_size?: number; // Alias para dimension (para compatibilidade)
-  point_count?: number; // Alias para num_points (para compatibilidade)
+  dimension: number;
+  num_points: number;
+  created_at: number;
+  distance?: string;
+  distance_metric?: string;
+  vector_size?: number;
+  point_count?: number;
+  /** Quantização (GET collection). None ou Scalar (SQ8). */
+  quantization?: CollectionQuantizationResponse;
+  enable_bm25?: boolean;
+  bm25_text_field?: string;
+  tiered_storage?: TieredStorageConfig;
 }
 
 export interface Point {
@@ -17,12 +26,20 @@ export interface Point {
   vector: number[];
   metadata?: Record<string, unknown>;
   created_at?: number; // Timestamp Unix
+  /** Logical namespace (multitenancy). Optional on upsert and returned by API when set. */
+  namespace?: string;
+  /** TTL in seconds; point expires after this time (vacuum worker removes it). Optional on upsert. */
+  ttl?: number;
+  /** Named vectors (e.g. title_vector, content_vector). Optional; search can target one via vector_field. */
+  vectors?: Record<string, number[]>;
 }
 
 export interface SearchResult {
   id: string;
   score: number;
   metadata?: Record<string, unknown>;
+  /** Set when the point was stored with a namespace (multitenancy). */
+  namespace?: string;
 }
 
 export interface QueriesPerMinuteBucket {
@@ -36,6 +53,7 @@ export interface GlobalStats {
   total_queries_24h: number;
   avg_latency_ms: number;
   queries_per_minute: QueriesPerMinuteBucket[];
+  simd_enabled: boolean;
 }
 
 export interface QueryEntry {
@@ -68,6 +86,69 @@ export interface CollectionStats {
   p50_latency_ms: number;
   p95_latency_ms: number;
   p99_latency_ms: number;
+  tombstone_count?: number;
+  tombstone_memory_waste_bytes?: number;
+}
+
+// Analytics (GET /api/v1/stats/analytics)
+export interface AnalyticsTierDistribution {
+  hot: number;
+  warm: number;
+  cold: number;
+  hot_memory_bytes: number;
+  warm_memory_bytes: number;
+  cold_memory_bytes: number;
+}
+
+export interface LatencyPerMinuteBucket {
+  timestamp: number;
+  avg_ms: number;
+  p50_ms: number;
+}
+
+export interface AnalyticsLatency {
+  avg_ms: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  latency_per_minute: LatencyPerMinuteBucket[];
+}
+
+export interface AnalyticsTombstones {
+  total_count: number;
+  total_memory_waste_bytes: number;
+  total_points: number;
+}
+
+export interface AnalyticsCircuitBreaker {
+  state: "closed" | "open" | "half_open" | string;
+  failure_count: number;
+}
+
+export interface ThroughputPerMinuteBucket {
+  timestamp: number;
+  points: number;
+}
+
+export interface RecentLatencyEntry {
+  timestamp: number;
+  took_ms: number;
+}
+
+export interface TimeSeries10m {
+  avg_points_per_second: number;
+  p95_latency_ms: number;
+  throughput_per_minute: ThroughputPerMinuteBucket[];
+  recent_latencies: RecentLatencyEntry[];
+}
+
+export interface AnalyticsResponse {
+  tier_distribution: AnalyticsTierDistribution;
+  latency: AnalyticsLatency;
+  tombstones: AnalyticsTombstones;
+  circuit_breaker: AnalyticsCircuitBreaker;
+  time_series_10m: TimeSeries10m;
+  cache_hit_rate_pct: number | null;
 }
 
 export interface ApiKeyInfo {
@@ -193,6 +274,8 @@ export interface HybridSearchRequest {
   fusion?: "weighted" | "rrf"; // fusion strategy (default: "weighted")
   rrf_k?: number; // RRF constant k (default: 60). Only used with fusion: "rrf"
   filter?: Record<string, unknown>;
+  /** Restrict results to this namespace (multitenancy). */
+  namespace?: string;
 }
 
 export interface HybridSearchResult {
@@ -205,6 +288,10 @@ export interface SearchExplainRequest {
   vector: number[];
   limit?: number;
   filter?: Record<string, unknown>;
+  /** Restrict results to this namespace (multitenancy). */
+  namespace?: string;
+  /** Vector field to search against: "default" or named (e.g. "title_vector", "content_vector"). */
+  vector_field?: string;
 }
 
 export interface ExplainedResult {
@@ -248,6 +335,10 @@ export interface SearchEstimateRequest {
   vector: number[];
   limit?: number;
   filter?: Record<string, unknown>;
+  /** Restrict estimate to this namespace (multitenancy). */
+  namespace?: string;
+  /** Vector field to search against: "default" or named (e.g. "title_vector", "content_vector"). */
+  vector_field?: string;
 }
 
 export interface SearchEstimateResponse {
@@ -283,6 +374,8 @@ export interface WsUpsertMessage {
     id: string;
     vector: number[];
     metadata?: Record<string, unknown>;
+    namespace?: string;
+    ttl?: number;
   }>;
 }
 

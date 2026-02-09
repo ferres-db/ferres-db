@@ -39,6 +39,10 @@ pub enum FerresError {
     #[error("index not built: call build() before searching")]
     IndexNotBuilt,
 
+    /// Campo vetorial nomeado inexistente na coleção (ex.: busca por `vector_field` que nenhum ponto possui).
+    #[error("unknown vector field: {0}")]
+    UnknownVectorField(String),
+
     /// Erro na camada de armazenamento (I/O, serialização, etc).
     #[error("storage error: {0}")]
     Storage(String),

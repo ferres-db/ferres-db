@@ -1,5 +1,0 @@
-# Dependências para analysis/analyze_poc.py
-# Instalar: pip install -r analysis/requirements.txt
-
-matplotlib>=3.5.0
-wordcloud>=1.8.0

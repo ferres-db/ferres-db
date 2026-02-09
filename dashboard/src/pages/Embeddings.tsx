@@ -34,7 +34,7 @@ export const Embeddings = () => {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-gray-50">Embedding Studio</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-gray-50">Embedding Studio</h1>
         <p className="text-gray-400 mt-2">
           Generate embeddings with OpenAI or Gemini and upsert them into collections
         </p>
@@ -203,6 +203,8 @@ function SingleEmbedTab() {
   const [selectedCollection, setSelectedCollection] = useState("");
   const [pointId, setPointId] = useState("");
   const [metadataJson, setMetadataJson] = useState('{"text": ""}');
+  const [upsertNamespace, setUpsertNamespace] = useState("");
+  const [upsertTtl, setUpsertTtl] = useState("");
   const [upsertStatus, setUpsertStatus] = useState<"idle" | "loading" | "success" | "error">(
     "idle",
   );
@@ -232,9 +234,15 @@ function SingleEmbedTab() {
       } catch {
         throw new Error("Invalid metadata JSON");
       }
-      await pointsApi.upsert(selectedCollection, [
-        { id: pointId, vector: result.vector, metadata },
-      ]);
+      const point: { id: string; vector: number[]; metadata: Record<string, unknown>; namespace?: string; ttl?: number } = {
+        id: pointId,
+        vector: result.vector,
+        metadata,
+      };
+      if (upsertNamespace.trim()) point.namespace = upsertNamespace.trim();
+      const ttlNum = upsertTtl.trim() ? Number(upsertTtl.trim()) : NaN;
+      if (!isNaN(ttlNum) && ttlNum > 0) point.ttl = ttlNum;
+      await pointsApi.upsert(selectedCollection, [point]);
       setUpsertStatus("success");
     } catch (err) {
       setUpsertError(err instanceof Error ? err.message : "Upsert failed");
@@ -360,6 +368,29 @@ function SingleEmbedTab() {
                   />
                 </div>
 
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-400 mb-2">Namespace (optional)</label>
+                    <Input
+                      value={upsertNamespace}
+                      onChange={(e) => setUpsertNamespace(e.target.value)}
+                      placeholder="tenant-a"
+                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-400 mb-2">TTL seconds (optional)</label>
+                    <Input
+                      type="number"
+                      value={upsertTtl}
+                      onChange={(e) => setUpsertTtl(e.target.value)}
+                      placeholder="3600"
+                      min={1}
+                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                    />
+                  </div>
+                </div>
+
                 <Button
                   onClick={handleUpsert}
                   disabled={upsertStatus === "loading" || !selectedCollection || !pointId}
@@ -429,6 +460,8 @@ function BatchEmbedTab() {
 
   // Upsert
   const [selectedCollection, setSelectedCollection] = useState("");
+  const [batchNamespace, setBatchNamespace] = useState("");
+  const [batchTtl, setBatchTtl] = useState("");
   const [upsertStatus, setUpsertStatus] = useState<"idle" | "loading" | "success" | "error">(
     "idle",
   );
@@ -500,11 +533,17 @@ function BatchEmbedTab() {
     setUpsertError(null);
 
     try {
-      const points = ready.map((item) => ({
-        id: item.id,
-        vector: item.vector!,
-        metadata: { text: item.text },
-      }));
+      const points = ready.map((item) => {
+        const point: { id: string; vector: number[]; metadata: Record<string, unknown>; namespace?: string; ttl?: number } = {
+          id: item.id,
+          vector: item.vector!,
+          metadata: { text: item.text },
+        };
+        if (batchNamespace.trim()) point.namespace = batchNamespace.trim();
+        const ttlNum = batchTtl.trim() ? Number(batchTtl.trim()) : NaN;
+        if (!isNaN(ttlNum) && ttlNum > 0) point.ttl = ttlNum;
+        return point;
+      });
       await pointsApi.upsert(selectedCollection, points);
       setUpsertStatus("success");
     } catch (err) {
@@ -664,6 +703,28 @@ function BatchEmbedTab() {
                     </select>
                   )}
                 </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-400 mb-2">Namespace (optional)</label>
+                    <Input
+                      value={batchNamespace}
+                      onChange={(e) => setBatchNamespace(e.target.value)}
+                      placeholder="tenant-a"
+                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-400 mb-2">TTL seconds (optional)</label>
+                    <Input
+                      type="number"
+                      value={batchTtl}
+                      onChange={(e) => setBatchTtl(e.target.value)}
+                      placeholder="3600"
+                      min={1}
+                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
+                    />
+                  </div>
+                </div>
                 <Button
                   onClick={handleUpsertAll}
                   disabled={upsertStatus === "loading" || !selectedCollection}
@@ -723,6 +784,8 @@ function PipelineTab() {
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("text-embedding-3-small");
   const [selectedCollection, setSelectedCollection] = useState("");
+  const [pipelineNamespace, setPipelineNamespace] = useState("");
+  const [pipelineTtl, setPipelineTtl] = useState("");
   const [rawInput, setRawInput] = useState("");
   const [items, setItems] = useState<PipelineItem[]>([]);
   const [running, setRunning] = useState(false);
@@ -761,9 +824,15 @@ function PipelineTab() {
           prev.map((p, idx) => (idx === i ? { ...p, status: "upserting" } : p)),
         );
 
-        await pointsApi.upsert(selectedCollection, [
-          { id: item.id, vector: result.vector, metadata: item.metadata },
-        ]);
+        const point: { id: string; vector: number[]; metadata: Record<string, unknown>; namespace?: string; ttl?: number } = {
+          id: item.id,
+          vector: result.vector,
+          metadata: item.metadata,
+        };
+        if (pipelineNamespace.trim()) point.namespace = pipelineNamespace.trim();
+        const ttlNum = pipelineTtl.trim() ? Number(pipelineTtl.trim()) : NaN;
+        if (!isNaN(ttlNum) && ttlNum > 0) point.ttl = ttlNum;
+        await pointsApi.upsert(selectedCollection, [point]);
 
         // Update status: done
         setItems((prev) => prev.map((p, idx) => (idx === i ? { ...p, status: "done" } : p)));
@@ -827,7 +896,30 @@ function PipelineTab() {
             )}
           </div>
 
-          <div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Namespace (optional)</label>
+              <Input
+                value={pipelineNamespace}
+                onChange={(e) => setPipelineNamespace(e.target.value)}
+                placeholder="tenant-a"
+                className="bg-bg-secondary border-bg-tertiary text-gray-50"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">TTL seconds (optional)</label>
+              <Input
+                type="number"
+                value={pipelineTtl}
+                onChange={(e) => setPipelineTtl(e.target.value)}
+                placeholder="3600"
+                min={1}
+                className="bg-bg-secondary border-bg-tertiary text-gray-50"
+              />
+            </div>
+          </div>
+
+              <div>
             <label className="block text-sm font-medium text-gray-400 mb-2">
               Texts (one per line)
             </label>

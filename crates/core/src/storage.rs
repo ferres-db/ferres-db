@@ -15,6 +15,10 @@
 //!   antes da mutação em memória. A cada 1000 operações, um snapshot
 //!   completo é criado e o WAL é truncado. Ver módulo [`crate::wal`].
 //!
+//! - **Snapshot binário (opcional)**: quando `binary_snapshot` está ativo,
+//!   os pontos são gravados em `points.bin` (bincode) em vez de `points.jsonl`,
+//!   reduzindo tamanho e tempo de carregamento.
+//!
 //! ## Circuit Breaker para Disk I/O
 //!
 //! [`StorageCircuitBreaker`] protege contra falhas repetidas de disco (ex.: disco cheio).
@@ -156,6 +160,28 @@ impl StorageCircuitBreaker {
 impl Default for StorageCircuitBreaker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Opções de armazenamento para otimização em disco.
+///
+/// Permite ativar compressão Zstd no WAL e snapshots em formato binário (bincode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageOptions {
+    /// Comprimir entradas do WAL com Zstd (menor uso de disco no `wal.log`).
+    #[serde(default)]
+    pub wal_compression: bool,
+    /// Gravar snapshots de pontos em `points.bin` (bincode) em vez de `points.jsonl`.
+    #[serde(default)]
+    pub binary_snapshot: bool,
+}
+
+impl Default for StorageOptions {
+    fn default() -> Self {
+        Self {
+            wal_compression: false,
+            binary_snapshot: false,
+        }
     }
 }
 
@@ -335,6 +361,44 @@ struct IndexSnapshot {
     point_ids: Vec<String>,
 }
 
+/// Representação de Point compatível com bincode (metadata como string JSON).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PointBin {
+    id: String,
+    vector: Vec<f32>,
+    metadata_json: String,
+    created_at: u64,
+    namespace: Option<String>,
+    expires_at: Option<u64>,
+    /// Vetores nomeados (multi-vector). Default None para compatibilidade com snapshots antigos.
+    #[serde(default)]
+    vectors: Option<std::collections::HashMap<String, Vec<f32>>>,
+}
+
+impl PointBin {
+    fn from_point(p: &Point) -> Self {
+        Self {
+            id: p.id.clone(),
+            vector: p.vector.clone(),
+            metadata_json: serde_json::to_string(&p.metadata).unwrap_or_else(|_| "null".into()),
+            created_at: p.created_at,
+            namespace: p.namespace.clone(),
+            expires_at: p.expires_at,
+            vectors: p.vectors.clone(),
+        }
+    }
+    fn into_point(self) -> Result<Point, FerresError> {
+        let metadata = serde_json::from_str(&self.metadata_json)
+            .unwrap_or(serde_json::Value::Null);
+        let mut pt = Point::new(self.id, self.vector, metadata)?;
+        pt.created_at = self.created_at;
+        pt.namespace = self.namespace;
+        pt.expires_at = self.expires_at;
+        pt.vectors = self.vectors;
+        Ok(pt)
+    }
+}
+
 // ─── FileStorage ───────────────────────────────────────────────────
 
 /// Persistência de coleções em disco com validação de integridade.
@@ -349,9 +413,9 @@ struct IndexSnapshot {
 /// | Arquivo          | Conteúdo                                        |
 /// |------------------|-------------------------------------------------|
 /// | `config.json`    | [`CollectionConfig`] serializado como JSON       |
-/// | `points.jsonl`   | Cada linha = 1 [`Point`] serializado como JSON   |
+/// | `points.jsonl` ou `points.bin` | Pontos: JSONL ou bincode (conforme opção)   |
 /// | `index.bin`      | Metadados do índice em bincode                   |
-/// | `checksum.md5`   | Hash MD5 (hex) de `points.jsonl`                 |
+/// | `checksum.md5`   | Hash MD5 (hex) do ficheiro de pontos             |
 ///
 /// Todas as escritas usam o padrão temp-file + rename para atomicidade.
 pub struct FileStorage;
@@ -360,7 +424,13 @@ impl FileStorage {
     /// Persiste uma coleção inteira no diretório `path`.
     ///
     /// Cria o diretório se não existir. Sobrescreve arquivos existentes.
-    pub fn save_collection(collection: &Collection, path: &Path) -> Result<(), FerresError> {
+    /// Se `binary_snapshot` for true, os pontos são gravados em `points.bin` (bincode),
+    /// reduzindo tamanho e tempo de carregamento; caso contrário usa `points.jsonl`.
+    pub fn save_collection(
+        collection: &Collection,
+        path: &Path,
+        binary_snapshot: bool,
+    ) -> Result<(), FerresError> {
         fs::create_dir_all(path).map_err(|e| {
             FerresError::Storage(format!(
                 "failed to create directory {}: {e}",
@@ -373,20 +443,29 @@ impl FileStorage {
             .map_err(|e| FerresError::Storage(format!("failed to serialize config: {e}")))?;
         Self::atomic_write(&path.join("config.json"), config_json.as_bytes())?;
 
-        // 2. points.jsonl
         let points = collection.points_owned();
-        let mut lines = String::new();
-        for point in &points {
-            let line = serde_json::to_string(point).map_err(|e| {
-                FerresError::Storage(format!("failed to serialize point {}: {e}", point.id))
-            })?;
-            lines.push_str(&line);
-            lines.push('\n');
-        }
-        Self::atomic_write(&path.join("points.jsonl"), lines.as_bytes())?;
 
-        // 3. checksum.md5
-        let digest = md5::compute(lines.as_bytes());
+        // 2. points — JSONL ou binário (bincode via PointBin para evitar Value::deserialize_any)
+        let (points_bytes, points_file) = if binary_snapshot {
+            let bin_points: Vec<PointBin> = points.iter().map(PointBin::from_point).collect();
+            let encoded = bincode::serialize(&bin_points)
+                .map_err(|e| FerresError::Storage(format!("failed to serialize points: {e}")))?;
+            (encoded, path.join("points.bin"))
+        } else {
+            let mut lines = String::new();
+            for point in &points {
+                let line = serde_json::to_string(point).map_err(|e| {
+                    FerresError::Storage(format!("failed to serialize point {}: {e}", point.id))
+                })?;
+                lines.push_str(&line);
+                lines.push('\n');
+            }
+            (lines.into_bytes(), path.join("points.jsonl"))
+        };
+        Self::atomic_write(&points_file, &points_bytes)?;
+
+        // 3. checksum.md5 (do ficheiro de pontos)
+        let digest = md5::compute(&points_bytes);
         let checksum = format!("{digest:x}");
         Self::atomic_write(&path.join("checksum.md5"), checksum.as_bytes())?;
 
@@ -405,6 +484,7 @@ impl FileStorage {
         debug!(
             name = %collection.name(),
             points = points.len(),
+            binary = binary_snapshot,
             path = %path.display(),
             "collection saved via FileStorage"
         );
@@ -468,49 +548,81 @@ impl FileStorage {
             ))
         })?;
 
-        // 2. points.jsonl — lê conteúdo bruto para validação de checksum
-        let points_path = path.join("points.jsonl");
-        let points_content = if points_path.exists() {
-            fs::read_to_string(&points_path).map_err(|e| {
+        // 2. points — auto-detect: points.bin (bincode) ou points.jsonl
+        let points_bin_path = path.join("points.bin");
+        let points_jsonl_path = path.join("points.jsonl");
+        let points = if points_bin_path.exists() {
+            let points_bytes = fs::read(&points_bin_path).map_err(|e| {
                 FerresError::Storage(format!(
                     "failed to read points at {}: {e}",
-                    points_path.display()
-                ))
-            })?
-        } else {
-            String::new()
-        };
-
-        // 3. checksum.md5 — validação de integridade
-        let checksum_path = path.join("checksum.md5");
-        if checksum_path.exists() {
-            let stored = fs::read_to_string(&checksum_path)
-                .map_err(|e| FerresError::Storage(format!("failed to read checksum: {e}")))?;
-            let computed = format!("{:x}", md5::compute(points_content.as_bytes()));
-            if stored.trim() != computed {
-                return Err(FerresError::Storage(format!(
-                    "integrity check failed for {}: expected MD5 {}, got {computed}",
-                    points_path.display(),
-                    stored.trim(),
-                )));
-            }
-        }
-
-        // Parse points — erro detalhado por linha para diagnóstico
-        let mut points = Vec::new();
-        for (line_num, line) in points_content.lines().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-            let point: Point = serde_json::from_str(line).map_err(|e| {
-                FerresError::Storage(format!(
-                    "corrupted point at line {} in {}: {e}",
-                    line_num + 1,
-                    points_path.display(),
+                    points_bin_path.display()
                 ))
             })?;
-            points.push(point);
-        }
+            let checksum_path = path.join("checksum.md5");
+            if checksum_path.exists() {
+                let stored = fs::read_to_string(&checksum_path)
+                    .map_err(|e| FerresError::Storage(format!("failed to read checksum: {e}")))?;
+                let computed = format!("{:x}", md5::compute(&points_bytes));
+                if stored.trim() != computed {
+                    return Err(FerresError::Storage(format!(
+                        "integrity check failed for {}: expected MD5 {}, got {computed}",
+                        points_bin_path.display(),
+                        stored.trim(),
+                    )));
+                }
+            }
+            let bin_points: Vec<PointBin> = bincode::deserialize(&points_bytes).map_err(|e| {
+                FerresError::Storage(format!(
+                    "failed to deserialize points from {}: {e}",
+                    points_bin_path.display(),
+                ))
+            })?;
+            bin_points
+                .into_iter()
+                .map(PointBin::into_point)
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let points_content = if points_jsonl_path.exists() {
+                fs::read_to_string(&points_jsonl_path).map_err(|e| {
+                    FerresError::Storage(format!(
+                        "failed to read points at {}: {e}",
+                        points_jsonl_path.display()
+                    ))
+                })?
+            } else {
+                String::new()
+            };
+
+            let checksum_path = path.join("checksum.md5");
+            if checksum_path.exists() {
+                let stored = fs::read_to_string(&checksum_path)
+                    .map_err(|e| FerresError::Storage(format!("failed to read checksum: {e}")))?;
+                let computed = format!("{:x}", md5::compute(points_content.as_bytes()));
+                if stored.trim() != computed {
+                    return Err(FerresError::Storage(format!(
+                        "integrity check failed for {}: expected MD5 {}, got {computed}",
+                        points_jsonl_path.display(),
+                        stored.trim(),
+                    )));
+                }
+            }
+
+            let mut pts = Vec::new();
+            for (line_num, line) in points_content.lines().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+                let point: Point = serde_json::from_str(line).map_err(|e| {
+                    FerresError::Storage(format!(
+                        "corrupted point at line {} in {}: {e}",
+                        line_num + 1,
+                        points_jsonl_path.display(),
+                    ))
+                })?;
+                pts.push(point);
+            }
+            pts
+        };
 
         // 4. index.bin — validação opcional de metadados
         let index_path = path.join("index.bin");
@@ -640,8 +752,8 @@ mod tests {
             collection.insert(point).unwrap();
         }
 
-        // Save
-        FileStorage::save_collection(&collection, &tmp).unwrap();
+        // Save (JSONL for test compatibility)
+        FileStorage::save_collection(&collection, &tmp, false).unwrap();
 
         // Verify all 4 files exist
         assert!(tmp.join("config.json").exists());
@@ -671,9 +783,46 @@ mod tests {
 
         // Validate search still works after reload
         let query = collection.get("pt-0").unwrap().vector.clone();
-        let results = loaded.search(&query, 5).unwrap();
+        let results = loaded.search(&query, 5, None, None).unwrap();
         assert_eq!(results.len(), 5);
         assert_eq!(results[0].0, "pt-0");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn file_storage_binary_snapshot_roundtrip() {
+        let tmp = std::env::temp_dir().join("ferres_test_binary_snapshot");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let config = CollectionConfig {
+            name: "binary_test".to_string(),
+            dimension: 4,
+            distance: DistanceMetric::Euclidean,
+            hnsw: HnswConfig::default(),
+            search_cache_size: 0,
+            enable_bm25: false,
+            bm25_text_field: "text".to_string(),
+            quantization: Default::default(),
+            tiered_storage: Default::default(),
+        };
+        let mut collection = Collection::new(config);
+        collection
+            .insert(Point::new("a", vec![1.0, 0.0, 0.0, 0.0], serde_json::Value::Null).unwrap())
+            .unwrap();
+        collection
+            .insert(Point::new("b", vec![0.0, 1.0, 0.0, 0.0], serde_json::json!({"x":1})).unwrap())
+            .unwrap();
+
+        FileStorage::save_collection(&collection, &tmp, true).unwrap();
+        assert!(tmp.join("points.bin").exists());
+        assert!(!tmp.join("points.jsonl").exists());
+
+        let loaded = FileStorage::load_collection(&tmp).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.get("a").is_some());
+        assert!(loaded.get("b").is_some());
+        assert_eq!(loaded.get("b").unwrap().metadata, serde_json::json!({"x":1}));
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -699,7 +848,7 @@ mod tests {
             .insert(Point::new("p1", vec![1.0, 2.0], serde_json::Value::Null).unwrap())
             .unwrap();
 
-        FileStorage::save_collection(&collection, &tmp).unwrap();
+        FileStorage::save_collection(&collection, &tmp, false).unwrap();
 
         // Corrupt the points file — checksum will no longer match
         fs::write(tmp.join("points.jsonl"), b"this is not valid json\n").unwrap();

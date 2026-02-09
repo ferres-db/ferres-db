@@ -6,6 +6,7 @@ import type {
   GlobalStats,
   QueryEntry,
   CollectionStats,
+  AnalyticsResponse,
   ApiKeyInfo,
   CreateApiKeyResponse,
   UserInfo,
@@ -122,16 +123,19 @@ export const collectionsApi = {
   get: async (name: string): Promise<Collection> => {
     const response = await apiClient.get(`/api/v1/collections/${name}`);
     const data = response.data;
-    // Mapeia para o formato esperado pelo frontend
     return {
       name: data.name,
       dimension: data.dimension,
       num_points: data.num_points,
-      created_at: data.last_updated || data.created_at, // Backend retorna last_updated nos detalhes
+      created_at: data.last_updated ?? data.created_at,
       vector_size: data.dimension,
       point_count: data.num_points,
       distance: data.distance,
       distance_metric: data.distance,
+      quantization: data.quantization,
+      enable_bm25: data.enable_bm25,
+      bm25_text_field: data.bm25_text_field,
+      tiered_storage: data.tiered_storage,
     };
   },
 
@@ -202,6 +206,8 @@ export const pointsApi = {
       limit?: number;
       offset?: number;
       filter?: Record<string, unknown>;
+      /** When set, restricts list to this namespace via filter { $namespace: value }. */
+      namespace?: string;
     },
   ): Promise<{
     points: Point[];
@@ -213,8 +219,12 @@ export const pointsApi = {
     const params = new URLSearchParams();
     if (options?.limit) params.append("limit", options.limit.toString());
     if (options?.offset) params.append("offset", options.offset.toString());
-    if (options?.filter)
-      params.append("filter", JSON.stringify(options.filter));
+    let filter = options?.filter;
+    if (options?.namespace != null && options.namespace !== "") {
+      filter = { ...filter, $namespace: options.namespace };
+    }
+    if (filter != null && Object.keys(filter).length > 0)
+      params.append("filter", JSON.stringify(filter));
 
     const queryString = params.toString();
     const url = `/api/v1/collections/${collection}/points${queryString ? `?${queryString}` : ""}`;
@@ -228,16 +238,30 @@ export const pointsApi = {
     });
   },
 
-  get: async (collection: string, id: string): Promise<Point> => {
-    const response = await apiClient.get(
-      `/api/v1/collections/${collection}/points/${id}`,
-    );
+  get: async (
+    collection: string,
+    id: string,
+    options?: { namespace?: string },
+  ): Promise<Point> => {
+    const params = new URLSearchParams();
+    if (options?.namespace != null && options.namespace !== "")
+      params.append("namespace", options.namespace);
+    const queryString = params.toString();
+    const url = `/api/v1/collections/${collection}/points/${encodeURIComponent(id)}${queryString ? `?${queryString}` : ""}`;
+    const response = await apiClient.get(url);
     return response.data;
   },
 
-  delete: async (collection: string, ids: string[]): Promise<void> => {
+  delete: async (
+    collection: string,
+    ids: string[],
+    options?: { namespace?: string },
+  ): Promise<void> => {
+    const body: { ids: string[]; namespace?: string } = { ids };
+    if (options?.namespace != null && options.namespace !== "")
+      body.namespace = options.namespace;
     await apiClient.delete(`/api/v1/collections/${collection}/points`, {
-      data: { ids },
+      data: body,
     });
   },
 
@@ -246,14 +270,16 @@ export const pointsApi = {
     vector: number[],
     limit: number = 10,
     filter?: Record<string, unknown>,
+    options?: { namespace?: string; vector_field?: string },
   ): Promise<SearchResult[]> => {
+    const body: Record<string, unknown> = { vector, limit, filter };
+    if (options?.namespace != null && options.namespace !== "")
+      body.namespace = options.namespace;
+    if (options?.vector_field != null && options.vector_field !== "")
+      body.vector_field = options.vector_field;
     const response = await apiClient.post(
       `/api/v1/collections/${collection}/search`,
-      {
-        vector,
-        limit,
-        filter,
-      },
+      body,
     );
     return response.data.results || [];
   },
@@ -296,6 +322,11 @@ export const pointsApi = {
 export const statsApi = {
   global: async (): Promise<GlobalStats> => {
     const response = await apiClient.get("/api/v1/stats/global");
+    return response.data;
+  },
+
+  analytics: async (): Promise<AnalyticsResponse> => {
+    const response = await apiClient.get("/api/v1/stats/analytics");
     return response.data;
   },
 

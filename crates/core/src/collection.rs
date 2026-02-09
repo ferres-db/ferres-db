@@ -21,8 +21,9 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
@@ -83,23 +84,27 @@ fn default_bm25_text_field() -> String {
 // ─── Collection ─────────────────────────────────────────────────────
 
 /// Chave de cache para resultados de busca.
-/// Usa hash do vetor de query e k para identificar queries únicas.
+/// Usa hash do vetor de query, k e campo vetorial para identificar queries únicas.
 #[derive(Debug, Clone)]
 struct CacheKey {
     query_hash: u64,
     k: usize,
+    vector_field: Option<String>,
 }
 
 impl Hash for CacheKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.query_hash.hash(state);
         self.k.hash(state);
+        self.vector_field.hash(state);
     }
 }
 
 impl PartialEq for CacheKey {
     fn eq(&self, other: &Self) -> bool {
-        self.query_hash == other.query_hash && self.k == other.k
+        self.query_hash == other.query_hash
+            && self.k == other.k
+            && self.vector_field == other.vector_field
     }
 }
 
@@ -115,9 +120,24 @@ fn metadata_text(metadata: &serde_json::Value, field: &str) -> String {
 }
 
 use crate::fusion::{self, FusionStrategy, DEFAULT_RRF_K};
+use crate::search::validate_vector_finite;
 
 /// Threshold para usar rebuild completo do índice vs inserção incremental.
 const BATCH_REBUILD_THRESHOLD: usize = 100;
+
+/// Constrói um ponto "sintético" com o mesmo id/metadata/namespace que `p`, mas com `vector` substituído.
+/// Usado para indexar vetores nomeados em índices separados.
+fn synthetic_point_with_vector(p: &Point, vector: Vec<f32>) -> Point {
+    Point {
+        id: p.id.clone(),
+        vector,
+        metadata: p.metadata.clone(),
+        created_at: p.created_at,
+        namespace: p.namespace.clone(),
+        expires_at: p.expires_at.clone(),
+        vectors: None,
+    }
+}
 
 // ─── BatchInsertResult ──────────────────────────────────────────────
 
@@ -132,16 +152,26 @@ pub struct BatchInsertResult {
 }
 
 /// Uma coleção de pontos vetoriais com índice de busca ANN.
+///
+/// Suporta múltiplos vetores por ponto: o vetor principal (`point.vector`)
+/// é indexado no `index`; vetores nomeados (`point.vectors`) são indexados
+/// em `vector_indices` por nome de campo (ex.: "title_vector", "content_vector").
 pub struct Collection {
     config: CollectionConfig,
     points: HashMap<String, Point>,
     index: Box<dyn ANNIndex>,
+    /// Índices ANN por campo vetorial nomeado (ex.: "title_vector").
+    /// O vetor principal usa `index`; buscas com `vector_field` usam estes.
+    vector_indices: HashMap<String, Box<dyn ANNIndex>>,
     /// Índice BM25 opcional para busca híbrida.
     bm25_index: Option<BM25Index>,
     /// Cache LRU opcional para resultados de busca.
     /// Mutex é necessário porque search() é &self mas precisa mutar o cache.
     #[allow(dead_code, clippy::type_complexity)]
     search_cache: Option<Mutex<LruCache<CacheKey, Vec<(String, f32)>>>>,
+    /// Contadores para Cache Hit Rate (hits e misses do search_cache).
+    search_cache_hits: AtomicU64,
+    search_cache_misses: AtomicU64,
     /// Flag indicando se a coleção foi modificada e precisa ser salva.
     dirty: AtomicBool,
 }
@@ -176,8 +206,11 @@ impl Collection {
             config,
             points: HashMap::new(),
             index,
+            vector_indices: HashMap::new(),
             bm25_index,
             search_cache,
+            search_cache_hits: AtomicU64::new(0),
+            search_cache_misses: AtomicU64::new(0),
             dirty: AtomicBool::new(false),
         }
     }
@@ -208,8 +241,11 @@ impl Collection {
             config,
             points: HashMap::new(),
             index,
+            vector_indices: HashMap::new(),
             bm25_index,
             search_cache,
+            search_cache_hits: AtomicU64::new(0),
+            search_cache_misses: AtomicU64::new(0),
             dirty: AtomicBool::new(false),
         }
     }
@@ -218,17 +254,48 @@ impl Collection {
     ///
     /// Re-indexa todos os pontos via `build`. Usado no startup do
     /// server ao carregar coleções persistidas.
+    /// Índices nomeados (`vector_indices`) são construídos para cada
+    /// campo presente em `point.vectors`.
     pub fn from_points(config: CollectionConfig, points: Vec<Point>) -> Result<Self, FerresError> {
         let mut collection = Self::new(config);
         collection.index.build(&points)?;
         for point in &points {
-            collection.points.insert(point.id.clone(), point.clone());
+            collection.points.insert(point.storage_id(), point.clone());
+        }
+        // Build indices for named vector fields
+        let field_names: std::collections::HashSet<String> = points
+            .iter()
+            .filter_map(|p| p.vectors.as_ref())
+            .flat_map(|m| m.keys().cloned())
+            .collect();
+        for field_name in field_names {
+            let synthetic: Vec<Point> = points
+                .iter()
+                .filter_map(|p| {
+                    p.vectors
+                        .as_ref()
+                        .and_then(|m| m.get(&field_name))
+                        .cloned()
+                        .map(|vec| synthetic_point_with_vector(p, vec))
+                })
+                .collect();
+            if synthetic.is_empty() {
+                continue;
+            }
+            let mut idx =
+                create_ann_index(
+                    collection.config.distance,
+                    collection.config.hnsw.clone(),
+                    &collection.config.quantization,
+                );
+            idx.build(&synthetic)?;
+            collection.vector_indices.insert(field_name, idx);
         }
         if let Some(ref mut bm25) = collection.bm25_index {
             let field = &collection.config.bm25_text_field;
             for point in collection.points.values() {
                 let text = metadata_text(&point.metadata, field);
-                bm25.index_document(&point.id, &text);
+                bm25.index_document(&point.storage_id(), &text);
             }
         }
         Ok(collection)
@@ -246,6 +313,38 @@ impl Collection {
             });
         }
         Ok(())
+    }
+
+    /// Valida que todos os vetores nomeados do ponto têm dimensão correta e valores finitos.
+    fn validate_point_named_vectors(&self, point: &Point) -> Result<(), FerresError> {
+        if let Some(ref map) = point.vectors {
+            for (name, vec) in map {
+                self.validate_dimension(vec)?;
+                validate_vector_finite(vec)?;
+                if vec.is_empty() {
+                    return Err(FerresError::InvalidVector {
+                        reason: format!("named vector '{name}' cannot be empty"),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Obtém ou cria o índice ANN para um campo vetorial nomeado.
+    fn get_or_create_vector_index(
+        &mut self,
+        field: &str,
+    ) -> Result<&mut Box<dyn ANNIndex>, FerresError> {
+        if !self.vector_indices.contains_key(field) {
+            let idx = create_ann_index(
+                self.config.distance,
+                self.config.hnsw.clone(),
+                &self.config.quantization,
+            );
+            self.vector_indices.insert(field.to_string(), idx);
+        }
+        Ok(self.vector_indices.get_mut(field).unwrap())
     }
 
     /// Invalida o cache de busca após mutação (insert/remove).
@@ -286,12 +385,20 @@ impl Collection {
     /// ```
     pub fn insert(&mut self, point: Point) -> Result<(), FerresError> {
         self.validate_dimension(&point.vector)?;
+        self.validate_point_named_vectors(&point)?;
         self.index.add_point(&point)?;
+        if let Some(ref vectors) = point.vectors {
+            for (name, vec) in vectors {
+                let syn = synthetic_point_with_vector(&point, vec.clone());
+                let idx = self.get_or_create_vector_index(name)?;
+                idx.add_point(&syn)?;
+            }
+        }
         if let Some(ref mut bm25) = self.bm25_index {
             let text = metadata_text(&point.metadata, &self.config.bm25_text_field);
-            bm25.index_document(&point.id, &text);
+            bm25.index_document(&point.storage_id(), &text);
         }
-        self.points.insert(point.id.clone(), point);
+        self.points.insert(point.storage_id(), point);
         self.invalidate_search_cache();
         self.dirty.store(true, Ordering::Release);
         Ok(())
@@ -346,7 +453,7 @@ impl Collection {
             return Ok(BatchInsertResult { inserted: 0 });
         }
 
-        // Fase 1: Validação de dimensões em paralelo para batches grandes
+        // Fase 1: Validação de dimensões e vetores nomeados
         if points.len() > BATCH_REBUILD_THRESHOLD {
             let validation_errors: Vec<_> = points
                 .par_iter()
@@ -356,10 +463,13 @@ impl Collection {
             if !validation_errors.is_empty() {
                 return Err(validation_errors.into_iter().next().unwrap());
             }
+            for point in &points {
+                self.validate_point_named_vectors(point)?;
+            }
         } else {
-            // Para batches pequenos, validação sequencial
             for point in &points {
                 self.validate_dimension(&point.vector)?;
+                self.validate_point_named_vectors(point)?;
             }
         }
 
@@ -383,7 +493,7 @@ impl Collection {
             points
         };
 
-        // Fase 3: Inserção no índice HNSW
+        // Fase 3: Inserção no índice HNSW (e índices nomeados)
         if prepared_points.len() > BATCH_REBUILD_THRESHOLD {
             // Para batches grandes, rebuild completo é mais eficiente
             let all_points: Vec<Point> = self
@@ -395,6 +505,34 @@ impl Collection {
 
             self.index.build(&all_points)?;
 
+            let field_names: std::collections::HashSet<String> = all_points
+                .iter()
+                .filter_map(|p| p.vectors.as_ref())
+                .flat_map(|m| m.keys().cloned())
+                .collect();
+            for field_name in field_names {
+                let synthetic: Vec<Point> = all_points
+                    .iter()
+                    .filter_map(|p| {
+                        p.vectors
+                            .as_ref()
+                            .and_then(|m| m.get(&field_name))
+                            .cloned()
+                            .map(|vec| synthetic_point_with_vector(p, vec))
+                    })
+                    .collect();
+                if synthetic.is_empty() {
+                    continue;
+                }
+                let mut idx = create_ann_index(
+                    self.config.distance,
+                    self.config.hnsw.clone(),
+                    &self.config.quantization,
+                );
+                idx.build(&synthetic)?;
+                self.vector_indices.insert(field_name, idx);
+            }
+
             debug!(
                 collection = %self.config.name,
                 existing = self.points.len(),
@@ -402,20 +540,27 @@ impl Collection {
                 "index rebuilt for batch insert"
             );
         } else {
-            // Para batches pequenos, inserção incremental
             for point in &prepared_points {
                 self.index.add_point(point)?;
+                if let Some(ref vectors) = point.vectors {
+                    for (name, vec) in vectors {
+                        let syn = synthetic_point_with_vector(point, vec.clone());
+                        let idx = self.get_or_create_vector_index(name)?;
+                        idx.add_point(&syn)?;
+                    }
+                }
             }
         }
 
         // Fase 4: Atualiza HashMap e BM25
         let inserted = prepared_points.len();
         for point in prepared_points {
+            let key = point.storage_id();
             if let Some(ref mut bm25) = self.bm25_index {
                 let text = metadata_text(&point.metadata, &self.config.bm25_text_field);
-                bm25.index_document(&point.id, &text);
+                bm25.index_document(&key, &text);
             }
-            self.points.insert(point.id.clone(), point);
+            self.points.insert(key, point);
         }
 
         self.invalidate_search_cache();
@@ -449,52 +594,89 @@ impl Collection {
     /// collection.insert(Point::new("p1", vec![1.0, 0.0, 0.0], serde_json::json!(null))?)?;
     /// collection.insert(Point::new("p2", vec![0.0, 1.0, 0.0], serde_json::json!(null))?)?;
     ///
-    /// let results = collection.search(&[1.0, 0.0, 0.0], 2)?;
+    /// let results = collection.search(&[1.0, 0.0, 0.0], 2, None, None)?;
     /// assert_eq!(results.len(), 2);
     /// # Ok::<(), ferres_db_core::FerresError>(())
     /// ```
+    ///
+    /// Quando `predicate` é `Some`, a busca aplica pre-filtering no índice (HNSW)
+    /// e o cache LRU não é usado.
+    ///
+    /// O parâmetro `vector_field` indica contra qual vetor buscar: `None` ou
+    /// `"default"` usa o vetor principal; outro nome (ex.: `"title_vector"`) usa
+    /// o índice do campo nomeado, se existir.
     pub fn search(
         &self,
         query: &[f32],
         k: usize,
+        predicate: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+        vector_field: Option<&str>,
     ) -> Result<Vec<(String, f32)>, FerresError> {
         self.validate_dimension(query)?;
 
-        // Calcula hash do query para usar como chave de cache
-        use std::collections::hash_map::DefaultHasher;
-        let mut hasher = DefaultHasher::new();
-        query.iter().for_each(|x| {
-            x.to_bits().hash(&mut hasher);
-        });
-        let query_hash = hasher.finish();
-        let cache_key = CacheKey { query_hash, k };
-
-        // Verifica cache se habilitado
-        if let Some(cache) = &self.search_cache {
-            if let Ok(mut cache_guard) = cache.lock() {
-                if let Some(cached_results) = cache_guard.get(&cache_key) {
-                    return Ok(cached_results.clone());
+        let index_to_use = match vector_field {
+            None | Some("default") => None,
+            Some(f) => {
+                if !self.vector_indices.contains_key(f) {
+                    return Err(FerresError::UnknownVectorField(f.to_string()));
                 }
+                Some(f)
             }
-        }
-
-        // Executa busca (com span para tracing distribuído)
-        let results = {
-            let _span = tracing::info_span!("collection.search",
-                points = self.points.len(),
-                dimension = self.config.dimension,
-            ).entered();
-            self.index.search(query, k)?
         };
 
-        // Armazena no cache se habilitado
-        if let Some(cache) = &self.search_cache {
-            if let Ok(mut cache_guard) = cache.lock() {
-                cache_guard.put(cache_key, results.clone());
+        // Com predicado, não usar cache (resultado depende do filtro).
+        if predicate.is_none() {
+            use std::collections::hash_map::DefaultHasher;
+            let mut hasher = DefaultHasher::new();
+            query.iter().for_each(|x| {
+                x.to_bits().hash(&mut hasher);
+            });
+            let query_hash = hasher.finish();
+            let cache_key = CacheKey {
+                query_hash,
+                k,
+                vector_field: index_to_use.map(String::from),
+            };
+
+            if let Some(cache) = &self.search_cache {
+                if let Ok(mut cache_guard) = cache.lock() {
+                    if let Some(cached_results) = cache_guard.get(&cache_key) {
+                        self.search_cache_hits.fetch_add(1, Ordering::Relaxed);
+                        return Ok(cached_results.clone());
+                    }
+                }
+                self.search_cache_misses.fetch_add(1, Ordering::Relaxed);
             }
+
+            let results = {
+                let _span = tracing::info_span!("collection.search",
+                    points = self.points.len(),
+                    dimension = self.config.dimension,
+                    vector_field = ?index_to_use,
+                ).entered();
+                match index_to_use {
+                    None => self.index.search(query, k, None)?,
+                    Some(f) => self.vector_indices.get(f).unwrap().search(query, k, None)?,
+                }
+            };
+
+            if let Some(cache) = &self.search_cache {
+                if let Ok(mut cache_guard) = cache.lock() {
+                    cache_guard.put(cache_key, results.clone());
+                }
+            }
+            return Ok(results);
         }
 
-        Ok(results)
+        let _span = tracing::info_span!("collection.search",
+            points = self.points.len(),
+            dimension = self.config.dimension,
+            vector_field = ?index_to_use,
+        ).entered();
+        match index_to_use {
+            None => self.index.search(query, k, predicate),
+            Some(f) => self.vector_indices.get(f).unwrap().search(query, k, predicate),
+        }
     }
 
     /// Busca os `k` vizinhos mais próximos com metadados de explicação.
@@ -506,9 +688,23 @@ impl Collection {
         &self,
         query: &[f32],
         k: usize,
+        predicate: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+        vector_field: Option<&str>,
     ) -> Result<Vec<(String, f32, ExplainMeta)>, FerresError> {
         self.validate_dimension(query)?;
-        self.index.search_explain(query, k)
+        let index_to_use = match vector_field {
+            None | Some("default") => None,
+            Some(f) => {
+                if !self.vector_indices.contains_key(f) {
+                    return Err(FerresError::UnknownVectorField(f.to_string()));
+                }
+                Some(f)
+            }
+        };
+        match index_to_use {
+            None => self.index.search_explain(query, k, predicate),
+            Some(f) => self.vector_indices.get(f).unwrap().search_explain(query, k, predicate),
+        }
     }
 
     /// Busca híbrida: combina resultados vetoriais e BM25 via estratégia de fusão.
@@ -533,7 +729,7 @@ impl Collection {
             .ok_or_else(|| FerresError::Storage("hybrid search requires BM25 index enabled for this collection".to_string()))?;
 
         let k_expanded = (limit * 3).max(50).min(self.points.len().max(1));
-        let vec_results = self.search(query_vector, k_expanded)?;
+        let vec_results = self.search(query_vector, k_expanded, None, None)?;
         let bm25_results = bm25.search(query_text, k_expanded);
 
         let combined = match strategy {
@@ -585,6 +781,9 @@ impl Collection {
             return Err(FerresError::PointNotFound(id.to_string()));
         }
         self.index.remove_point(id);
+        for idx in self.vector_indices.values_mut() {
+            idx.remove_point(id);
+        }
         if let Some(ref mut bm25) = self.bm25_index {
             bm25.remove_document(id);
         }
@@ -605,6 +804,9 @@ impl Collection {
         for id in &sorted_ids {
             if self.points.remove(id).is_some() {
                 self.index.remove_point(id);
+                for idx in self.vector_indices.values_mut() {
+                    idx.remove_point(id);
+                }
                 if let Some(ref mut bm25) = self.bm25_index {
                     bm25.remove_document(id);
                 }
@@ -617,6 +819,38 @@ impl Collection {
             self.dirty.store(true, Ordering::Release);
         }
         Ok(deleted)
+    }
+
+    /// Remove pontos cujo TTL expirou (`expires_at < now`).
+    ///
+    /// Retorna o número de pontos removidos. Pontos sem `expires_at` (None) nunca expiram.
+    pub fn vacuum_expired_points(&mut self) -> usize {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_secs();
+        let expired: Vec<String> = self
+            .points
+            .iter()
+            .filter(|(_, p)| p.expires_at.map(|e| e < now).unwrap_or(false))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let count = expired.len();
+        for id in &expired {
+            self.points.remove(id);
+            self.index.remove_point(id);
+            for idx in self.vector_indices.values_mut() {
+                idx.remove_point(id);
+            }
+            if let Some(ref mut bm25) = self.bm25_index {
+                bm25.remove_document(id);
+            }
+        }
+        if count > 0 {
+            self.invalidate_search_cache();
+            self.dirty.store(true, Ordering::Release);
+        }
+        count
     }
 
     /// Recupera um ponto pelo ID.
@@ -648,6 +882,15 @@ impl Collection {
         self.points.is_empty()
     }
 
+    /// Estatísticas do search_cache para cálculo de Cache Hit Rate.
+    /// Retorna (hits, misses). Hit rate % = hits / (hits + misses) * 100 quando total > 0.
+    pub fn search_cache_stats(&self) -> (u64, u64) {
+        (
+            self.search_cache_hits.load(Ordering::Relaxed),
+            self.search_cache_misses.load(Ordering::Relaxed),
+        )
+    }
+
     /// Returns the number of tombstoned points in the underlying ANN index.
     ///
     /// Tombstones accumulate when points are deleted and degrade search
@@ -655,6 +898,14 @@ impl Collection {
     /// background reindex is recommended.
     pub fn tombstone_count(&self) -> usize {
         self.index.tombstone_count()
+    }
+
+    /// Total number of entries in the index (live points + tombstones).
+    ///
+    /// Use with [`crate::reindex::needs_reindex`] as the `total_indexed`
+    /// argument: `needs_reindex(coll.tombstone_count(), coll.total_indexed_len())`.
+    pub fn total_indexed_len(&self) -> usize {
+        self.len() + self.tombstone_count()
     }
 
     /// Returns estimated memory (bytes) wasted by tombstoned points until the next reindex.
@@ -791,7 +1042,7 @@ mod tests {
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
         col.insert(make_point("c", vec![0.9, 0.1, 0.0])).unwrap();
 
-        let results = col.search(&[1.0, 0.0, 0.0], 2).unwrap();
+        let results = col.search(&[1.0, 0.0, 0.0], 2, None, None).unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -846,7 +1097,7 @@ mod tests {
         col.insert_batch(points).unwrap();
 
         // Verifica que os pontos são buscáveis
-        let results = col.search(&[1.0, 0.0, 0.0], 2).unwrap();
+        let results = col.search(&[1.0, 0.0, 0.0], 2, None, None).unwrap();
         assert_eq!(results.len(), 2);
         // O mais próximo de [1,0,0] deve ser "a"
         assert_eq!(results[0].0, "a");
@@ -882,7 +1133,7 @@ mod tests {
         assert_eq!(col.len(), 150);
 
         // Verifica que os pontos são buscáveis após rebuild
-        let results = col.search(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 5).unwrap();
+        let results = col.search(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 5, None, None).unwrap();
         assert!(!results.is_empty());
     }
 
@@ -915,7 +1166,7 @@ mod tests {
     #[test]
     fn search_validates_query_dimension() {
         let col = Collection::new(test_config());
-        let result = col.search(&[1.0, 2.0], 5); // dimensão 2, esperado 3
+        let result = col.search(&[1.0, 2.0], 5, None, None); // dimensão 2, esperado 3
         assert!(result.is_err());
     }
 
@@ -935,6 +1186,31 @@ mod tests {
         let mut col = Collection::new(test_config());
         let result = col.remove("ghost");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn vacuum_expired_points_removes_only_expired() {
+        let mut col = Collection::new(test_config());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let mut p_expired = make_point("exp1", vec![1.0, 0.0, 0.0]);
+        p_expired.expires_at = Some(1); // past
+        let mut p_future = make_point("exp2", vec![0.0, 1.0, 0.0]);
+        p_future.expires_at = Some(now + 3600);
+        let p_no_ttl = make_point("exp3", vec![0.0, 0.0, 1.0]);
+        col.insert(p_expired).unwrap();
+        col.insert(p_future).unwrap();
+        col.insert(p_no_ttl).unwrap();
+        assert_eq!(col.len(), 3);
+
+        let removed = col.vacuum_expired_points();
+        assert_eq!(removed, 1);
+        assert_eq!(col.len(), 2);
+        assert!(col.get("exp1").is_none());
+        assert!(col.get("exp2").is_some());
+        assert!(col.get("exp3").is_some());
     }
 
     #[test]
@@ -1045,7 +1321,7 @@ mod tests {
                 return TestResult::discard();
             }
 
-            let results = match col.search(&vector, k.min(col.len())) {
+            let results = match col.search(&vector, k.min(col.len()), None, None) {
                 Ok(r) => r,
                 Err(_) => return TestResult::discard(),
             };
@@ -1223,7 +1499,7 @@ mod tests {
             }
 
             let query = vec![0.0; dimension];
-            let results = match col.search(&query, k) {
+            let results = match col.search(&query, k, None, None) {
                 Ok(r) => r,
                 Err(_) => return TestResult::discard(),
             };

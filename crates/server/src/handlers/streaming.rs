@@ -74,6 +74,9 @@ struct WsPointInput {
     vector: Vec<f32>,
     #[serde(default)]
     metadata: serde_json::Value,
+    /// TTL em segundos; se presente, o ponto expira após esse tempo.
+    #[serde(default)]
+    ttl: Option<u64>,
 }
 
 /// Mensagem do servidor para o cliente.
@@ -141,6 +144,22 @@ fn authenticate_ws(headers: &HeaderMap, query: &WsQueryParams) -> bool {
             if is_valid_legacy_key(key) {
                 return true;
             }
+        }
+    }
+
+    // 5. JWT (login do dashboard) — query param ou header
+    let token = query
+        .token
+        .as_deref()
+        .or_else(|| {
+            headers
+                .get("Authorization")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.strip_prefix("Bearer "))
+        });
+    if let Some(t) = token {
+        if crate::auth::validate_jwt(t) {
+            return true;
         }
     }
 
@@ -527,7 +546,10 @@ async fn process_upsert_batch(
             }
 
             match Point::new(input.id.clone(), input.vector, input.metadata) {
-                Ok(point) => {
+                Ok(mut point) => {
+                    if let Some(ttl) = input.ttl {
+                        point.expires_at = Some(unix_now().saturating_add(ttl));
+                    }
                     point_ids.push(input.id);
                     valid_points.push(point);
                 }
@@ -553,6 +575,7 @@ async fn process_upsert_batch(
                     };
                     drop(collection); // Release lock before emit
                     drop(collection_arc);
+                    app_state.record_ingest(unix_now(), result.inserted as u64);
                     app_state.emit_event(event);
 
                     return Ok((result.inserted, failed, took_ms));

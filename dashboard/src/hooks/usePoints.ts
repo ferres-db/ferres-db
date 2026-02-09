@@ -5,6 +5,8 @@ export interface UsePointsOptions {
   limit?: number;
   offset?: number;
   filter?: Record<string, unknown>;
+  /** Restrict list to this namespace (multitenancy). */
+  namespace?: string;
 }
 
 export const usePoints = (collectionName: string, options?: UsePointsOptions) => {
