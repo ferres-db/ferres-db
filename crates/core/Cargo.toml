@@ -19,6 +19,8 @@ tracing-subscriber = { workspace = true }
 rayon = { workspace = true }
 lru = { workspace = true }
 memmap2 = { workspace = true }
+pulp = "0.22"
+zstd = { workspace = true }
 
 [[bin]]
 name = "ferres-db"

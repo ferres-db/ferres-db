@@ -30,6 +30,22 @@ pub fn get_jwt_secret() -> Option<&'static [u8]> {
     JWT_SECRET.get().map(|v| v.as_slice())
 }
 
+/// Valida um token JWT (ex.: do login do dashboard).
+/// Usado pelo handler WebSocket para aceitar o mesmo token que o REST.
+/// Retorna true se o token for um JWT válido (assinatura e expiração).
+pub fn validate_jwt(token: &str) -> bool {
+    let secret = match get_jwt_secret() {
+        Some(s) => s,
+        None => return false,
+    };
+    if !looks_like_jwt(token) {
+        return false;
+    }
+    let mut validation = Validation::default();
+    validation.validate_exp = true;
+    decode::<JwtClaims>(token, &DecodingKey::from_secret(secret), &validation).is_ok()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JwtClaims {
     pub sub: String,   // username

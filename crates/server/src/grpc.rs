@@ -147,7 +147,8 @@ impl FerresDb for FerresGrpcService {
             let coll = collection_arc
                 .read()
                 .map_err(|e| Status::internal(format!("lock error: {e}")))?;
-            FileStorage::save_collection(&coll, &collection_dir)
+            let binary = self.state.config.binary_snapshot;
+            FileStorage::save_collection(&coll, &collection_dir, binary)
                 .map_err(|e| Status::internal(e.to_string()))?;
             coll.mark_clean();
         }
@@ -539,7 +540,7 @@ impl FerresDb for FerresGrpcService {
             filter.namespace = Some(ns.clone());
         }
         let raw = if filter.is_empty() {
-            coll.search(&req.vector, req.limit as usize, None)
+            coll.search(&req.vector, req.limit as usize, None, None)
                 .map_err(|e| Status::internal(e.to_string()))?
         } else {
             let predicate = |id: &str| {
@@ -547,7 +548,7 @@ impl FerresDb for FerresGrpcService {
                     .map(|p| filter.matches_point(&p))
                     .unwrap_or(false)
             };
-            coll.search(&req.vector, req.limit as usize, Some(&predicate))
+            coll.search(&req.vector, req.limit as usize, Some(&predicate), None)
                 .map_err(|e| Status::internal(e.to_string()))?
         };
 
@@ -719,7 +720,7 @@ impl FerresDb for FerresGrpcService {
             let coll = collection_arc
                 .read()
                 .map_err(|e| Status::internal(format!("lock error: {e}")))?;
-            build_search_explanation(&coll, &req.vector, req.limit as usize, filter)
+            build_search_explanation(&coll, &req.vector, req.limit as usize, filter, None)
                 .map_err(|e| Status::internal(e.to_string()))?
         };
 
@@ -948,7 +949,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
         filter.namespace = Some(ns.clone());
     }
     let raw = if filter.is_empty() {
-        coll.search(&req.vector, req.limit as usize, None)
+        coll.search(&req.vector, req.limit as usize, None, None)
             .map_err(|e| Status::internal(e.to_string()))?
     } else {
         let predicate = |id: &str| {
@@ -956,7 +957,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
                 .map(|p| filter.matches_point(&p))
                 .unwrap_or(false)
         };
-        coll.search(&req.vector, req.limit as usize, Some(&predicate))
+        coll.search(&req.vector, req.limit as usize, Some(&predicate), None)
             .map_err(|e| Status::internal(e.to_string()))?
     };
 

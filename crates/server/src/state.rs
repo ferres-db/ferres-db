@@ -171,6 +171,12 @@ pub struct ServerConfig {
     /// API keys para autenticação (separadas por vírgula).
     #[serde(default)]
     pub api_keys: Option<String>,
+    /// Comprimir WAL com Zstd (quando usar VectorDB com WAL). Default: false.
+    #[serde(default)]
+    pub wal_compression: bool,
+    /// Gravar snapshots em formato binário (points.bin) em vez de JSONL. Reduz tamanho e tempo de carga. Default: false.
+    #[serde(default)]
+    pub binary_snapshot: bool,
 }
 
 fn default_host() -> String {
@@ -238,6 +244,12 @@ impl ServerConfig {
         if let Ok(api_keys) = std::env::var("FERRESDB_API_KEYS") {
             config.api_keys = Some(api_keys);
         }
+        if let Ok(v) = std::env::var("FERRESDB_WAL_COMPRESSION") {
+            config.wal_compression = v.eq_ignore_ascii_case("true") || v == "1";
+        }
+        if let Ok(v) = std::env::var("FERRESDB_BINARY_SNAPSHOT") {
+            config.binary_snapshot = v.eq_ignore_ascii_case("true") || v == "1";
+        }
 
         info!(
             host = %config.host,
@@ -259,6 +271,8 @@ impl Default for ServerConfig {
             storage_path: default_storage_path(),
             log_level: default_log_level(),
             api_keys: None,
+            wal_compression: false,
+            binary_snapshot: false,
         }
     }
 }
@@ -584,7 +598,7 @@ impl AppState {
                 tokio::task::spawn_blocking(move || {
                     let coll = collection_arc.read().ok()?;
                     coll.validate_dimension(&query).ok()?;
-                    let raw = coll.search(&query, limit, None).ok()?;
+                    let raw = coll.search(&query, limit, None, None).ok()?;
                     let results: Vec<SearchResult> = raw
                         .into_iter()
                         .filter_map(|(storage_id, score)| {
@@ -632,8 +646,9 @@ impl AppState {
 
             if collection.is_dirty() {
                 let collection_dir = collections_dir.join(name);
+                let binary = self.config.binary_snapshot;
                 self.storage_circuit_breaker.call(|| {
-                    FileStorage::save_collection(&collection, &collection_dir)
+                    FileStorage::save_collection(&collection, &collection_dir, binary)
                 })?;
                 collection.mark_clean();
                 saved_count += 1;
@@ -665,8 +680,9 @@ impl AppState {
                     "failed to acquire read lock for collection {name}: {e}"
                 ))
             })?;
+            let binary = self.config.binary_snapshot;
             self.storage_circuit_breaker.call(|| {
-                FileStorage::save_collection(&collection, &collection_dir)
+                FileStorage::save_collection(&collection, &collection_dir, binary)
             })?;
             collection.mark_clean();
             saved_count += 1;

@@ -263,6 +263,9 @@ impl From<FerresError> for ApiError {
             FerresError::EmptyVector => {
                 ApiError::invalid_dimension("vector cannot be empty")
             }
+            FerresError::UnknownVectorField(name) => {
+                ApiError::invalid_payload(format!("unknown vector field: {name}"))
+            }
         }
     }
 }

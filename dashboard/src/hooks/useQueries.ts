@@ -22,14 +22,16 @@ export const useSearch = () => {
       limit,
       filter,
       namespace,
+      vector_field,
     }: {
       collection: string;
       vector: number[];
       limit?: number;
       filter?: Record<string, unknown>;
       namespace?: string;
+      vector_field?: string;
     }): Promise<SearchResult[]> =>
-      pointsApi.search(collection, vector, limit, filter, { namespace }),
+      pointsApi.search(collection, vector, limit, filter, { namespace, vector_field }),
   });
 };
 
