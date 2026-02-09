@@ -1,6 +1,6 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useMemo } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useCollection, useTierDistribution } from '@/hooks/useCollections';
 import { usePoints } from '@/hooks/usePoints';
 import { useCollectionStats, useCollectionQueries } from '@/hooks/useCollectionStats';
@@ -37,7 +37,6 @@ export const CollectionPoints = () => {
   const [namespaceFilter, setNamespaceFilter] = useState('');
   const [reindexStarting, setReindexStarting] = useState(false);
 
-  const queryClient = useQueryClient();
   const { data: collection, isLoading: collectionLoading } = useCollection(name || '');
   const { data: stats, isLoading: statsLoading } = useCollectionStats(name || '');
   const { data: queries, isLoading: queriesLoading } = useCollectionQueries(name || '');
