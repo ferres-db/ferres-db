@@ -83,6 +83,10 @@ pub struct SearchPointsRequest {
     /// Restringe resultados a este namespace (multitenancy).
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Campo vetorial contra o qual buscar. Omitido ou "default" = vetor principal;
+    /// outro nome (ex.: "title_vector", "content_vector") = índice nomeado.
+    #[serde(default)]
+    pub vector_field: Option<String>,
     /// Orçamento máximo em ms. Se a estimativa de custo exceder, retorna erro 422
     /// com a estimativa detalhada no body (sem executar a busca).
     #[serde(default)]
@@ -549,8 +553,9 @@ pub async fn search_points(
     if let Some(ns) = &payload.namespace {
         filter.namespace = Some(ns.clone());
     }
+    let vector_field = payload.vector_field.as_deref();
     let results = if filter.is_empty() {
-        collection.search(&payload.vector, payload.limit, None).map_err(ApiError::from)?
+        collection.search(&payload.vector, payload.limit, None, vector_field).map_err(ApiError::from)?
     } else {
         let predicate = |id: &str| {
             collection
@@ -559,7 +564,7 @@ pub async fn search_points(
                 .unwrap_or(false)
         };
         collection
-            .search(&payload.vector, payload.limit, Some(&predicate))
+            .search(&payload.vector, payload.limit, Some(&predicate), vector_field)
             .map_err(ApiError::from)?
     };
     drop(_span);
@@ -1169,6 +1174,9 @@ pub struct ExplainSearchRequest {
     pub filter: Option<serde_json::Value>,
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Campo vetorial contra o qual buscar (ex.: "default", "title_vector").
+    #[serde(default)]
+    pub vector_field: Option<String>,
 }
 
 /// Handler para POST /api/v1/collections/{name}/search/explain
@@ -1214,9 +1222,10 @@ pub async fn explain_search(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
+    let vector_field = payload.vector_field.as_deref();
     let explanation = {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-        build_search_explanation(&collection, &payload.vector, payload.limit, filter)
+        build_search_explanation(&collection, &payload.vector, payload.limit, filter, vector_field)
             .map_err(ApiError::from)?
     };
 

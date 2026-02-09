@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(col.tombstone_count(), 0, "tombstones should be 0 after reindex");
 
         // Search should still work
-        let results = col.search(&[1.0, 0.0, 0.0], 3, None).unwrap();
+        let results = col.search(&[1.0, 0.0, 0.0], 3, None, None).unwrap();
         assert_eq!(results.len(), 2); // a and c
         assert_eq!(results[0].0, "a");
     }
@@ -446,14 +446,14 @@ mod tests {
         let new_index = build_new_index(&config, &snapshot).unwrap();
 
         // Meanwhile, search should still work on old index
-        let results = col.search(&[1.0, 0.0, 0.0], 5, None).unwrap();
+        let results = col.search(&[1.0, 0.0, 0.0], 5, None, None).unwrap();
         assert!(!results.is_empty(), "search should work during reindex build");
 
         // Swap
         col.swap_index(new_index);
 
         // Search should still work after swap
-        let results_after = col.search(&[1.0, 0.0, 0.0], 5, None).unwrap();
+        let results_after = col.search(&[1.0, 0.0, 0.0], 5, None, None).unwrap();
         assert!(!results_after.is_empty(), "search should work after swap");
     }
 
@@ -487,12 +487,12 @@ mod tests {
         col.swap_index(new_index);
 
         // Verify: "c" (added during build) should appear
-        let results = col.search(&[0.0, 0.0, 1.0], 5, None).unwrap();
+        let results = col.search(&[0.0, 0.0, 1.0], 5, None, None).unwrap();
         let ids: Vec<&str> = results.iter().map(|r| r.0.as_str()).collect();
         assert!(ids.contains(&"c"), "point added during reindex should appear after swap");
 
         // "b" (removed during build) should NOT appear
-        let all_results = col.search(&[0.0, 1.0, 0.0], 5, None).unwrap();
+        let all_results = col.search(&[0.0, 1.0, 0.0], 5, None, None).unwrap();
         let all_ids: Vec<&str> = all_results.iter().map(|r| r.0.as_str()).collect();
         assert!(!all_ids.contains(&"b"), "point removed during reindex should not appear");
 

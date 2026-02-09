@@ -862,7 +862,7 @@ impl TieredCollection {
     /// Hidratação: hot é instantâneo, warm lê do mmap, cold lê do disco.
     /// Registra acesso para cada resultado retornado.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, FerresError> {
-        let results = self.collection.search(query, k, None)?;
+        let results = self.collection.search(query, k, None, None)?;
 
         // Registra acesso para cada resultado
         if let Ok(mut tracker) = self.access_tracker.lock() {
@@ -936,6 +936,7 @@ impl TieredCollection {
                     created_at: m.created_at,
                     namespace,
                     expires_at: m.expires_at,
+                    vectors: None,
                 };
                 Ok(Some(point))
             }
@@ -1180,6 +1181,7 @@ impl TieredCollection {
                             created_at: meta.created_at,
                             namespace,
                             expires_at: meta.expires_at,
+                            vectors: None,
                         },
                     ));
                 }
@@ -2258,7 +2260,7 @@ mod tests {
         let query = vec![1.0f32; 128];
         let start = Instant::now();
         for _ in 0..100 {
-            let _ = collection.search(&query, 10, None);
+            let _ = collection.search(&query, 10, None, None);
         }
         let hot_duration = start.elapsed();
 

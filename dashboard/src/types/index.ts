@@ -30,6 +30,8 @@ export interface Point {
   namespace?: string;
   /** TTL in seconds; point expires after this time (vacuum worker removes it). Optional on upsert. */
   ttl?: number;
+  /** Named vectors (e.g. title_vector, content_vector). Optional; search can target one via vector_field. */
+  vectors?: Record<string, number[]>;
 }
 
 export interface SearchResult {
@@ -268,6 +270,8 @@ export interface SearchExplainRequest {
   filter?: Record<string, unknown>;
   /** Restrict results to this namespace (multitenancy). */
   namespace?: string;
+  /** Vector field to search against: "default" or named (e.g. "title_vector", "content_vector"). */
+  vector_field?: string;
 }
 
 export interface ExplainedResult {
@@ -313,6 +317,8 @@ export interface SearchEstimateRequest {
   filter?: Record<string, unknown>;
   /** Restrict estimate to this namespace (multitenancy). */
   namespace?: string;
+  /** Vector field to search against: "default" or named (e.g. "title_vector", "content_vector"). */
+  vector_field?: string;
 }
 
 export interface SearchEstimateResponse {

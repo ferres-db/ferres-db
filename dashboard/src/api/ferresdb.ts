@@ -270,11 +270,13 @@ export const pointsApi = {
     vector: number[],
     limit: number = 10,
     filter?: Record<string, unknown>,
-    options?: { namespace?: string },
+    options?: { namespace?: string; vector_field?: string },
   ): Promise<SearchResult[]> => {
     const body: Record<string, unknown> = { vector, limit, filter };
     if (options?.namespace != null && options.namespace !== "")
       body.namespace = options.namespace;
+    if (options?.vector_field != null && options.vector_field !== "")
+      body.vector_field = options.vector_field;
     const response = await apiClient.post(
       `/api/v1/collections/${collection}/search`,
       body,

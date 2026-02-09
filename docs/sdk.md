@@ -45,12 +45,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Tipos públicos
 
-| Tipo | Descrição |
-|------|-----------|
-| `FerresDbClient` | Cliente HTTP; `new(base_url)`, `hybrid_search(...)` |
-| `HybridSearchResponse` | `{ results: Vec<SearchResultItem>, took_ms: u64 }` |
-| `SearchResultItem` | `{ id, score, metadata }` |
-| `SdkError` | Erros de rede, API (status + message) ou decode |
+| Tipo                   | Descrição                                           |
+| ---------------------- | --------------------------------------------------- |
+| `FerresDbClient`       | Cliente HTTP; `new(base_url)`, `hybrid_search(...)` |
+| `HybridSearchResponse` | `{ results: Vec<SearchResultItem>, took_ms: u64 }`  |
+| `SearchResultItem`     | `{ id, score, metadata }`                           |
+| `SdkError`             | Erros de rede, API (status + message) ou decode     |
 
 ### Tratamento de erros
 
@@ -65,6 +65,53 @@ match client.hybrid_search("docs", "text", &vec![0.1; 384], 5, 0.5).await {
 ```
 
 Operações que não estão no SDK Rust (criar coleção, upsert, busca vetorial) devem usar a API REST com `reqwest` e os schemas em [api.md](api.md).
+
+### Framework Integrations
+
+O SDK expõe um wrapper **VectorStore** para integração com ecossistema RAG (LangChain, LlamaIndex e ferramentas que esperam uma interface de armazenamento vetorial).
+
+- **Módulo:** `ferres_db_sdk::integrations`
+- **Trait:** `VectorStore` — métodos assíncronos:
+  - `add_vectors(ids, vectors, metadatas)` — insere ou atualiza documentos (vetor + metadata).
+  - `similarity_search(query_vector, k)` — retorna os `k` documentos mais similares (sem score).
+  - `similarity_search_with_score(query_vector, k)` — retorna `(documento, score)`.
+- **Implementação:** `FerresDbVectorStore` — usa um `FerresDbClient` e o nome da coleção.
+- **Helper:** `FerresDbVectorStore::ensure_collection(client, name, dimension, distance)` — cria a coleção se não existir (útil para demos e scripts).
+
+Exemplo mínimo (coleção já existente):
+
+```rust
+use ferres_db_sdk::{FerresDbClient, integrations::{FerresDbVectorStore, VectorStore}};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = FerresDbClient::new("http://localhost:8080");
+    let store = FerresDbVectorStore::ensure_collection(
+        client,
+        "my_rag",
+        384,
+        "Cosine",
+    ).await?;
+
+    store.add_vectors(
+        &["id1".into()],
+        &[vec![0.1; 384]],
+        Some(&[serde_json::json!({"text": "Conteúdo do doc"})]),
+    ).await?;
+
+    let docs = store.similarity_search(&vec![0.1; 384], 5).await?;
+    for d in docs {
+        println!("{} {}", d.id, d.metadata);
+    }
+    Ok(())
+}
+```
+
+Exemplo completo: `crates/sdk-rust/examples/langchain_integration.rs`. Execute com o servidor FerresDB em `http://localhost:8080` (ou `FERRESDB_URL`):
+
+```bash
+cargo run -p ferres-db-sdk --example langchain_integration
+```
 
 ---
 
@@ -190,7 +237,10 @@ const BASE = "http://localhost:8080";
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers as object) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers as object),
+    },
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -232,43 +282,50 @@ interface PointInput {
 }
 
 const points: PointInput[] = [
-  { id: "doc-1", vector: new Array(384).fill(0.1), metadata: { text: "Conteúdo" } },
+  {
+    id: "doc-1",
+    vector: new Array(384).fill(0.1),
+    metadata: { text: "Conteúdo" },
+  },
 ];
-const out = await api<{ upserted: number; failed: { id: string; reason: string }[] }>(
-  "/api/v1/collections/docs/points",
-  { method: "POST", body: JSON.stringify({ points }) }
-);
+const out = await api<{
+  upserted: number;
+  failed: { id: string; reason: string }[];
+}>("/api/v1/collections/docs/points", {
+  method: "POST",
+  body: JSON.stringify({ points }),
+});
 console.log("upserted", out.upserted, "failed", out.failed.length);
 ```
 
 ### Busca vetorial
 
 ```typescript
-const results = await api<{ results: { id: string; score: number; metadata: unknown }[]; took_ms: number }>(
-  "/api/v1/collections/docs/search",
-  {
-    method: "POST",
-    body: JSON.stringify({ vector: new Array(384).fill(0.1), limit: 5 }),
-  }
-);
+const results = await api<{
+  results: { id: string; score: number; metadata: unknown }[];
+  took_ms: number;
+}>("/api/v1/collections/docs/search", {
+  method: "POST",
+  body: JSON.stringify({ vector: new Array(384).fill(0.1), limit: 5 }),
+});
 console.log(results.results, results.took_ms);
 ```
 
 ### Busca híbrida
 
 ```typescript
-const hybrid = await api<{ results: { id: string; score: number; metadata: unknown }[]; took_ms: number }>(
-  "/api/v1/collections/docs/search/hybrid",
-  {
-    method: "POST",
-    body: JSON.stringify({
-      query_text: "como fazer deploy",
-      query_vector: new Array(384).fill(0.1),
-      limit: 5,
-      alpha: 0.5,
-    }),
-  }
-);
+const hybrid = await api<{
+  results: { id: string; score: number; metadata: unknown }[];
+  took_ms: number;
+}>("/api/v1/collections/docs/search/hybrid", {
+  method: "POST",
+  body: JSON.stringify({
+    query_text: "como fazer deploy",
+    query_vector: new Array(384).fill(0.1),
+    limit: 5,
+    alpha: 0.5,
+  }),
+});
 ```
 
 ### Boas práticas (TypeScript/JavaScript)

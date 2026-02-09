@@ -7,6 +7,8 @@
 // não precisem depender diretamente do crate core.
 pub use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, Point};
 
+pub mod integrations;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -28,6 +30,108 @@ impl FerresDbClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client: reqwest::Client::new(),
         }
+    }
+
+    /// Cria uma coleção (dimension, distance, opcional enable_bm25).
+    pub async fn create_collection(
+        &self,
+        name: &str,
+        dimension: u32,
+        distance: &str,
+        enable_bm25: bool,
+    ) -> Result<CreateCollectionResponse, SdkError> {
+        let url = format!("{}/api/v1/collections", self.base_url);
+        let body = CreateCollectionRequest {
+            name: name.to_string(),
+            dimension,
+            distance: distance.to_string(),
+            enable_bm25,
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(SdkError::Request)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(SdkError::Api {
+                status,
+                message: text,
+            });
+        }
+        let data = resp.json().await.map_err(SdkError::Decode)?;
+        Ok(data)
+    }
+
+    /// Insere ou atualiza pontos em lote (até 1000 por request).
+    pub async fn upsert_points(
+        &self,
+        collection_name: &str,
+        points: &[PointInput],
+    ) -> Result<UpsertResponse, SdkError> {
+        let url = format!(
+            "{}/api/v1/collections/{}/points",
+            self.base_url, collection_name
+        );
+        let body = UpsertPointsRequest {
+            points: points.to_vec(),
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(SdkError::Request)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(SdkError::Api {
+                status,
+                message: text,
+            });
+        }
+        let data = resp.json().await.map_err(SdkError::Decode)?;
+        Ok(data)
+    }
+
+    /// Busca vetorial: retorna os pontos mais similares ao vetor de consulta.
+    pub async fn search(
+        &self,
+        collection_name: &str,
+        vector: &[f32],
+        limit: usize,
+        filter: Option<serde_json::Value>,
+    ) -> Result<HybridSearchResponse, SdkError> {
+        let url = format!(
+            "{}/api/v1/collections/{}/search",
+            self.base_url, collection_name
+        );
+        let body = SearchRequest {
+            vector: vector.to_vec(),
+            limit,
+            filter,
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(SdkError::Request)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(SdkError::Api {
+                status,
+                message: text,
+            });
+        }
+        let data = resp.json().await.map_err(SdkError::Decode)?;
+        Ok(data)
     }
 
     /// Busca híbrida: combina resultados vetoriais e BM25 (keyword) via RRF.
@@ -87,6 +191,60 @@ pub enum SdkError {
 }
 
 // ─── Request/Response types (espelho do server) ─────────────────────────
+
+#[derive(Debug, Serialize)]
+struct CreateCollectionRequest {
+    name: String,
+    dimension: u32,
+    distance: String,
+    enable_bm25: bool,
+}
+
+/// Resposta da criação de coleção.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCollectionResponse {
+    pub name: String,
+    pub dimension: u32,
+    pub distance: String,
+    #[serde(default)]
+    pub created_at: Option<u64>,
+}
+
+/// Ponto para upsert (id, vector, metadata opcional).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PointInput {
+    pub id: String,
+    pub vector: Vec<f32>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct UpsertPointsRequest {
+    points: Vec<PointInput>,
+}
+
+/// Resposta do upsert de pontos.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertResponse {
+    pub upserted: u32,
+    pub failed: Vec<FailedPoint>,
+}
+
+/// Item que falhou no upsert.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedPoint {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchRequest {
+    vector: Vec<f32>,
+    limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filter: Option<serde_json::Value>,
+}
 
 #[derive(Debug, Serialize)]
 struct HybridSearchRequest {

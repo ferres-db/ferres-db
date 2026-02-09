@@ -6,6 +6,22 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 
 ### Added
 
+- **Feature: Support for named multi-vector points per document.** — Cada ponto pode ter um vetor principal (`vector`) e opcionalmente múltiplos vetores nomeados (`vectors: HashMap<String, Vec<f32>>`), por exemplo `title_vector` e `content_vector`. A busca aceita o parâmetro `vector_field` para consultar contra o vetor principal (`default`) ou contra um campo nomeado. Índices ANN separados são mantidos por campo vetorial; inserção, remoção e persistência (JSONL/bincode) suportam a nova estrutura. Documentação em `docs/api.md`.
+
+- **Storage: Added Zstd compression for WAL and binary snapshot support.** — WAL pode usar compressão Zstd opcional (menor uso de disco em `wal.log`); snapshots de pontos podem ser gravados em `points.bin` (bincode) em vez de `points.jsonl`, reduzindo tamanho e tempo de carregamento. Configuração via `StorageOptions` (core), `wal_compression` / `binary_snapshot` no servidor (config.toml ou env `FERRESDB_WAL_COMPRESSION`, `FERRESDB_BINARY_SNAPSHOT`). Documentação em `docs/api.md`.
+
+- **Ecossystem: Added foundation for LangChain and LlamaIndex integrations.**
+
+- **Search: Implemented native HNSW pre-filtering for higher accuracy with metadata.** — O filtro é aplicado durante a exploração do grafo (nós que não satisfazem o predicado são ignorados antes de entrar na lista de candidatos). A busca continua explorando com `ef` crescente até obter até `limit` resultados válidos ou exaurir o grafo.
+
+- **Performance: Added SIMD-accelerated distance kernels (AVX2/SSE).** — Kernels de distância (`euclidean_distance`, `dot_product`) em `crates/core/src/search.rs` usam a crate `pulp` para abstração SIMD segura, com despacho em tempo de execução para AVX2 (8× f32) ou SSE4.1 (4× f32) e fallback escalar automático. Distância assimétrica SQ8 (f32×u8) permanece otimizada em `quantization.rs` (múltiplos bytes em paralelo).
+
+## [Dev-001-Unreleased]
+
+### Added
+
+- **Performance: Added SIMD-accelerated distance kernels (AVX2/SSE).** — Kernels de distância (`euclidean_distance`, `dot_product`) em `crates/core/src/search.rs` usam a crate `pulp` para abstração SIMD segura, com despacho em tempo de execução para AVX2 (8× f32) ou SSE4.1 (4× f32) e fallback escalar automático. Distância assimétrica SQ8 (f32×u8) permanece otimizada em `quantization.rs` (múltiplos bytes em paralelo).
+
 - **Features: Time-to-Live (TTL) support for automatic data expiration**
 
 - **Support for Logical Namespaces (Multitenancy)** — Isolamento de dados por cliente na mesma coleção física via campo opcional `namespace` em Point. Permite evitar milhares de coleções: vários tenants compartilham uma coleção e os dados são filtrados por namespace. Inclui: campo `namespace` em Point (opcional); `MetadataFilter` com condição de primeira classe `$namespace` e métodos `matches_namespace`/`matches_point`; chave interna composta `(namespace, id)` para unicidade; persistência em storage e WAL; parâmetro `namespace` em buscas, get point e delete. Documentação em `docs/api.md`.

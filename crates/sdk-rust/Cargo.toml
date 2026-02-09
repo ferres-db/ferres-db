@@ -12,3 +12,4 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"

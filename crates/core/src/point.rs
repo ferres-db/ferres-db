@@ -18,6 +18,7 @@
 //!   simples que serializa de forma compacta e não depende de crate
 //!   de datetime.
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -26,10 +27,12 @@ use crate::error::FerresError;
 
 /// Representa um ponto (vetor + metadados) no espaço vetorial.
 ///
-/// O campo `vector` contém as coordenadas f32 para busca por
-/// similaridade. `metadata` carrega contexto arbitrário em JSON.
-/// O campo opcional `namespace` permite isolamento lógico por tenant
-/// (multitenancy) na mesma coleção.
+/// O campo `vector` contém o vetor principal (obrigatório) para busca por
+/// similaridade. O campo opcional `vectors` permite múltiplos vetores
+/// nomeados por documento (ex.: `title_vector`, `content_vector`), usados
+/// em buscas contra um campo específico. `metadata` carrega contexto
+/// arbitrário em JSON. O campo opcional `namespace` permite isolamento
+/// lógico por tenant (multitenancy) na mesma coleção.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Point {
     pub id: String,
@@ -42,6 +45,11 @@ pub struct Point {
     /// Timestamp Unix (segundos) em que o ponto expira; None = sem expiração (TTL).
     #[serde(default)]
     pub expires_at: Option<u64>,
+    /// Vetores nomeados adicionais (ex.: "title_vector", "content_vector").
+    /// Cada vetor deve ter a mesma dimensão da coleção. Busca pode ser feita
+    /// contra o vetor principal (`vector`) ou contra um destes campos.
+    #[serde(default)]
+    pub vectors: Option<HashMap<String, Vec<f32>>>,
 }
 
 impl Point {
@@ -104,7 +112,24 @@ impl Point {
             created_at,
             namespace: None,
             expires_at: None,
+            vectors: None,
         })
+    }
+
+    /// Retorna o vetor a usar para um campo vetorial dado.
+    ///
+    /// - `None` ou `"default"`: vetor principal (`vector`).
+    /// - Outro nome: entrada em `vectors` com essa chave, se existir.
+    #[inline]
+    pub fn vector_for_field(&self, field: Option<&str>) -> Option<&[f32]> {
+        match field {
+            None | Some("default") => Some(self.vector.as_slice()),
+            Some(name) => self
+                .vectors
+                .as_ref()
+                .and_then(|m| m.get(name))
+                .map(|v| v.as_slice()),
+        }
     }
 
     /// Chave interna de armazenamento: (namespace, id) quando namespace existe, senão id.
@@ -241,6 +266,36 @@ mod tests {
         let point: Point = serde_json::from_str(json).unwrap();
         assert_eq!(point.id, "legacy");
         assert_eq!(point.expires_at, None);
+    }
+
+    #[test]
+    fn point_deserialize_legacy_without_vectors_field() {
+        let json = r#"{"id":"legacy","vector":[1.0],"metadata":null,"created_at":1}"#;
+        let point: Point = serde_json::from_str(json).unwrap();
+        assert_eq!(point.id, "legacy");
+        assert_eq!(point.vectors, None);
+        assert_eq!(point.vector_for_field(None).unwrap(), &[1.0_f32]);
+    }
+
+    #[test]
+    fn point_vector_for_field_default_and_named() {
+        let mut vectors = HashMap::new();
+        vectors.insert("title_vector".to_string(), vec![2.0, 3.0]);
+        vectors.insert("content_vector".to_string(), vec![4.0, 5.0]);
+        let point = Point {
+            id: "p1".into(),
+            vector: vec![1.0, 0.0],
+            metadata: serde_json::Value::Null,
+            created_at: 0,
+            namespace: None,
+            expires_at: None,
+            vectors: Some(vectors),
+        };
+        assert_eq!(point.vector_for_field(None).unwrap(), &[1.0_f32, 0.0_f32]);
+        assert_eq!(point.vector_for_field(Some("default")).unwrap(), &[1.0_f32, 0.0_f32]);
+        assert_eq!(point.vector_for_field(Some("title_vector")).unwrap(), &[2.0_f32, 3.0_f32]);
+        assert_eq!(point.vector_for_field(Some("content_vector")).unwrap(), &[4.0_f32, 5.0_f32]);
+        assert!(point.vector_for_field(Some("other")).is_none());
     }
 
     #[test]

@@ -282,9 +282,10 @@ pub fn build_search_explanation(
     query: &[f32],
     limit: usize,
     filter: Option<MetadataFilter>,
+    vector_field: Option<&str>,
 ) -> Result<SearchExplanation, FerresError> {
     let resolver = |id: &str| collection.get(id).cloned();
-    build_search_explanation_with_resolver(collection, query, limit, filter, &resolver)
+    build_search_explanation_with_resolver(collection, query, limit, filter, vector_field, &resolver)
 }
 
 /// Variante de [`build_search_explanation`] que aceita um resolver customizado
@@ -307,6 +308,7 @@ pub fn build_search_explanation_with_resolver(
     query: &[f32],
     limit: usize,
     filter: Option<MetadataFilter>,
+    vector_field: Option<&str>,
     point_resolver: &dyn Fn(&str) -> Option<Point>,
 ) -> Result<SearchExplanation, FerresError> {
     collection.validate_dimension(query)?;
@@ -340,7 +342,7 @@ pub fn build_search_explanation_with_resolver(
 
     // Busca com metadata de explain (sem predicado: buscamos mais candidatos
     // para avaliar filtro condição-a-condição no explain).
-    let raw_results = collection.search_explain(query, search_limit, None)?;
+    let raw_results = collection.search_explain(query, search_limit, None, vector_field)?;
     let candidates_scanned = raw_results.len();
 
     // Constrói ExplainResult para cada candidato
@@ -850,6 +852,7 @@ mod tests {
             &query,
             limit,
             Some(filter),
+            None,
         )
         .unwrap();
 

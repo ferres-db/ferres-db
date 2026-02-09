@@ -6,6 +6,8 @@ Referência dos endpoints REST do servidor FerresDB. Base URL de exemplo: `http:
 
 Para melhor throughput em buscas vetoriais, o servidor utiliza kernels SIMD quando disponíveis. Recomenda-se CPU com suporte a **AVX2** ou, na falta, **SSE4.1**, para performance máxima nas operações de distância (Euclidean, DotProduct, Cosine) e no re-ranking com quantização SQ8. Em CPUs sem essas instruções, o código usa implementação escalar (comportamento correto, com performance menor). A detecção é automática em tempo de execução; não é necessária configuração.
 
+**Nota técnica (hardware):** Os kernels de distância (`euclidean_distance`, `dot_product`) e a distância assimétrica para SQ8 são acelerados por instruções **AVX2** (vetores de 8 floats) ou **SSE4.1** (4 floats), com fallback escalar automático. Para performance máxima em produção, utilize processadores que suportem pelo menos AVX2 (Intel Haswell ou posterior, AMD Excavator/Zen ou posterior). Em ambientes sem essas extensões (por exemplo, alguns VMs ou CPUs antigas), o comportamento permanece correto com throughput reduzido.
+
 ---
 
 ## Convenções
@@ -94,6 +96,32 @@ Persiste todas as coleções no disco. Útil antes de reiniciar o servidor ou em
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/save
 ```
+
+### Parâmetros de configuração de storage
+
+O servidor e o core suportam opções para reduzir uso de disco e tempo de carregamento:
+
+| Parâmetro         | Tipo    | Default | Descrição                                                                                                                                                                                                                                  |
+| ----------------- | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `wal_compression` | boolean | false   | Comprime o Write-Ahead Log (wal.log) com Zstd. Reduz o tamanho do WAL em disco. Ativo quando o servidor usa VectorDB com WAL.                                                                                                              |
+| `binary_snapshot` | boolean | false   | Grava snapshots de pontos em formato binário (points.bin com bincode) em vez de JSONL (points.jsonl). Reduz tamanho dos ficheiros e acelera o carregamento. O carregamento detecta automaticamente o formato (points.bin ou points.jsonl). |
+
+**Configuração no servidor**
+
+- **Ficheiro config.toml** (na raiz do projeto ou em `../`, `../../`):
+
+```toml
+wal_compression = false
+binary_snapshot = true
+```
+
+- **Variáveis de ambiente** (sobrescrevem o TOML):
+  - `FERRESDB_WAL_COMPRESSION` — `true` ou `1` para ativar compressão WAL.
+  - `FERRESDB_BINARY_SNAPSHOT` — `true` ou `1` para ativar snapshots binários.
+
+**Uso no core (VectorDB)**
+
+Use `VectorDB::with_storage_options(path, options)` com `StorageOptions { wal_compression: true, binary_snapshot: true }` para ativar ambas as opções ao usar o core diretamente.
 
 ---
 
@@ -463,15 +491,16 @@ Insere ou atualiza pontos em lote (até 1000 pontos por request).
 
 Cada elemento de `points`:
 
-| Campo       | Tipo   | Obrigatório | Descrição                                                                                        |
-| ----------- | ------ | ----------- | ------------------------------------------------------------------------------------------------ |
-| `id`        | string | sim         | ID único do ponto                                                                                |
-| `vector`    | array  | sim         | Array de números (float), dimensão igual à da coleção                                            |
-| `metadata`  | object | não         | JSON arbitrário (default: `{}`)                                                                  |
-| `namespace` | string | não         | Namespace lógico (multitenancy). Quando omitido, o ponto não tem namespace.                      |
-| `ttl`       | number | não         | TTL em segundos; se presente, o ponto expira após esse tempo e é removido pelo worker de vacuum. |
+| Campo       | Tipo   | Obrigatório | Descrição                                                                                                                                                |
+| ----------- | ------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`        | string | sim         | ID único do ponto                                                                                                                                        |
+| `vector`    | array  | sim         | Vetor principal (array de float), dimensão igual à da coleção                                                                                            |
+| `metadata`  | object | não         | JSON arbitrário (default: `{}`)                                                                                                                          |
+| `namespace` | string | não         | Namespace lógico (multitenancy). Quando omitido, o ponto não tem namespace.                                                                              |
+| `ttl`       | number | não         | TTL em segundos; se presente, o ponto expira após esse tempo e é removido pelo worker de vacuum.                                                         |
+| `vectors`   | object | não         | Vetores nomeados adicionais: mapa de nome → array de float (ex.: `"title_vector"`, `"content_vector"`). Cada vetor deve ter a mesma dimensão da coleção. |
 
-**Schema de request:**
+**Schema de request (um vetor):**
 
 ```json
 {
@@ -481,6 +510,24 @@ Cada elemento de `points`:
       "vector": [0.1, 0.2, -0.1],
       "metadata": { "text": "Conteúdo do documento" },
       "ttl": 3600
+    }
+  ]
+}
+```
+
+**Schema de request (múltiplos vetores por ponto):**
+
+```json
+{
+  "points": [
+    {
+      "id": "doc-1",
+      "vector": [0.1, 0.2, -0.1],
+      "vectors": {
+        "title_vector": [0.2, 0.1, 0.0],
+        "content_vector": [0.0, -0.1, 0.3]
+      },
+      "metadata": { "text": "Conteúdo do documento" }
     }
   ]
 }
@@ -591,13 +638,14 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 
 **Request body:**
 
-| Campo       | Tipo   | Obrigatório | Descrição                                                                          |
-| ----------- | ------ | ----------- | ---------------------------------------------------------------------------------- |
-| `vector`    | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                                      |
-| `limit`     | number | sim         | Número máximo de resultados (> 0)                                                  |
-| `filter`    | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo.          |
-| `namespace` | string | não         | Restringe resultados a este namespace (multitenancy).                              |
-| `budget_ms` | number | não         | Orçamento máximo em ms. Se a estimativa exceder, retorna 422 sem executar a busca. |
+| Campo          | Tipo   | Obrigatório | Descrição                                                                                                                                                                                                   |
+| -------------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vector`       | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                                                                                                                                                               |
+| `limit`        | number | sim         | Número máximo de resultados (> 0)                                                                                                                                                                           |
+| `filter`       | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo.                                                                                                                                   |
+| `namespace`    | string | não         | Restringe resultados a este namespace (multitenancy).                                                                                                                                                       |
+| `vector_field` | string | não         | Campo vetorial contra o qual buscar: omitido ou `"default"` = vetor principal; outro nome (ex.: `"title_vector"`, `"content_vector"`) = índice nomeado. Retorna 400 se o campo não existir em nenhum ponto. |
+| `budget_ms`    | number | não         | Orçamento máximo em ms. Se a estimativa exceder, retorna 422 sem executar a busca.                                                                                                                          |
 
 **Schema de request:**
 
@@ -606,6 +654,7 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
   "vector": [0.1, 0.2, -0.1],
   "limit": 5,
   "filter": null,
+  "vector_field": "content_vector",
   "budget_ms": 50
 }
 ```
@@ -638,7 +687,7 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/search \
 
 #### Filtro de metadata
 
-Quando o campo `filter` é informado, a busca utiliza **pre-filtering nativo no HNSW**: o filtro é aplicado durante a exploração do grafo (não após a busca), garantindo maior precisão e consistência no número de resultados retornados (até `limit` que satisfazem o filtro), sem depender de multiplicador fixo.
+Quando o campo `filter` é informado, a busca utiliza **pre-filtering nativo no HNSW**: o filtro é aplicado durante a exploração do grafo (nós que não satisfazem o filtro são ignorados antes de entrar na lista de candidatos). As buscas com filtro **garantem** o retorno de até `limit` resultados que satisfazem o filtro: a exploração continua (com aumento progressivo do parâmetro de busca) até atingir esse número de resultados válidos ou exaurir o grafo, sem depender de multiplicador fixo.
 
 O campo `filter` é um objeto JSON. Cada chave é um campo de metadata; o valor pode ser:
 

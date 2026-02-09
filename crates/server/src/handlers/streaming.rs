@@ -147,6 +147,22 @@ fn authenticate_ws(headers: &HeaderMap, query: &WsQueryParams) -> bool {
         }
     }
 
+    // 5. JWT (login do dashboard) — query param ou header
+    let token = query
+        .token
+        .as_deref()
+        .or_else(|| {
+            headers
+                .get("Authorization")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.strip_prefix("Bearer "))
+        });
+    if let Some(t) = token {
+        if crate::auth::validate_jwt(t) {
+            return true;
+        }
+    }
+
     false
 }
 
