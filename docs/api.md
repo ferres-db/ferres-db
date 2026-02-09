@@ -1916,3 +1916,92 @@ protoc --go_out=. --go-grpc_out=. \
   -I crates/server/proto \
   crates/server/proto/ferresdb.proto
 ```
+
+---
+
+## Model Context Protocol (MCP)
+
+O FerresDB pode atuar como **servidor MCP** (Model Context Protocol) via STDIO, permitindo que clientes como Claude Desktop se conectem ao binário e usem ferramentas para busca vetorial, upsert e estatísticas. O protocolo usa **stdin** para entrada e **stdout** para saída; os logs do servidor são redirecionados para **stderr** quando o modo MCP está ativo, para não corromper as mensagens MCP.
+
+### Ativação
+
+- **Linha de comando:** execute o binário com a flag `--mcp`.
+- **Variável de ambiente:** `FERRESDB_ENABLE_MCP=true` ou `FERRESDB_ENABLE_MCP=1`.
+
+O servidor REST (e gRPC, se habilitado) continua ativo no mesmo processo. O modo MCP requer que o binário tenha sido compilado com a feature `mcp`:
+
+```bash
+cargo build -p ferres-db-server --features mcp
+```
+
+Exemplo para uso com Claude Desktop (stdio):
+
+```bash
+/path/to/ferres-db-server --mcp
+```
+
+### Ferramentas MCP
+
+Três ferramentas estão disponíveis quando o servidor MCP está ativo.
+
+#### `search_points`
+
+Busca por similaridade vetorial em uma coleção. Utiliza o **pre-filtering nativo** do core: quando `filter` ou `namespace` é informado, o filtro é aplicado durante a exploração do grafo HNSW (não apenas pós-busca).
+
+| Argumento        | Tipo   | Obrigatório | Descrição                                                                 |
+| ---------------- | ------ | ----------- | ------------------------------------------------------------------------- |
+| `collection`     | string | sim         | Nome da coleção.                                                          |
+| `vector`         | array  | sim         | Vetor de consulta (array de números).                                     |
+| `limit`         | number | sim         | Número máximo de resultados (1 a 10000).                                  |
+| `filter`        | object | não         | Filtro de metadata (JSON). Ex.: `{"category": "tech"}`.                   |
+| `namespace`      | string | não         | Restringe a um namespace lógico (multitenancy).                           |
+| `vector_field`   | string | não         | Campo vetorial (omitido ou `"default"` = vetor principal; outro = nomeado).|
+
+**Resposta (sucesso):** objeto com chave `results`, array de objetos `{ "id", "score", "metadata", "namespace" }`.
+
+**Exemplo de argumentos:**
+
+```json
+{
+  "collection": "docs",
+  "vector": [0.1, 0.2, -0.1],
+  "limit": 5,
+  "filter": { "category": "blog" },
+  "namespace": "tenant-a"
+}
+```
+
+#### `upsert_points`
+
+Insere ou atualiza pontos em uma coleção. No canal MCP não há autenticação (canal confiável). Reutiliza a mesma validação e lógica de inserção da API REST (dimensão, batch, `Point::new`, `insert_batch`).
+
+| Argumento    | Tipo  | Obrigatório | Descrição                                      |
+| ------------ | ----- | ----------- | ---------------------------------------------- |
+| `collection` | string| sim         | Nome da coleção.                               |
+| `points`     | array | sim         | Array de pontos.                               |
+
+Cada elemento de `points` deve ter:
+
+| Campo      | Tipo   | Obrigatório | Descrição                |
+| ---------- | ------ | ----------- | ------------------------ |
+| `id`       | string | sim         | Identificador do ponto.  |
+| `vector`   | array  | sim         | Vetor (array de números).|
+| `metadata` | object | não         | Metadados JSON.          |
+| `namespace`| string | não         | Namespace lógico.        |
+| `ttl`      | number | não         | TTL em segundos.         |
+
+**Resposta (sucesso):** objeto `{ "upserted": number, "failed": array }`, onde `failed` contém itens com `id` e `reason` em caso de erro por ponto.
+
+#### `get_stats`
+
+Retorna estatísticas globais ou por coleção.
+
+| Argumento    | Tipo   | Obrigatório | Descrição                                                                 |
+| ------------ | ------ | ----------- | ------------------------------------------------------------------------- |
+| `collection` | string | não         | Se omitido: estatísticas globais. Se informado: estatísticas da coleção. |
+
+**Resposta (global):** `total_collections`, `total_points`, `total_queries_24h`, `avg_latency_ms`, `queries_per_minute`, `simd_enabled`.
+
+**Resposta (por coleção):** `num_points`, `num_queries`, `avg_latency_ms`, `p50_latency_ms`, `p95_latency_ms`, `p99_latency_ms`, `tombstone_count`, `tombstone_memory_waste_bytes`.
+
+Erros (coleção não encontrada, dimensão inválida, etc.) são retornados como conteúdo de erro no resultado da ferramenta (estrutura `error` / `message` em JSON).

@@ -57,6 +57,35 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/search \
 
 Referência completa dos endpoints e schemas: [docs/api.md](docs/api.md).
 
+### Conectar Claude Desktop ao FerresDB (MCP)
+
+O FerresDB pode atuar como servidor **Model Context Protocol (MCP)** via STDIO, permitindo que o Claude Desktop (ou outros clientes MCP) usem ferramentas de busca vetorial, upsert e estatísticas no mesmo processo em que rodam a API REST e gRPC.
+
+1. **Compile o servidor com suporte MCP:**
+
+   ```bash
+   cargo build -p ferres-db-server --features mcp --release
+   ```
+
+2. **No Claude Desktop**, configure o servidor MCP para iniciar o binário com a flag `--mcp`. Por exemplo, em `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+   ```json
+   {
+     "mcpServers": {
+       "ferresdb": {
+         "command": "/caminho/para/ferres-db-server",
+         "args": ["--mcp"]
+       }
+     }
+   }
+   ```
+
+   Use o caminho real do binário (ex.: `target/release/ferres-db-server` no diretório do projeto).
+
+3. O processo do FerresDB continuará servindo REST e gRPC normalmente; a comunicação MCP ocorre apenas por stdin/stdout. Os logs do servidor são enviados para **stderr** para não interferir no protocolo MCP.
+
+Ferramentas disponíveis: `search_points`, `upsert_points`, `get_stats`. Detalhes em [docs/api.md](docs/api.md#model-context-protocol-mcp).
+
 ---
 
 ## Uso como biblioteca (Rust)
