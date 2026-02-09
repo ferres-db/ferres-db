@@ -12,6 +12,7 @@ import { Streaming } from '@/pages/Streaming';
 import { ApiKeys } from '@/pages/ApiKeys';
 import { Users } from '@/pages/Users';
 import { Audit } from '@/pages/Audit';
+import { Analytics } from '@/pages/Analytics';
 import { Login } from '@/pages/Login';
 
 const queryClient = new QueryClient({
@@ -41,6 +42,7 @@ function App() {
               <Route path="/api-keys" element={<ApiKeys />} />
               <Route path="/users" element={<Users />} />
               <Route path="/audit" element={<Audit />} />
+              <Route path="/analytics" element={<Analytics />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

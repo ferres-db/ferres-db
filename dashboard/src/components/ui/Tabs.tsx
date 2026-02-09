@@ -44,7 +44,7 @@ export const Tabs = ({ value, onValueChange, children, className }: TabsProps) =
 
 export const TabsList = ({ children, className }: TabsListProps) => {
   return (
-    <div className={cn('inline-flex h-10 items-center justify-center rounded-md bg-bg-secondary p-1 text-gray-400', className)}>
+    <div className={cn('inline-flex h-9 items-center gap-0.5 rounded-lg border border-white/[0.06] bg-white/[0.02] p-1 text-gray-400', className)}>
       {children}
     </div>
   );
@@ -58,19 +58,17 @@ export const TabsTrigger = ({ value, children, className }: TabsTriggerProps) =>
   
   return (
     <button
+      type="button"
       onClick={() => context.onValueChange(value)}
       className={cn(
-        'relative inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
+        'inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/60 disabled:pointer-events-none disabled:opacity-50',
         isActive 
-          ? 'text-gray-50' 
-          : 'text-gray-400 hover:text-gray-50',
+          ? 'bg-white/[0.08] text-gray-50' 
+          : 'text-gray-400 hover:bg-white/[0.04] hover:text-gray-200',
         className
       )}
     >
       {children}
-      {isActive && (
-        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-orange-500" />
-      )}
     </button>
   );
 };

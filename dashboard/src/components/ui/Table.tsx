@@ -7,7 +7,7 @@ export interface TableProps extends HTMLAttributes<HTMLTableElement> {}
 export const Table = forwardRef<HTMLTableElement, TableProps>(
   ({ className, ...props }, ref) => {
     return (
-      <div className="relative w-full overflow-auto">
+      <div className="relative w-full overflow-auto rounded-lg border border-black/20">
         <table
           ref={ref}
           className={cn('w-full caption-bottom text-sm', className)}
@@ -23,7 +23,7 @@ Table.displayName = 'Table';
 export const TableHeader = forwardRef<HTMLTableSectionElement, HTMLAttributes<HTMLTableSectionElement>>(
   ({ className, ...props }, ref) => {
     return (
-      <thead ref={ref} className={cn('[&_tr]:border-b', className)} {...props} />
+      <thead ref={ref} className={cn('bg-black/10 [&_tr]:border-b [&_tr]:border-black/20', className)} {...props} />
     );
   }
 );
@@ -45,7 +45,10 @@ export const TableRow = forwardRef<HTMLTableRowElement, HTMLAttributes<HTMLTable
     return (
       <tr
         ref={ref}
-        className={cn('border-b border-bg-tertiary transition-colors hover:bg-bg-tertiary', className)}
+        className={cn(
+          'border-b border-black/20 transition-colors duration-150 hover:bg-black/10',
+          className
+        )}
         {...props}
       />
     );
@@ -60,7 +63,7 @@ export const TableHead = forwardRef<HTMLTableCellElement, ThHTMLAttributes<HTMLT
       <th
         ref={ref}
         className={cn(
-          'h-12 px-4 text-left align-middle font-medium text-gray-400 [&:has([role=checkbox])]:pr-0',
+          'h-11 px-4 text-left align-middle text-xs font-medium uppercase tracking-wider text-gray-400 [&:has([role=checkbox])]:pr-0',
           className
         )}
         {...props}
@@ -76,7 +79,7 @@ export const TableCell = forwardRef<HTMLTableCellElement, TdHTMLAttributes<HTMLT
     return (
       <td
         ref={ref}
-        className={cn('p-4 align-middle [&:has([role=checkbox])]:pr-0', className)}
+        className={cn('p-4 align-middle text-gray-200 [&:has([role=checkbox])]:pr-0', className)}
         {...props}
       />
     );

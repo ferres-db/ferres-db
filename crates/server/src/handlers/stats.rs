@@ -19,6 +19,8 @@ pub struct CollectionStatsResponse {
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
     pub p99_latency_ms: f64,
+    /// Number of tombstoned points (deleted but not yet compacted from index).
+    pub tombstone_count: usize,
     /// Estimated bytes held by tombstoned points until next reindex (quantized index only).
     pub tombstone_memory_waste_bytes: usize,
 }
@@ -87,6 +89,61 @@ fn default_slow_limit() -> usize {
     10
 }
 
+// ─── Analytics (GET /api/v1/stats/analytics) ───────────────────────────────
+
+/// Distribuição agregada de pontos por tier (Hot/Warm/Cold).
+#[derive(Debug, Serialize)]
+pub struct AnalyticsTierDistribution {
+    pub hot: usize,
+    pub warm: usize,
+    pub cold: usize,
+    pub hot_memory_bytes: usize,
+    pub warm_memory_bytes: usize,
+    pub cold_memory_bytes: usize,
+}
+
+/// Bucket de latência por minuto para gráfico histórico.
+#[derive(Debug, Serialize)]
+pub struct LatencyPerMinuteBucket {
+    pub timestamp: u64,
+    pub avg_ms: f64,
+    pub p50_ms: f64,
+}
+
+/// Métricas de latência de busca (query log, últimas 24h).
+#[derive(Debug, Serialize)]
+pub struct AnalyticsLatency {
+    pub avg_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub latency_per_minute: Vec<LatencyPerMinuteBucket>,
+}
+
+/// Agregado de tombstones em todas as coleções.
+#[derive(Debug, Serialize)]
+pub struct AnalyticsTombstones {
+    pub total_count: usize,
+    pub total_memory_waste_bytes: usize,
+    pub total_points: usize,
+}
+
+/// Estado do circuit breaker de storage (0=closed, 1=open, 2=half_open).
+#[derive(Debug, Serialize)]
+pub struct AnalyticsCircuitBreaker {
+    pub state: String,
+    pub failure_count: u64,
+}
+
+/// Resposta de GET /api/v1/stats/analytics.
+#[derive(Debug, Serialize)]
+pub struct AnalyticsResponse {
+    pub tier_distribution: AnalyticsTierDistribution,
+    pub latency: AnalyticsLatency,
+    pub tombstones: AnalyticsTombstones,
+    pub circuit_breaker: AnalyticsCircuitBreaker,
+}
+
 /// Handler para GET /api/v1/collections/{name}/stats
 ///
 /// Retorna estatísticas de uma coleção incluindo número de pontos,
@@ -99,10 +156,14 @@ pub async fn get_collection_stats(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    // Obtém número de pontos e waste de tombstones
-    let (num_points, tombstone_memory_waste_bytes) = {
+    // Obtém número de pontos, tombstone count e waste
+    let (num_points, tombstone_count, tombstone_memory_waste_bytes) = {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-        (collection.len(), collection.tombstone_memory_waste())
+        (
+            collection.len(),
+            collection.tombstone_count(),
+            collection.tombstone_memory_waste(),
+        )
     };
 
     // Obtém estatísticas de queries
@@ -124,6 +185,7 @@ pub async fn get_collection_stats(
         p50_latency_ms,
         p95_latency_ms,
         p99_latency_ms,
+        tombstone_count,
         tombstone_memory_waste_bytes,
     }))
 }
@@ -163,6 +225,125 @@ pub async fn get_global_stats(
         total_queries_24h,
         avg_latency_ms,
         queries_per_minute,
+    }))
+}
+
+/// Handler para GET /api/v1/stats/analytics
+///
+/// Retorna JSON consolidado: distribuição por tier, latência (avg, P50/P95/P99, histórico por minuto),
+/// tombstones agregados e estado do circuit breaker de storage.
+pub async fn get_analytics(
+    State(app_state): State<AppState>,
+) -> ApiResult<Json<AnalyticsResponse>> {
+    // Agregação de tier (mesma lógica que get_tier_distribution por coleção)
+    let mut hot = 0_usize;
+    let warm = 0_usize;
+    let cold = 0_usize;
+    let mut hot_memory_bytes = 0_usize;
+    let warm_memory_bytes = 0_usize;
+    let cold_memory_bytes = 0_usize;
+    for entry in app_state.collections.iter() {
+        let collection = match entry.value().read() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let config = collection.config();
+        let num_points = collection.len();
+        let dimension = config.dimension;
+        let vector_bytes = dimension * 4;
+        let metadata_est = 200;
+        let hnsw_node_est = 128;
+        if !config.tiered_storage.enabled {
+            hot += num_points;
+            hot_memory_bytes += num_points * (vector_bytes + metadata_est + hnsw_node_est);
+        } else {
+            hot += num_points;
+            hot_memory_bytes += num_points * (vector_bytes + metadata_est + hnsw_node_est);
+        }
+    }
+
+    // Latência: query_log_cache
+    let cache = &app_state.query_log_cache;
+    let avg_ms = cache.avg_latency_24h();
+    let entries = cache.entries_24h();
+    let mut sorted_ms: Vec<u64> = entries.iter().map(|e| e.took_ms).collect();
+    sorted_ms.sort();
+    let len = sorted_ms.len();
+    let p50_ms = if len == 0 {
+        0.0
+    } else {
+        sorted_ms[len * 50 / 100] as f64
+    };
+    let p95_ms = if len == 0 {
+        0.0
+    } else {
+        sorted_ms[(len * 95 / 100).min(len.saturating_sub(1))] as f64
+    };
+    let p99_ms = if len == 0 {
+        0.0
+    } else {
+        sorted_ms[(len * 99 / 100).min(len.saturating_sub(1))] as f64
+    };
+    let latency_per_minute: Vec<LatencyPerMinuteBucket> = cache
+        .latency_per_minute_24h()
+        .into_iter()
+        .map(|(timestamp, avg_ms, p50_ms)| LatencyPerMinuteBucket {
+            timestamp,
+            avg_ms,
+            p50_ms,
+        })
+        .collect();
+
+    // Tombstones agregados
+    let mut total_tombstone_count = 0_usize;
+    let mut total_tombstone_memory_waste_bytes = 0_usize;
+    let mut total_points = 0_usize;
+    for entry in app_state.collections.iter() {
+        let collection = match entry.value().read() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        total_tombstone_count += collection.tombstone_count();
+        total_tombstone_memory_waste_bytes += collection.tombstone_memory_waste();
+        total_points += collection.len();
+    }
+
+    // Circuit breaker (0=closed, 1=open, 2=half_open, cf. ferres_db_core::storage)
+    let cb = &app_state.storage_circuit_breaker;
+    let state_u8 = cb.state();
+    let state_str = match state_u8 {
+        0 => "closed",
+        1 => "open",
+        2 => "half_open",
+        _ => "unknown",
+    };
+    let failure_count = cb.failure_count();
+
+    Ok(Json(AnalyticsResponse {
+        tier_distribution: AnalyticsTierDistribution {
+            hot,
+            warm,
+            cold,
+            hot_memory_bytes,
+            warm_memory_bytes,
+            cold_memory_bytes,
+        },
+        latency: AnalyticsLatency {
+            avg_ms,
+            p50_ms,
+            p95_ms,
+            p99_ms,
+            latency_per_minute,
+        },
+        tombstones: AnalyticsTombstones {
+            total_count: total_tombstone_count,
+            total_memory_waste_bytes: total_tombstone_memory_waste_bytes,
+            total_points,
+        },
+        circuit_breaker: AnalyticsCircuitBreaker {
+            state: state_str.to_string(),
+            failure_count,
+        },
     }))
 }
 
