@@ -200,8 +200,12 @@ pub async fn create_collection(
     let collection_dir = app_state.config.storage_path.join("collections").join(&payload.name);
     {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-        FileStorage::save_collection(&collection, &collection_dir)
-            .map_err(ApiError::from)?;
+        FileStorage::save_collection(
+            &collection,
+            &collection_dir,
+            app_state.config.binary_snapshot,
+        )
+        .map_err(ApiError::from)?;
     }
 
     // Marca como limpa após salvar

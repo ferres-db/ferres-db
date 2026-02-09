@@ -240,7 +240,8 @@ pub fn normalize_vectors_parallel(vectors: &[Vec<f32>]) -> Result<Vec<Vec<f32>>,
 }
 
 /// Valida que todos os componentes do vetor são finitos (não NaN nem infinito).
-fn validate_vector_finite(v: &[f32]) -> Result<(), FerresError> {
+/// Pública para uso em validação de vetores nomeados em multi-vector.
+pub fn validate_vector_finite(v: &[f32]) -> Result<(), FerresError> {
     if let Some(pos) = v.iter().position(|x| !x.is_finite()) {
         return Err(FerresError::InvalidVector {
             reason: format!("non-finite value at index {pos}"),
@@ -265,10 +266,19 @@ fn prepare_vector(v: &[f32], metric: DistanceMetric) -> Result<Vec<f32>, FerresE
 }
 
 // ─── SIMD distance kernels (f32 × f32) ─────────────────────────────
+//
+// Uses the `pulp` crate for safe SIMD abstraction: runtime dispatch to
+// AVX2 (8× f32), SSE4.1 (4× f32), or scalar fallback on unsupported CPUs.
+// For quantized (SQ8) vectors, asymmetric distance (f32 query × u8 candidate)
+// is optimized in `crate::quantization`: multiple bytes are processed
+// simultaneously (8× u8→f32 + L2/dot in AVX2, 4× in SSE4.1) with scalar fallback.
+
+use pulp::{Arch, Simd, WithSimd};
 
 /// Squared L2 (Euclidean) distance: sum of (a[i] - b[i])².
-/// Used for Euclidean metric; consistent with hnsw_rs DistL2.
+/// Used by pulp when SIMD is not available (Scalar backend).
 #[inline(always)]
+#[allow(dead_code)]
 fn euclidean_distance_scalar(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
     a.iter()
@@ -280,8 +290,9 @@ fn euclidean_distance_scalar(a: &[f32], b: &[f32]) -> f32 {
         .sum::<f64>() as f32
 }
 
-/// Dot product: sum of a[i] * b[i].
+/// Dot product: sum of a[i] * b[i]. Used by pulp when SIMD is not available.
 #[inline(always)]
+#[allow(dead_code)]
 fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
     a.iter()
@@ -290,150 +301,67 @@ fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
         .sum::<f64>() as f32
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-mod simd_x86 {
-    #[cfg(target_arch = "x86")]
-    use std::arch::x86::*;
-    #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::*;
+struct EuclideanDistance<'a>(&'a [f32], &'a [f32]);
+impl WithSimd for EuclideanDistance<'_> {
+    type Output = f32;
 
     #[inline(always)]
-    unsafe fn hsum_m256(v: __m256) -> f32 {
-        let t = _mm256_hadd_ps(v, v);
-        let t = _mm256_hadd_ps(t, t);
-        let lo = _mm256_castps256_ps128(t);
-        let hi = _mm256_extractf128_ps(t, 1);
-        let sum = _mm_add_ps(lo, hi);
-        _mm_cvtss_f32(_mm_hadd_ps(sum, sum))
-    }
-
-    #[inline(always)]
-    unsafe fn hsum_m128(v: __m128) -> f32 {
-        let t = _mm_hadd_ps(v, v);
-        _mm_cvtss_f32(_mm_hadd_ps(t, t))
-    }
-
-    #[target_feature(enable = "avx")]
-    #[inline]
-    pub unsafe fn euclidean_distance_avx2(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len());
-        let n = a.len();
-        let mut acc = _mm256_setzero_ps();
-        let mut i = 0;
-        while i + 8 <= n {
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            let d = _mm256_sub_ps(va, vb);
-            acc = _mm256_add_ps(acc, _mm256_mul_ps(d, d));
-            i += 8;
+    fn with_simd<S: Simd>(self, simd: S) -> f32 {
+        let (a_head, a_tail) = S::as_simd_f32s(self.0);
+        let (b_head, b_tail) = S::as_simd_f32s(self.1);
+        let mut acc = simd.splat_f32s(0.0);
+        for (va, vb) in a_head.iter().zip(b_head.iter()) {
+            let d = simd.sub_f32s(*va, *vb);
+            acc = simd.add_f32s(acc, simd.mul_f32s(d, d));
         }
-        let mut sum = hsum_m256(acc);
-        while i < n {
-            let d = (a[i] - b[i]) as f64;
+        let mut sum = simd.reduce_sum_f32s(acc);
+        for i in 0..a_tail.len() {
+            let d = (a_tail[i] - b_tail[i]) as f64;
             sum += (d * d) as f32;
-            i += 1;
-        }
-        sum
-    }
-
-    #[target_feature(enable = "sse4.1")]
-    #[inline]
-    pub unsafe fn euclidean_distance_sse41(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len());
-        let n = a.len();
-        let mut acc = _mm_setzero_ps();
-        let mut i = 0;
-        while i + 4 <= n {
-            let va = _mm_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm_loadu_ps(b.as_ptr().add(i));
-            let d = _mm_sub_ps(va, vb);
-            acc = _mm_add_ps(acc, _mm_mul_ps(d, d));
-            i += 4;
-        }
-        let mut sum = hsum_m128(acc);
-        while i < n {
-            let d = (a[i] - b[i]) as f64;
-            sum += (d * d) as f32;
-            i += 1;
-        }
-        sum
-    }
-
-    #[target_feature(enable = "avx")]
-    #[inline]
-    pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len());
-        let n = a.len();
-        let mut acc = _mm256_setzero_ps();
-        let mut i = 0;
-        while i + 8 <= n {
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            acc = _mm256_add_ps(acc, _mm256_mul_ps(va, vb));
-            i += 8;
-        }
-        let mut sum = hsum_m256(acc);
-        while i < n {
-            sum += a[i] * b[i];
-            i += 1;
-        }
-        sum
-    }
-
-    #[target_feature(enable = "sse4.1")]
-    #[inline]
-    pub unsafe fn dot_product_sse41(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len());
-        let n = a.len();
-        let mut acc = _mm_setzero_ps();
-        let mut i = 0;
-        while i + 4 <= n {
-            let va = _mm_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm_loadu_ps(b.as_ptr().add(i));
-            acc = _mm_add_ps(acc, _mm_mul_ps(va, vb));
-            i += 4;
-        }
-        let mut sum = hsum_m128(acc);
-        while i < n {
-            sum += a[i] * b[i];
-            i += 1;
         }
         sum
     }
 }
 
-/// Euclidean distance (L2²) between two f32 vectors. SIMD-accelerated on x86/x86_64 (AVX2 → SSE4.1 → scalar).
+struct DotProductKernel<'a>(&'a [f32], &'a [f32]);
+impl WithSimd for DotProductKernel<'_> {
+    type Output = f32;
+
+    #[inline(always)]
+    fn with_simd<S: Simd>(self, simd: S) -> f32 {
+        let (a_head, a_tail) = S::as_simd_f32s(self.0);
+        let (b_head, b_tail) = S::as_simd_f32s(self.1);
+        let mut acc = simd.splat_f32s(0.0);
+        for (va, vb) in a_head.iter().zip(b_head.iter()) {
+            acc = simd.add_f32s(acc, simd.mul_f32s(*va, *vb));
+        }
+        let mut sum = simd.reduce_sum_f32s(acc);
+        for i in 0..a_tail.len() {
+            sum += a_tail[i] * b_tail[i];
+        }
+        sum
+    }
+}
+
+/// Euclidean distance (L2²) between two f32 vectors.
+///
+/// SIMD-accelerated via pulp: AVX2 (8× f32) or SSE4.1 (4× f32) on x86/x86_64,
+/// with automatic scalar fallback on other architectures or older CPUs.
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        if a.len() != b.len() {
-            panic!("euclidean_distance: length mismatch");
-        }
-        if std::arch::is_x86_feature_detected!("avx2") {
-            return unsafe { simd_x86::euclidean_distance_avx2(a, b) };
-        }
-        if std::arch::is_x86_feature_detected!("sse4.1") {
-            return unsafe { simd_x86::euclidean_distance_sse41(a, b) };
-        }
+    if a.len() != b.len() {
+        panic!("euclidean_distance: length mismatch");
     }
-    euclidean_distance_scalar(a, b)
+    Arch::new().dispatch(EuclideanDistance(a, b))
 }
 
-/// Dot product between two f32 vectors. SIMD-accelerated on x86/x86_64 (AVX2 → SSE4.1 → scalar).
+/// Dot product between two f32 vectors.
+///
+/// SIMD-accelerated via pulp (AVX2/SSE4.1 on x86/x86_64), scalar fallback otherwise.
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        if a.len() != b.len() {
-            panic!("dot_product: length mismatch");
-        }
-        if std::arch::is_x86_feature_detected!("avx2") {
-            return unsafe { simd_x86::dot_product_avx2(a, b) };
-        }
-        if std::arch::is_x86_feature_detected!("sse4.1") {
-            return unsafe { simd_x86::dot_product_sse41(a, b) };
-        }
+    if a.len() != b.len() {
+        panic!("dot_product: length mismatch");
     }
-    dot_product_scalar(a, b)
+    Arch::new().dispatch(DotProductKernel(a, b))
 }
 
 // ─── IndexVariant ───────────────────────────────────────────────────
@@ -644,40 +572,64 @@ impl ANNIndex for HnswIndex {
         }
 
         if let Some(pred) = predicate {
-            // Pre-filtering: usa search_filter do hnsw_rs para aplicar o predicado
-            // durante a exploração do grafo. Ef maior para explorar mais e obter
-            // até k resultados que passem no filtro (ou exaurir o grafo).
-            let ef = self
-                .config
-                .ef_search
-                .max(k.saturating_mul(5))
-                .min(max_points);
+            // Pre-filtering nativo: o predicado é aplicado durante a exploração do grafo
+            // (via FilterT). Nós que não satisfazem o filtro de metadados são ignorados
+            // antes de entrar na lista de candidatos; a busca continua até obter até `k`
+            // resultados válidos ou exaurir o grafo (aumentando ef quando necessário).
             let adapter = IdMapFilter {
                 id_map: &self.id_map,
                 tombstones: &self.tombstones,
                 predicate: pred,
             };
-            let _search_span = tracing::info_span!(
-                "hnsw.search_filter",
-                candidates = max_points,
-                ef = ef,
-                tombstones = self.tombstones.len(),
-            )
-            .entered();
-            let neighbours = match &self.inner {
-                IndexVariant::Cosine(hnsw) => hnsw.search_filter(&prepared, k, ef, Some(&adapter)),
-                IndexVariant::DotProduct(hnsw) => hnsw.search_filter(&prepared, k, ef, Some(&adapter)),
-                IndexVariant::Euclidean(hnsw) => {
-                    hnsw.search_filter(&prepared, k, ef, Some(&adapter))
+            let mut ef = self
+                .config
+                .ef_search
+                .max(k.saturating_mul(5))
+                .min(max_points);
+            const MAX_ITER: usize = 20;
+            let mut best = Vec::new();
+            for _ in 0..MAX_ITER {
+                let _search_span = tracing::info_span!(
+                    "hnsw.search_filter",
+                    candidates = max_points,
+                    ef = ef,
+                    tombstones = self.tombstones.len(),
+                )
+                .entered();
+                let neighbours = match &self.inner {
+                    IndexVariant::Cosine(hnsw) => {
+                        hnsw.search_filter(&prepared, k, ef, Some(&adapter))
+                    }
+                    IndexVariant::DotProduct(hnsw) => {
+                        hnsw.search_filter(&prepared, k, ef, Some(&adapter))
+                    }
+                    IndexVariant::Euclidean(hnsw) => {
+                        hnsw.search_filter(&prepared, k, ef, Some(&adapter))
+                    }
+                };
+                let results: Vec<(String, f32)> = neighbours
+                    .into_iter()
+                    .filter_map(|n| {
+                        let id = self.id_map.get(n.d_id)?.clone();
+                        Some((id, n.distance))
+                    })
+                    .collect();
+                if results.len() >= k {
+                    return Ok(results);
                 }
-            };
-            return Ok(neighbours
-                .into_iter()
-                .filter_map(|n| {
-                    let id = self.id_map.get(n.d_id)?.clone();
-                    Some((id, n.distance))
-                })
-                .collect());
+                if results.len() > best.len() {
+                    best = results;
+                }
+                if ef >= max_points {
+                    break;
+                }
+                let next_ef = (ef * 2).min(max_points);
+                if next_ef <= ef {
+                    break;
+                }
+                ef = next_ef;
+            }
+            return Ok(best);
         }
 
         // Sem predicado: busca normal; pedimos mais para compensar tombstones.
@@ -987,6 +939,7 @@ impl ANNIndex for QuantizedHnswIndex {
                 created_at: p.created_at,
                 namespace: p.namespace.clone(),
                 expires_at: p.expires_at,
+                vectors: None,
             })
             .collect();
 
@@ -1074,6 +1027,7 @@ impl ANNIndex for QuantizedHnswIndex {
             created_at: point.created_at,
             namespace: point.namespace.clone(),
             expires_at: point.expires_at,
+            vectors: None,
         };
 
         self.inner.add_point(&dq_point)
@@ -1132,6 +1086,7 @@ mod tests {
             created_at: 0,
             namespace: None,
             expires_at: None,
+            vectors: None,
         }
     }
 

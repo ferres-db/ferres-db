@@ -138,6 +138,7 @@ function QueryTesterContent() {
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(5);
   const [searchNamespace, setSearchNamespace] = useState('');
+  const [searchVectorField, setSearchVectorField] = useState('');
 
   // RAG state
   const [isLoading, setIsLoading] = useState(false);
@@ -212,7 +213,10 @@ function QueryTesterContent() {
         embedding,
         limit,
         undefined,
-        { namespace: searchNamespace.trim() || undefined },
+        {
+          namespace: searchNamespace.trim() || undefined,
+          vector_field: searchVectorField.trim() || undefined,
+        },
       );
       const searchMs = Math.round(performance.now() - searchStart);
       setResults(searchResults);
@@ -292,6 +296,7 @@ function QueryTesterContent() {
         vector: embedding,
         limit,
         namespace: searchNamespace.trim() || undefined,
+        vector_field: searchVectorField.trim() || undefined,
       });
       setExplainResult(res);
     } catch (err) {
@@ -316,6 +321,7 @@ function QueryTesterContent() {
         vector: embedding,
         limit,
         namespace: searchNamespace.trim() || undefined,
+        vector_field: searchVectorField.trim() || undefined,
       });
       setEstimateResult(res);
     } catch (err) {
@@ -494,6 +500,17 @@ function QueryTesterContent() {
                 value={searchNamespace}
                 onChange={(e) => setSearchNamespace(e.target.value)}
                 placeholder="Restrict search to namespace"
+                className="bg-bg-secondary border-bg-tertiary text-gray-50"
+              />
+            </div>
+
+            {/* Vector field (optional, for multi-vector collections) */}
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Vector field (optional)</label>
+              <Input
+                value={searchVectorField}
+                onChange={(e) => setSearchVectorField(e.target.value)}
+                placeholder="default or e.g. title_vector, content_vector"
                 className="bg-bg-secondary border-bg-tertiary text-gray-50"
               />
             </div>

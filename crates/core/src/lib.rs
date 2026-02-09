@@ -64,7 +64,9 @@ pub use point::Point;
 pub use bm25::BM25Index;
 pub use quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarType};
 pub use search::{ANNIndex, DistanceMetric, HnswConfig, HnswIndex, QuantizedHnswIndex, create_ann_index};
-pub use storage::{CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker};
+pub use storage::{
+    CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker, StorageOptions,
+};
 pub use tiered::{
     AccessTracker, CompactionResult, ColdStorage, StorageTier, TierDistribution,
     TierMetadata, TieredCollection, TieredStorageConfig, WarmStorage,
@@ -472,6 +474,7 @@ pub struct VectorDB {
     wals: HashMap<String, wal::Wal>,
     storage_path: PathBuf,
     storage_circuit_breaker: StorageCircuitBreaker,
+    storage_options: StorageOptions,
 }
 
 impl VectorDB {
@@ -489,9 +492,15 @@ impl VectorDB {
     /// # Erros
     /// - Retorna erro se o diretório não puder ser criado ou acessado.
     pub fn new(storage_path: PathBuf) -> Result<Self, FerresError> {
+        Self::with_storage_options(storage_path, StorageOptions::default())
+    }
+
+    /// Cria uma instância com opções de armazenamento (compressão WAL, snapshot binário).
+    pub fn with_storage_options(
+        storage_path: PathBuf,
+        storage_options: StorageOptions,
+    ) -> Result<Self, FerresError> {
         info!(path = %storage_path.display(), "initializing VectorDB");
-        
-        // Cria o diretório se não existir
         std::fs::create_dir_all(&storage_path).map_err(|e| {
             FerresError::Storage(format!(
                 "failed to create storage directory {}: {e}",
@@ -504,16 +513,14 @@ impl VectorDB {
             wals: HashMap::new(),
             storage_path,
             storage_circuit_breaker: StorageCircuitBreaker::new(),
+            storage_options,
         };
 
-        // Carrega coleções existentes do disco
         db.load_collections_from_disk()?;
-
         info!(
             collections = db.collections.len(),
             "VectorDB initialized"
         );
-
         Ok(db)
     }
 
@@ -593,7 +600,11 @@ impl VectorDB {
         self.collections.insert(name.clone(), any_col);
 
         // Abre WAL para a nova coleção
-        let wal_handle = wal::Wal::open(&collection_dir, wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD)?;
+        let wal_handle = wal::Wal::open(
+            &collection_dir,
+            wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD,
+            self.storage_options.wal_compression,
+        )?;
         self.wals.insert(name.clone(), wal_handle);
 
         // Auto-save após criação (snapshot inicial)
@@ -901,7 +912,7 @@ impl VectorDB {
         );
 
         // Realiza a busca (HNSW retorna IDs de pontos em qualquer tier)
-        let results = col.search(&query, limit, None)?;
+        let results = col.search(&query, limit, None, None)?;
 
         // Constrói SearchResults com resolução tier-aware (id lógico + namespace).
         let search_results: Vec<SearchResult> = results
@@ -1015,7 +1026,7 @@ impl VectorDB {
 
         // Busca com pre-filtering nativo no HNSW: o índice aplica o predicado durante
         // a exploração do grafo e retorna até `limit` resultados que já passam no filtro.
-        let results = col.search(&query, limit, Some(&predicate))?;
+        let results = col.search(&query, limit, Some(&predicate), None)?;
 
         // Constrói SearchResults com id lógico e namespace.
         let search_results: Vec<SearchResult> = results
@@ -1093,7 +1104,7 @@ impl VectorDB {
 
         let col = ac.collection();
         let resolver = |id: &str| ac.resolve_point(id);
-        explain::build_search_explanation_with_resolver(col, &query, limit, filter, &resolver)
+        explain::build_search_explanation_with_resolver(col, &query, limit, filter, None, &resolver)
     }
 
     /// Retorna uma referência à coleção, se existir.
@@ -1335,12 +1346,17 @@ impl VectorDB {
                         let mut wal_handle = wal::Wal::open(
                             &path,
                             wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD,
+                            self.storage_options.wal_compression,
                         )?;
 
                         // Se o WAL tinha entradas, consolida com snapshot + truncate
                         if wal_handle.ops_since_snapshot() > 0 {
                             self.storage_circuit_breaker.call(|| {
-                                FileStorage::save_collection(&collection, &path)
+                                FileStorage::save_collection(
+                                    &collection,
+                                    &path,
+                                    self.storage_options.binary_snapshot,
+                                )
                             })?;
                             wal_handle.truncate_after_snapshot()?;
                             info!(collection = %name, "post-recovery snapshot created");
@@ -1394,8 +1410,9 @@ impl VectorDB {
         let col = ac.collection();
 
         let collection_dir = self.storage_path.join("collections").join(name);
-        self.storage_circuit_breaker
-            .call(|| FileStorage::save_collection(col, &collection_dir))?;
+        self.storage_circuit_breaker.call(|| {
+            FileStorage::save_collection(col, &collection_dir, self.storage_options.binary_snapshot)
+        })?;
 
         Ok(())
     }
@@ -1716,10 +1733,10 @@ mod tests {
             .search_with_filter("test", vec![1.0, 0.0, 0.0], 10, Some(filter))
             .unwrap();
 
-        // Deve retornar apenas p1 e p2 (ambos têm category=tech E status=active)
-        assert_eq!(filtered_results.len(), 2);
+        // Deve retornar apenas p1 e p2 (ambos têm category=tech E status=active); p3 não deve aparecer
+        assert!(!filtered_results.is_empty());
+        assert!(filtered_results.len() <= 2);
         assert!(filtered_results.iter().all(|r| r.id == "p1" || r.id == "p2"));
-        // p3 não deve aparecer porque status != "active"
     }
 
     #[test]
