@@ -127,6 +127,31 @@ impl QueryLogCache {
             .collect()
     }
 
+    /// Entradas das últimas 10 minutos (para séries temporais de monitoramento).
+    pub fn entries_10m(&self) -> Vec<ParsedQueryEntry> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cutoff = now_secs.saturating_sub(10 * 60);
+        self.get_entries()
+            .into_iter()
+            .filter(|e| e.timestamp_secs >= cutoff)
+            .collect()
+    }
+
+    /// P95 da latência de busca (ms) nas últimas 10 minutos.
+    pub fn p95_latency_10m(&self) -> f64 {
+        let entries = self.entries_10m();
+        if entries.is_empty() {
+            return 0.0;
+        }
+        let mut sorted_ms: Vec<u64> = entries.iter().map(|e| e.took_ms).collect();
+        sorted_ms.sort();
+        let len = sorted_ms.len();
+        sorted_ms[(len * 95 / 100).min(len.saturating_sub(1))] as f64
+    }
+
     /// Total de queries nas últimas 24h.
     pub fn total_queries_24h(&self) -> u64 {
         self.entries_24h().len() as u64
@@ -215,4 +240,16 @@ impl QueryLogCache {
         entries.sort_by(|a, b| b.took_ms.cmp(&a.took_ms));
         entries.into_iter().take(limit).collect()
     }
+}
+
+/// Calcula a média de pontos inseridos por segundo nos últimos 10 minutos.
+/// `entries` deve ser uma lista de (timestamp_unix_secs, points_count) já filtrada para a janela de 10 min.
+/// Retorna total_points / 600.0 (média por segundo na janela de 600 segundos).
+pub fn avg_points_per_second_10m(entries: &[(u64, u64)]) -> f64 {
+    const WINDOW_SECS: u64 = 10 * 60;
+    if entries.is_empty() {
+        return 0.0;
+    }
+    let total: u64 = entries.iter().map(|(_, count)| count).sum();
+    total as f64 / WINDOW_SECS as f64
 }

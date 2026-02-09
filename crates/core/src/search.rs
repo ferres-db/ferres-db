@@ -364,6 +364,24 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     Arch::new().dispatch(DotProductKernel(a, b))
 }
 
+/// Returns whether SIMD acceleration is active at runtime.
+///
+/// `true` when the CPU supports instructions used by the distance kernels
+/// (AVX2 or SSE4.1 on x86/x86_64; used by both pulp f32×f32 kernels and
+/// QuantizedHnswIndex asymmetric f32×u8 kernels). Used by the stats API
+/// and dashboard to show "SIMD Acceleration: Active" vs "Scalar Fallback".
+#[inline]
+pub fn simd_enabled() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::arch::is_x86_feature_detected!("avx2") || std::arch::is_x86_feature_detected!("sse4.1")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
 // ─── IndexVariant ───────────────────────────────────────────────────
 
 /// Despacho estático entre variantes de distância.

@@ -312,6 +312,11 @@ pub async fn upsert_points(
 
     // Emite evento no broadcast channel para subscribers WebSocket
     if upserted > 0 {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        app_state.record_ingest(now_secs, upserted as u64);
         // Coleta IDs dos pontos inseridos com sucesso
         // (todos os que não estão em batch_failed)
         let failed_ids: std::collections::HashSet<&str> =
@@ -324,10 +329,7 @@ pub async fn upsert_points(
             collection: name.clone(),
             action: "upsert".to_string(),
             point_ids,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: now_secs,
         };
         app_state.emit_event(event);
     }

@@ -21,7 +21,7 @@ use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
 use crate::users::UserStore;
 use crate::query_logger::QueryLogger;
-use crate::query_log_analytics::QueryLogCache;
+use crate::query_log_analytics::{avg_points_per_second_10m, QueryLogCache};
 
 // ─── GlobalQueryStats (dashboard: queries/min, top slow, histogram) ────────
 
@@ -400,6 +400,8 @@ pub struct AppState {
     pub reindex_jobs: Arc<DashMap<String, Arc<RwLock<ReindexJob>>>>,
     /// Circuit breaker for storage I/O (disk full, repeated failures).
     pub storage_circuit_breaker: Arc<StorageCircuitBreaker>,
+    /// Eventos de ingestão (timestamp_sec, points_count) para séries temporais (últimos 10 min).
+    ingest_events: Arc<RwLock<Vec<(u64, u64)>>>,
 }
 
 impl AppState {
@@ -536,7 +538,59 @@ impl AppState {
             max_ws_connections: 100,
             reindex_jobs: Arc::new(DashMap::new()),
             storage_circuit_breaker: Arc::new(StorageCircuitBreaker::new()),
+            ingest_events: Arc::new(RwLock::new(Vec::with_capacity(2000))),
         })
+    }
+
+    /// Registra pontos inseridos para séries temporais (throughput).
+    pub fn record_ingest(&self, timestamp_sec: u64, points_count: u64) {
+        if points_count == 0 {
+            return;
+        }
+        let mut events = match self.ingest_events.write() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        events.push((timestamp_sec, points_count));
+        const TEN_MIN: u64 = 10 * 60;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cutoff = now.saturating_sub(TEN_MIN);
+        events.retain(|(ts, _)| *ts >= cutoff);
+        if events.len() > 2000 {
+            let drop = events.len().saturating_sub(1500);
+            events.drain(0..drop);
+        }
+    }
+
+    /// Eventos de ingestão das últimas 10 minutos: (timestamp_sec, points_count).
+    pub fn get_ingest_events_10m(&self) -> Vec<(u64, u64)> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cutoff = now.saturating_sub(10 * 60);
+        let events = match self.ingest_events.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        events.iter().filter(|(ts, _)| *ts >= cutoff).copied().collect()
+    }
+
+    /// Média de pontos inseridos por segundo (últimos 10 min) e throughput por minuto para gráficos.
+    pub fn time_series_ingest_10m(&self) -> (f64, Vec<(u64, u64)>) {
+        let events = self.get_ingest_events_10m();
+        let avg_pps = avg_points_per_second_10m(&events);
+        let mut buckets: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for (ts, count) in &events {
+            let minute = ts / 60;
+            *buckets.entry(minute).or_insert(0) += count;
+        }
+        let mut throughput_per_minute: Vec<(u64, u64)> = buckets.into_iter().collect();
+        throughput_per_minute.sort_by_key(|&(k, _)| k);
+        (avg_pps, throughput_per_minute)
     }
 
     /// Retorna o notificador de shutdown.

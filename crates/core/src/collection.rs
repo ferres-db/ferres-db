@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -169,6 +169,9 @@ pub struct Collection {
     /// Mutex é necessário porque search() é &self mas precisa mutar o cache.
     #[allow(dead_code, clippy::type_complexity)]
     search_cache: Option<Mutex<LruCache<CacheKey, Vec<(String, f32)>>>>,
+    /// Contadores para Cache Hit Rate (hits e misses do search_cache).
+    search_cache_hits: AtomicU64,
+    search_cache_misses: AtomicU64,
     /// Flag indicando se a coleção foi modificada e precisa ser salva.
     dirty: AtomicBool,
 }
@@ -206,6 +209,8 @@ impl Collection {
             vector_indices: HashMap::new(),
             bm25_index,
             search_cache,
+            search_cache_hits: AtomicU64::new(0),
+            search_cache_misses: AtomicU64::new(0),
             dirty: AtomicBool::new(false),
         }
     }
@@ -239,6 +244,8 @@ impl Collection {
             vector_indices: HashMap::new(),
             bm25_index,
             search_cache,
+            search_cache_hits: AtomicU64::new(0),
+            search_cache_misses: AtomicU64::new(0),
             dirty: AtomicBool::new(false),
         }
     }
@@ -634,9 +641,11 @@ impl Collection {
             if let Some(cache) = &self.search_cache {
                 if let Ok(mut cache_guard) = cache.lock() {
                     if let Some(cached_results) = cache_guard.get(&cache_key) {
+                        self.search_cache_hits.fetch_add(1, Ordering::Relaxed);
                         return Ok(cached_results.clone());
                     }
                 }
+                self.search_cache_misses.fetch_add(1, Ordering::Relaxed);
             }
 
             let results = {
@@ -871,6 +880,15 @@ impl Collection {
 
     pub fn is_empty(&self) -> bool {
         self.points.is_empty()
+    }
+
+    /// Estatísticas do search_cache para cálculo de Cache Hit Rate.
+    /// Retorna (hits, misses). Hit rate % = hits / (hits + misses) * 100 quando total > 0.
+    pub fn search_cache_stats(&self) -> (u64, u64) {
+        (
+            self.search_cache_hits.load(Ordering::Relaxed),
+            self.search_cache_misses.load(Ordering::Relaxed),
+        )
     }
 
     /// Returns the number of tombstoned points in the underlying ANN index.
