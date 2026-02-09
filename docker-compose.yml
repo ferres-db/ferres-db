@@ -20,6 +20,7 @@ services:
       - STORAGE_PATH=${STORAGE_PATH:-/data}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - FERRESDB_ENABLE_MCP=${FERRESDB_ENABLE_MCP:-false}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${BACKEND_PORT:-8080}/health"]
       interval: 30s

@@ -56,6 +56,8 @@ ENV RUST_BACKTRACE=1
 
 # CORS: origens permitidas (ex.: docker run -e CORS_ORIGINS=https://app.example.com,https://dashboard.example.com)
 # Se não definido, usa localhost:3000 e localhost:5173.
+# MCP: FERRESDB_ENABLE_MCP=true ativa o servidor MCP via STDIO (requer build com --features mcp).
+ENV FERRESDB_ENABLE_MCP=false
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1

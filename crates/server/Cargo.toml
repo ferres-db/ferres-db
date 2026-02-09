@@ -19,6 +19,8 @@ default = []
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry", "dep:opentelemetry-otlp"]
 # Native gRPC API (served on port 50051 alongside REST on 8080).
 grpc = ["dep:tonic", "dep:prost", "dep:tonic-build"]
+# Embedded MCP server via STDIO (--mcp or FERRESDB_ENABLE_MCP=true).
+mcp = ["dep:rmcp"]
 
 [dependencies]
 ferres-db-core = { workspace = true }
@@ -65,6 +67,9 @@ opentelemetry-otlp = { version = "0.28", features = ["trace", "grpc-tonic"], opt
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
 async-stream = "0.3"
+
+# Optional: MCP server (feature "mcp"); build with --features mcp
+rmcp = { version = "0.14", features = ["server", "macros"], optional = true }
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

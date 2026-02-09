@@ -23,3 +23,6 @@ pub mod tracing_otel;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
