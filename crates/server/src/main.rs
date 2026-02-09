@@ -10,6 +10,7 @@ use ferres_db_server::api_keys::ApiKeyStore;
 use ferres_db_server::auth;
 use ferres_db_server::state::{AppState, ServerConfig};
 use ferres_db_server::users::UserStore;
+use ferres_db_server::handlers::reindex::{run_auto_reindex_cycle, run_auto_vacuum_cycle};
 use ferres_db_server::routes;
 use ferres_db_server::middleware;
 use ferres_db_server::metrics;
@@ -168,6 +169,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Inicia background task para auto-reindex a cada 30 minutos (fragmentação por tombstones)
+    const AUTO_REINDEX_INTERVAL_SECS: u64 = 30 * 60;
+    let app_state_for_reindex = app_state.clone();
+    let shutdown_notify_reindex = app_state.shutdown_notify();
+    let is_shutting_down_reindex = app_state.is_shutting_down.clone();
+    let reindex_task_handle = tokio::spawn(async move {
+        let mut reindex_interval = interval(Duration::from_secs(AUTO_REINDEX_INTERVAL_SECS));
+        loop {
+            tokio::select! {
+                _ = reindex_interval.tick() => {
+                    if !is_shutting_down_reindex.load(std::sync::atomic::Ordering::Acquire) {
+                        run_auto_reindex_cycle(&app_state_for_reindex);
+                    }
+                }
+                _ = shutdown_notify_reindex.notified() => {
+                    info!("auto-reindex worker task shutting down");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Inicia background task para vacuum de pontos expirados (TTL) a cada 60 segundos
+    const AUTO_VACUUM_INTERVAL_SECS: u64 = 60;
+    let app_state_for_vacuum = app_state.clone();
+    let shutdown_notify_vacuum = app_state.shutdown_notify();
+    let is_shutting_down_vacuum = app_state.is_shutting_down.clone();
+    let vacuum_task_handle = tokio::spawn(async move {
+        let mut vacuum_interval = interval(Duration::from_secs(AUTO_VACUUM_INTERVAL_SECS));
+        loop {
+            tokio::select! {
+                _ = vacuum_interval.tick() => {
+                    if !is_shutting_down_vacuum.load(std::sync::atomic::Ordering::Acquire) {
+                        run_auto_vacuum_cycle(&app_state_for_vacuum);
+                    }
+                }
+                _ = shutdown_notify_vacuum.notified() => {
+                    info!("auto-vacuum worker task shutting down");
+                    break;
+                }
+            }
+        }
+    });
+
     // Limite de body: default do Axum é 2MB; upserts com muitos pontos (vetores + metadata) podem exceder.
     const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 
@@ -295,17 +340,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Marca shutdown ANTES de notificar (task deixa de iniciar novos saves)
+    // Marca shutdown ANTES de notificar (tasks deixam de iniciar novos saves/reindex)
     app_state.set_shutting_down();
 
-    // Notifica a task e aguarda ela terminar para evitar salvar em paralelo
-    shutdown_notify.notify_one();
+    // Notifica as tasks de background e aguarda terminarem
+    shutdown_notify.notify_waiters();
     const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_secs(10);
     match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, save_task_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => error!(error = %e, "auto-save task panicked"),
         Err(_) => warn!(
             "auto-save task did not exit within {:?}, proceeding with shutdown save",
+            SHUTDOWN_TASK_TIMEOUT
+        ),
+    }
+    match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, reindex_task_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!(error = %e, "auto-reindex worker task panicked"),
+        Err(_) => warn!(
+            "auto-reindex worker task did not exit within {:?}, proceeding with shutdown",
+            SHUTDOWN_TASK_TIMEOUT
+        ),
+    }
+    match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, vacuum_task_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!(error = %e, "auto-vacuum worker task panicked"),
+        Err(_) => warn!(
+            "auto-vacuum worker task did not exit within {:?}, proceeding with shutdown",
             SHUTDOWN_TASK_TIMEOUT
         ),
     }

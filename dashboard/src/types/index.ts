@@ -26,12 +26,18 @@ export interface Point {
   vector: number[];
   metadata?: Record<string, unknown>;
   created_at?: number; // Timestamp Unix
+  /** Logical namespace (multitenancy). Optional on upsert and returned by API when set. */
+  namespace?: string;
+  /** TTL in seconds; point expires after this time (vacuum worker removes it). Optional on upsert. */
+  ttl?: number;
 }
 
 export interface SearchResult {
   id: string;
   score: number;
   metadata?: Record<string, unknown>;
+  /** Set when the point was stored with a namespace (multitenancy). */
+  namespace?: string;
 }
 
 export interface QueriesPerMinuteBucket {
@@ -246,6 +252,8 @@ export interface HybridSearchRequest {
   fusion?: "weighted" | "rrf"; // fusion strategy (default: "weighted")
   rrf_k?: number; // RRF constant k (default: 60). Only used with fusion: "rrf"
   filter?: Record<string, unknown>;
+  /** Restrict results to this namespace (multitenancy). */
+  namespace?: string;
 }
 
 export interface HybridSearchResult {
@@ -258,6 +266,8 @@ export interface SearchExplainRequest {
   vector: number[];
   limit?: number;
   filter?: Record<string, unknown>;
+  /** Restrict results to this namespace (multitenancy). */
+  namespace?: string;
 }
 
 export interface ExplainedResult {
@@ -301,6 +311,8 @@ export interface SearchEstimateRequest {
   vector: number[];
   limit?: number;
   filter?: Record<string, unknown>;
+  /** Restrict estimate to this namespace (multitenancy). */
+  namespace?: string;
 }
 
 export interface SearchEstimateResponse {
@@ -336,6 +348,8 @@ export interface WsUpsertMessage {
     id: string;
     vector: number[];
     metadata?: Record<string, unknown>;
+    namespace?: string;
+    ttl?: number;
   }>;
 }
 

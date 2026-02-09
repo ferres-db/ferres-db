@@ -74,6 +74,9 @@ struct WsPointInput {
     vector: Vec<f32>,
     #[serde(default)]
     metadata: serde_json::Value,
+    /// TTL em segundos; se presente, o ponto expira após esse tempo.
+    #[serde(default)]
+    ttl: Option<u64>,
 }
 
 /// Mensagem do servidor para o cliente.
@@ -527,7 +530,10 @@ async fn process_upsert_batch(
             }
 
             match Point::new(input.id.clone(), input.vector, input.metadata) {
-                Ok(point) => {
+                Ok(mut point) => {
+                    if let Some(ttl) = input.ttl {
+                        point.expires_at = Some(unix_now().saturating_add(ttl));
+                    }
                     point_ids.push(input.id);
                     valid_points.push(point);
                 }

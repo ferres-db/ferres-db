@@ -338,8 +338,9 @@ pub fn build_search_explanation_with_resolver(
         "performing search_explain"
     );
 
-    // Busca com metadata de explain
-    let raw_results = collection.search_explain(query, search_limit)?;
+    // Busca com metadata de explain (sem predicado: buscamos mais candidatos
+    // para avaliar filtro condição-a-condição no explain).
+    let raw_results = collection.search_explain(query, search_limit, None)?;
     let candidates_scanned = raw_results.len();
 
     // Constrói ExplainResult para cada candidato
@@ -362,14 +363,14 @@ pub fn build_search_explanation_with_resolver(
             None => continue,
         };
 
-        // Avalia cada condição do filtro individualmente
+        // Avalia cada condição do filtro individualmente; namespace é parte do filtro
         let filter_eval = if !filter.is_empty() {
             let condition_results: Vec<ConditionResult> = filter
                 .conditions()
                 .iter()
                 .map(|cond| evaluate_condition(cond, &point.metadata))
                 .collect();
-            let passed = condition_results.iter().all(|c| c.passed);
+            let passed = filter.matches_point(&point);
             Some(FilterExplanation {
                 conditions: condition_results,
                 passed,
@@ -413,7 +414,7 @@ pub fn build_search_explanation_with_resolver(
         }
 
         explain_results.push(ExplainResult {
-            id: id.clone(),
+            id: point.id.clone(),
             score,
             distance_metric: distance_metric.clone(),
             raw_distance,

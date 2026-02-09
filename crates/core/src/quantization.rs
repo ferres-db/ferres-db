@@ -94,6 +94,308 @@ pub struct ScalarQuantizationParams {
 /// Limita a `10_000` vetores para manter calibração rápida.
 const MAX_CALIBRATION_SAMPLE: usize = 10_000;
 
+/// Epsilon para tratar escala zero na desquantização (compatível com o escalar).
+const SCALE_EPS: f32 = f32::EPSILON;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod asym_simd {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    #[inline]
+    unsafe fn hsum_m256(v: __m256) -> f32 {
+        let t = _mm256_hadd_ps(v, v);
+        let t = _mm256_hadd_ps(t, t);
+        let lo = _mm256_castps256_ps128(t);
+        let hi = _mm256_extractf128_ps(t, 1);
+        let sum = _mm_add_ps(lo, hi);
+        _mm_cvtss_f32(_mm_hadd_ps(sum, sum))
+    }
+
+    #[inline]
+    unsafe fn hsum_m128(v: __m128) -> f32 {
+        let t = _mm_hadd_ps(v, v);
+        _mm_cvtss_f32(_mm_hadd_ps(t, t))
+    }
+
+    /// Load 8 u8 from ptr and convert to __m256 of f32.
+    #[inline]
+    unsafe fn load8_u8_to_f32(ptr: *const u8) -> __m256 {
+        let u8_8 = _mm_loadl_epi64(ptr as *const __m128i);
+        let lo = _mm_cvtepu8_epi32(u8_8);
+        let hi = _mm_cvtepu8_epi32(_mm_srli_si128(u8_8, 4));
+        let lo_ps = _mm_cvtepi32_ps(lo);
+        let hi_ps = _mm_cvtepi32_ps(hi);
+        _mm256_setr_m128(lo_ps, hi_ps)
+    }
+
+    /// Dequantize 8 elements: dequant = mins + q/scale when |scale| >= eps, else mins.
+    #[inline]
+    unsafe fn dequant8(mins: __m256, scales: __m256, q_ps: __m256) -> __m256 {
+        let eps = _mm256_set1_ps(super::SCALE_EPS);
+        let scale_abs = _mm256_max_ps(scales, _mm256_sub_ps(_mm256_setzero_ps(), scales));
+        let scale_safe = _mm256_max_ps(scale_abs, eps);
+        let dequant_linear = _mm256_add_ps(mins, _mm256_div_ps(q_ps, scale_safe));
+        let mask = _mm256_cmp_ps(scale_abs, eps, _CMP_GE_OQ);
+        _mm256_blendv_ps(mins, dequant_linear, mask)
+    }
+
+    #[target_feature(enable = "avx")]
+    #[inline]
+    pub unsafe fn asymmetric_l2_avx2(
+        query: &[f32],
+        quantized: &[u8],
+        mins: &[f32],
+        scales: &[f32],
+    ) -> f32 {
+        let n = query.len();
+        let mut acc = _mm256_setzero_ps();
+        let mut i = 0;
+        while i + 8 <= n {
+            let q_ps = load8_u8_to_f32(quantized.as_ptr().add(i));
+            let mins_v = _mm256_loadu_ps(mins.as_ptr().add(i));
+            let scales_v = _mm256_loadu_ps(scales.as_ptr().add(i));
+            let dequant = dequant8(mins_v, scales_v, q_ps);
+            let q_v = _mm256_loadu_ps(query.as_ptr().add(i));
+            let d = _mm256_sub_ps(q_v, dequant);
+            acc = _mm256_add_ps(acc, _mm256_mul_ps(d, d));
+            i += 8;
+        }
+        let mut sum = hsum_m256(acc);
+        while i < n {
+            let dequant = if scales[i].abs() < super::SCALE_EPS {
+                mins[i]
+            } else {
+                mins[i] + (quantized[i] as f32) / scales[i]
+            };
+            let diff = query[i] - dequant;
+            sum += diff * diff;
+            i += 1;
+        }
+        sum
+    }
+
+    #[target_feature(enable = "sse4.1")]
+    #[inline]
+    pub unsafe fn asymmetric_l2_sse41(
+        query: &[f32],
+        quantized: &[u8],
+        mins: &[f32],
+        scales: &[f32],
+    ) -> f32 {
+        let n = query.len();
+        let mut acc = _mm_setzero_ps();
+        let mut i = 0;
+        while i + 4 <= n {
+            let u8_4 = _mm_loadu_si32(quantized.as_ptr().add(i));
+            let q_i = _mm_cvtepu8_epi32(u8_4);
+            let q_ps = _mm_cvtepi32_ps(q_i);
+            let mins_v = _mm_loadu_ps(mins.as_ptr().add(i));
+            let scales_v = _mm_loadu_ps(scales.as_ptr().add(i));
+            let eps = _mm_set1_ps(super::SCALE_EPS);
+            let scale_abs = _mm_max_ps(scales_v, _mm_sub_ps(_mm_setzero_ps(), scales_v));
+            let scale_safe = _mm_max_ps(scale_abs, eps);
+            let dequant_linear = _mm_add_ps(mins_v, _mm_div_ps(q_ps, scale_safe));
+            let mask = _mm_cmpge_ps(scale_abs, eps);
+            let dequant = _mm_blendv_ps(mins_v, dequant_linear, mask);
+            let q_v = _mm_loadu_ps(query.as_ptr().add(i));
+            let d = _mm_sub_ps(q_v, dequant);
+            acc = _mm_add_ps(acc, _mm_mul_ps(d, d));
+            i += 4;
+        }
+        let mut sum = hsum_m128(acc);
+        while i < n {
+            let dequant = if scales[i].abs() < super::SCALE_EPS {
+                mins[i]
+            } else {
+                mins[i] + (quantized[i] as f32) / scales[i]
+            };
+            let diff = query[i] - dequant;
+            sum += diff * diff;
+            i += 1;
+        }
+        sum
+    }
+
+    #[target_feature(enable = "avx")]
+    #[inline]
+    pub unsafe fn asymmetric_dot_avx2(
+        query: &[f32],
+        quantized: &[u8],
+        mins: &[f32],
+        scales: &[f32],
+    ) -> f32 {
+        let n = query.len();
+        let mut acc = _mm256_setzero_ps();
+        let mut i = 0;
+        while i + 8 <= n {
+            let q_ps = load8_u8_to_f32(quantized.as_ptr().add(i));
+            let mins_v = _mm256_loadu_ps(mins.as_ptr().add(i));
+            let scales_v = _mm256_loadu_ps(scales.as_ptr().add(i));
+            let dequant = dequant8(mins_v, scales_v, q_ps);
+            let q_v = _mm256_loadu_ps(query.as_ptr().add(i));
+            acc = _mm256_add_ps(acc, _mm256_mul_ps(q_v, dequant));
+            i += 8;
+        }
+        let mut sum = hsum_m256(acc);
+        while i < n {
+            let dequant = if scales[i].abs() < super::SCALE_EPS {
+                mins[i]
+            } else {
+                mins[i] + (quantized[i] as f32) / scales[i]
+            };
+            sum += query[i] * dequant;
+            i += 1;
+        }
+        (1.0 - sum) as f32
+    }
+
+    #[target_feature(enable = "sse4.1")]
+    #[inline]
+    pub unsafe fn asymmetric_dot_sse41(
+        query: &[f32],
+        quantized: &[u8],
+        mins: &[f32],
+        scales: &[f32],
+    ) -> f32 {
+        let n = query.len();
+        let mut acc = _mm_setzero_ps();
+        let mut i = 0;
+        while i + 4 <= n {
+            let u8_4 = _mm_loadu_si32(quantized.as_ptr().add(i));
+            let q_i = _mm_cvtepu8_epi32(u8_4);
+            let q_ps = _mm_cvtepi32_ps(q_i);
+            let mins_v = _mm_loadu_ps(mins.as_ptr().add(i));
+            let scales_v = _mm_loadu_ps(scales.as_ptr().add(i));
+            let eps = _mm_set1_ps(super::SCALE_EPS);
+            let scale_abs = _mm_max_ps(scales_v, _mm_sub_ps(_mm_setzero_ps(), scales_v));
+            let scale_safe = _mm_max_ps(scale_abs, eps);
+            let dequant_linear = _mm_add_ps(mins_v, _mm_div_ps(q_ps, scale_safe));
+            let mask = _mm_cmpge_ps(scale_abs, eps);
+            let dequant = _mm_blendv_ps(mins_v, dequant_linear, mask);
+            let q_v = _mm_loadu_ps(query.as_ptr().add(i));
+            acc = _mm_add_ps(acc, _mm_mul_ps(q_v, dequant));
+            i += 4;
+        }
+        let mut sum = hsum_m128(acc);
+        while i < n {
+            let dequant = if scales[i].abs() < super::SCALE_EPS {
+                mins[i]
+            } else {
+                mins[i] + (quantized[i] as f32) / scales[i]
+            };
+            sum += query[i] * dequant;
+            i += 1;
+        }
+        (1.0 - sum) as f32
+    }
+
+    #[target_feature(enable = "avx")]
+    #[inline]
+    pub unsafe fn asymmetric_cosine_avx2(
+        query: &[f32],
+        quantized: &[u8],
+        mins: &[f32],
+        scales: &[f32],
+    ) -> f32 {
+        let n = query.len();
+        let mut dot_acc = _mm256_setzero_ps();
+        let mut nq_acc = _mm256_setzero_ps();
+        let mut nd_acc = _mm256_setzero_ps();
+        let mut i = 0;
+        while i + 8 <= n {
+            let q_ps = load8_u8_to_f32(quantized.as_ptr().add(i));
+            let mins_v = _mm256_loadu_ps(mins.as_ptr().add(i));
+            let scales_v = _mm256_loadu_ps(scales.as_ptr().add(i));
+            let dequant = dequant8(mins_v, scales_v, q_ps);
+            let q_v = _mm256_loadu_ps(query.as_ptr().add(i));
+            dot_acc = _mm256_add_ps(dot_acc, _mm256_mul_ps(q_v, dequant));
+            nq_acc = _mm256_add_ps(nq_acc, _mm256_mul_ps(q_v, q_v));
+            nd_acc = _mm256_add_ps(nd_acc, _mm256_mul_ps(dequant, dequant));
+            i += 8;
+        }
+        let mut dot: f64 = hsum_m256(dot_acc).into();
+        let mut norm_q: f64 = hsum_m256(nq_acc).into();
+        let mut norm_d: f64 = hsum_m256(nd_acc).into();
+        while i < n {
+            let dequant = if scales[i].abs() < super::SCALE_EPS {
+                mins[i]
+            } else {
+                mins[i] + (quantized[i] as f32) / scales[i]
+            };
+            let qd = query[i] as f64;
+            let dd = dequant as f64;
+            dot += qd * dd;
+            norm_q += qd * qd;
+            norm_d += dd * dd;
+            i += 1;
+        }
+        let denom = norm_q.sqrt() * norm_d.sqrt();
+        if denom < f64::EPSILON {
+            1.0
+        } else {
+            (1.0 - dot / denom) as f32
+        }
+    }
+
+    #[target_feature(enable = "sse4.1")]
+    #[inline]
+    pub unsafe fn asymmetric_cosine_sse41(
+        query: &[f32],
+        quantized: &[u8],
+        mins: &[f32],
+        scales: &[f32],
+    ) -> f32 {
+        let n = query.len();
+        let mut dot_acc = _mm_setzero_ps();
+        let mut nq_acc = _mm_setzero_ps();
+        let mut nd_acc = _mm_setzero_ps();
+        let mut i = 0;
+        while i + 4 <= n {
+            let u8_4 = _mm_loadu_si32(quantized.as_ptr().add(i));
+            let q_i = _mm_cvtepu8_epi32(u8_4);
+            let q_ps = _mm_cvtepi32_ps(q_i);
+            let mins_v = _mm_loadu_ps(mins.as_ptr().add(i));
+            let scales_v = _mm_loadu_ps(scales.as_ptr().add(i));
+            let eps = _mm_set1_ps(super::SCALE_EPS);
+            let scale_abs = _mm_max_ps(scales_v, _mm_sub_ps(_mm_setzero_ps(), scales_v));
+            let scale_safe = _mm_max_ps(scale_abs, eps);
+            let dequant_linear = _mm_add_ps(mins_v, _mm_div_ps(q_ps, scale_safe));
+            let mask = _mm_cmpge_ps(scale_abs, eps);
+            let dequant = _mm_blendv_ps(mins_v, dequant_linear, mask);
+            let q_v = _mm_loadu_ps(query.as_ptr().add(i));
+            dot_acc = _mm_add_ps(dot_acc, _mm_mul_ps(q_v, dequant));
+            nq_acc = _mm_add_ps(nq_acc, _mm_mul_ps(q_v, q_v));
+            nd_acc = _mm_add_ps(nd_acc, _mm_mul_ps(dequant, dequant));
+            i += 4;
+        }
+        let mut dot: f64 = hsum_m128(dot_acc).into();
+        let mut norm_q: f64 = hsum_m128(nq_acc).into();
+        let mut norm_d: f64 = hsum_m128(nd_acc).into();
+        while i < n {
+            let dequant = if scales[i].abs() < super::SCALE_EPS {
+                mins[i]
+            } else {
+                mins[i] + (quantized[i] as f32) / scales[i]
+            };
+            let qd = query[i] as f64;
+            let dd = dequant as f64;
+            dot += qd * dd;
+            norm_q += qd * qd;
+            norm_d += dd * dd;
+            i += 1;
+        }
+        let denom = norm_q.sqrt() * norm_d.sqrt();
+        if denom < f64::EPSILON {
+            1.0
+        } else {
+            (1.0 - dot / denom) as f32
+        }
+    }
+}
+
 impl ScalarQuantizationParams {
     /// Calibra os parâmetros de quantização a partir de uma amostra de vetores.
     ///
@@ -209,6 +511,7 @@ impl ScalarQuantizationParams {
     /// mais precisão do que quantizar ambos (distância simétrica).
     ///
     /// Suporta as 3 métricas: Cosine, DotProduct e Euclidean.
+    /// SIMD-acelerado em x86/x86_64 (AVX2 → SSE4.1 → escalar).
     pub fn asymmetric_distance(
         &self,
         query: &[f32],
@@ -218,9 +521,42 @@ impl ScalarQuantizationParams {
         debug_assert_eq!(query.len(), quantized.len());
         debug_assert_eq!(query.len(), self.mins.len());
 
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                return match metric {
+                    DistanceMetric::Euclidean => unsafe {
+                        asym_simd::asymmetric_l2_avx2(query, quantized, &self.mins, &self.scales)
+                    },
+                    DistanceMetric::DotProduct => unsafe {
+                        asym_simd::asymmetric_dot_avx2(query, quantized, &self.mins, &self.scales)
+                    },
+                    DistanceMetric::Cosine => unsafe {
+                        asym_simd::asymmetric_cosine_avx2(
+                            query, quantized, &self.mins, &self.scales,
+                        )
+                    },
+                };
+            }
+            if std::arch::is_x86_feature_detected!("sse4.1") {
+                return match metric {
+                    DistanceMetric::Euclidean => unsafe {
+                        asym_simd::asymmetric_l2_sse41(query, quantized, &self.mins, &self.scales)
+                    },
+                    DistanceMetric::DotProduct => unsafe {
+                        asym_simd::asymmetric_dot_sse41(query, quantized, &self.mins, &self.scales)
+                    },
+                    DistanceMetric::Cosine => unsafe {
+                        asym_simd::asymmetric_cosine_sse41(
+                            query, quantized, &self.mins, &self.scales,
+                        )
+                    },
+                };
+            }
+        }
+
         match metric {
             DistanceMetric::Euclidean => {
-                // L2² (distância euclidiana ao quadrado)
                 let mut sum = 0.0f64;
                 for d in 0..query.len() {
                     let dequant = if self.scales[d].abs() < f32::EPSILON {
@@ -234,12 +570,9 @@ impl ScalarQuantizationParams {
                 sum as f32
             }
             DistanceMetric::Cosine => {
-                // Distância cosseno: 1 - cos(a,b)
-                // cos(a,b) = dot(a,b) / (|a| * |b|)
                 let mut dot = 0.0f64;
                 let mut norm_q = 0.0f64;
                 let mut norm_d = 0.0f64;
-
                 for d in 0..query.len() {
                     let dequant = if self.scales[d].abs() < f32::EPSILON {
                         self.mins[d]
@@ -252,16 +585,14 @@ impl ScalarQuantizationParams {
                     norm_q += qd * qd;
                     norm_d += dd * dd;
                 }
-
                 let denom = norm_q.sqrt() * norm_d.sqrt();
                 if denom < f64::EPSILON {
-                    1.0 // Máxima distância se algum vetor é zero
+                    1.0
                 } else {
                     (1.0 - dot / denom) as f32
                 }
             }
             DistanceMetric::DotProduct => {
-                // Negação do produto escalar (para que menor = mais similar)
                 let mut dot = 0.0f64;
                 for d in 0..query.len() {
                     let dequant = if self.scales[d].abs() < f32::EPSILON {
@@ -271,7 +602,6 @@ impl ScalarQuantizationParams {
                     };
                     dot += (query[d] as f64) * (dequant as f64);
                 }
-                // hnsw_rs DistDot calcula 1 - dot(a,b) para vetores normalizados
                 (1.0 - dot) as f32
             }
         }

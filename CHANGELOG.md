@@ -6,6 +6,22 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 
 ### Added
 
+- **Features: Time-to-Live (TTL) support for automatic data expiration**
+
+- **Support for Logical Namespaces (Multitenancy)** — Isolamento de dados por cliente na mesma coleção física via campo opcional `namespace` em Point. Permite evitar milhares de coleções: vários tenants compartilham uma coleção e os dados são filtrados por namespace. Inclui: campo `namespace` em Point (opcional); `MetadataFilter` com condição de primeira classe `$namespace` e métodos `matches_namespace`/`matches_point`; chave interna composta `(namespace, id)` para unicidade; persistência em storage e WAL; parâmetro `namespace` em buscas, get point e delete. Documentação em `docs/api.md`.
+
+- **Auto-Reindex em background (worker)** — Worker em background que a cada 30 minutos percorre as coleções e verifica o rácio de tombstones (`tombstone_count / total_indexed`). Quando o rácio excede 20%, dispara reindex automático usando a lógica de swap de índice existente. Logs detalhados de início e fim de ciclo e de cada compactação via `tracing`. Em `crates/core`: `tombstone_ratio()`, `total_indexed_len()` em `Collection`, documentação de `total_indexed` em `needs_reindex`. Em `crates/server`: task Tokio em `main.rs`, `run_auto_reindex_cycle()` em `handlers/reindex.rs`, graceful shutdown da task.
+
+### Performance / Search
+
+- **Optimizations: SIMD-accelerated distance kernels** — Cálculos de distância vetorial acelerados com instruções SIMD (AVX2 e SSE4.1) e detecção em tempo de execução com fallback escalar. Distâncias f32×f32: `euclidean_distance` e `dot_product` em `search.rs` com kernels AVX2 (8× f32) e SSE4.1 (4× f32); distância assimétrica f32×u8 (SQ8): `asymmetric_distance` em `quantization.rs` acelerada para re-ranking do `QuantizedHnswIndex`. Ganho de throughput significativo em vetores de 256–384 dimensões em CPUs com AVX2.
+
+- **Native HNSW pre-filtering** — A busca com filtro de metadata passou a aplicar o filtro **durante** a exploração do grafo HNSW (via `search_filter` do hnsw_rs), em vez de buscar `limit*10` resultados e filtrar depois. Garante maior precisão e consistência no número de resultados retornados (até `limit` que satisfazem o filtro). O trait `ANNIndex` foi estendido com parâmetro opcional `predicate` em `search` e `search_explain`; `HnswIndex` e `QuantizedHnswIndex` utilizam pre-filtering nativo quando o predicado está presente.
+
+## [Released] - 08/02/2026 - 12:00
+
+### Added
+
 - **API gRPC nativa — alternativa de alta performance à API REST com streaming bidirecional**
   - Feature flag `grpc` no `crates/server/Cargo.toml` — servidor funciona sem gRPC por padrão (só REST).
   - Proto file `crates/server/proto/ferresdb.proto` com package `ferresdb.v1`.

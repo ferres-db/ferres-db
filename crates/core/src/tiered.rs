@@ -745,6 +745,7 @@ pub struct TieredCollection {
 struct WarmPointMeta {
     metadata: serde_json::Value,
     created_at: u64,
+    expires_at: Option<u64>,
 }
 
 /// Metadata mínima de um ponto na camada Cold (dados no disco).
@@ -752,6 +753,8 @@ struct WarmPointMeta {
 struct ColdPointMeta {
     #[allow(dead_code)]
     created_at: u64,
+    #[allow(dead_code)]
+    expires_at: Option<u64>,
 }
 
 impl TieredCollection {
@@ -859,7 +862,7 @@ impl TieredCollection {
     /// Hidratação: hot é instantâneo, warm lê do mmap, cold lê do disco.
     /// Registra acesso para cada resultado retornado.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, FerresError> {
-        let results = self.collection.search(query, k)?;
+        let results = self.collection.search(query, k, None)?;
 
         // Registra acesso para cada resultado
         if let Ok(mut tracker) = self.access_tracker.lock() {
@@ -925,11 +928,14 @@ impl TieredCollection {
 
         match (vector, meta) {
             (Some(vec), Some(m)) => {
+                let (namespace, logical_id) = Point::parse_storage_id(id);
                 let point = Point {
-                    id: id.to_string(),
+                    id: logical_id,
                     vector: vec,
                     metadata: m.metadata,
                     created_at: m.created_at,
+                    namespace,
+                    expires_at: m.expires_at,
                 };
                 Ok(Some(point))
             }
@@ -1031,6 +1037,7 @@ impl TieredCollection {
                 wm.insert(id.to_string(), WarmPointMeta {
                     metadata: point.metadata.clone(),
                     created_at: point.created_at,
+                    expires_at: point.expires_at,
                 });
             }
 
@@ -1073,6 +1080,7 @@ impl TieredCollection {
             if let Ok(mut ci) = self.cold_ids.write() {
                 ci.insert(id.to_string(), ColdPointMeta {
                     created_at: point.created_at,
+                    expires_at: point.expires_at,
                 });
             }
 
@@ -1122,6 +1130,7 @@ impl TieredCollection {
                     WarmPointMeta {
                         metadata: point.metadata.clone(),
                         created_at: point.created_at,
+                        expires_at: point.expires_at,
                     },
                 );
             }
@@ -1161,13 +1170,16 @@ impl TieredCollection {
                     ws.contains(id).then(|| ws.read_vector(id)).and_then(|r| r.ok()),
                     meta_map.get(id),
                 ) {
+                    let (namespace, logical_id) = Point::parse_storage_id(id);
                     out.push((
                         id.clone(),
                         Point {
-                            id: id.clone(),
+                            id: logical_id,
                             vector: vec,
                             metadata: meta.metadata.clone(),
                             created_at: meta.created_at,
+                            namespace,
+                            expires_at: meta.expires_at,
                         },
                     ));
                 }
@@ -1193,6 +1205,7 @@ impl TieredCollection {
                     id.clone(),
                     ColdPointMeta {
                         created_at: point.created_at,
+                        expires_at: point.expires_at,
                     },
                 );
             }
@@ -1910,7 +1923,10 @@ mod tests {
             name: "test_filter_tiered".to_string(),
             dimension: 3,
             distance: DistanceMetric::Euclidean,
-            hnsw: HnswConfig::default(),
+            hnsw: HnswConfig {
+                ef_search: 100, // garante exploração suficiente para 4 pontos
+                ..HnswConfig::default()
+            },
             search_cache_size: 0,
             enable_bm25: false,
             bm25_text_field: "text".to_string(),
@@ -1955,7 +1971,12 @@ mod tests {
 
         // HNSW search deve retornar todos os 4 pontos
         let all_results = tc.search(&[1.0, 0.0, 0.0], 10).unwrap();
-        assert_eq!(all_results.len(), 4, "HNSW must return all 4 points");
+        assert_eq!(
+            all_results.len(),
+            4,
+            "HNSW must return all 4 points (got {}); increase ef_search if flaky",
+            all_results.len()
+        );
 
         // Simula busca com filtro: category=tech
         // Deve encontrar hot_tech (Hot), warm_tech (Warm), warm_tech2 (Warm)
@@ -2237,7 +2258,7 @@ mod tests {
         let query = vec![1.0f32; 128];
         let start = Instant::now();
         for _ in 0..100 {
-            let _ = collection.search(&query, 10);
+            let _ = collection.search(&query, 10, None);
         }
         let hot_duration = start.elapsed();
 
