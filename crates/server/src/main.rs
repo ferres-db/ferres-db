@@ -15,10 +15,21 @@ use ferres_db_server::routes;
 use ferres_db_server::middleware;
 use ferres_db_server::metrics;
 
+fn enable_mcp() -> bool {
+    std::env::args().any(|a| a == "--mcp")
+        || std::env::var("FERRESDB_ENABLE_MCP")
+            .as_deref()
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Carrega .env do diretório atual ou do workspace (para FERRESDB_API_KEYS, etc.)
     dotenvy::dotenv().ok();
+
+    // MCP via STDIO: quando ativo, logs de console devem ir para stderr para não corromper o protocolo em stdout
+    let use_stderr_console = enable_mcp();
 
     // Carrega configuração
     let config = ServerConfig::load().map_err(|e| {
@@ -48,36 +59,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json()
         .with_filter(env_filter.clone());
 
-    // Layer para console (texto formatado, apenas info+)
-    let console_layer = fmt::layer()
-        .with_writer(std::io::stdout)
-        .with_filter(EnvFilter::new("info"));
-
-    // Inicializa o subscriber (com layer OTel quando feature "otel" e init ok)
+    // Inicializa o subscriber (com layer OTel quando feature "otel" e init ok).
+    // Com MCP ativo, console usa stderr para não corromper o protocolo MCP em stdout.
     #[cfg(not(feature = "otel"))]
-    Registry::default()
-        .with(file_layer)
-        .with(console_layer)
-        .init();
+    {
+        if use_stderr_console {
+            Registry::default()
+                .with(file_layer)
+                .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                .init();
+        } else {
+            Registry::default()
+                .with(file_layer)
+                .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                .init();
+        }
+    }
 
     #[cfg(feature = "otel")]
     {
         match ferres_db_server::tracing_otel::init_otel_tracing() {
             Ok((otel_layer, otel_provider)) => {
-                info!("OpenTelemetry tracing enabled (OTLP)");
                 let _otel_provider = otel_provider; // mantém vivo para exportar spans
-                Registry::default()
-                    .with(otel_layer)
-                    .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
-                    .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
-                    .init();
+                if use_stderr_console {
+                    Registry::default()
+                        .with(otel_layer)
+                        .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
+                        .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                        .init();
+                } else {
+                    Registry::default()
+                        .with(otel_layer)
+                        .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
+                        .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                        .init();
+                }
+                info!("OpenTelemetry tracing enabled (OTLP)");
             }
             Err(e) => {
                 warn!(error = %e, "OpenTelemetry init failed, continuing without OTLP export");
-                Registry::default()
-                    .with(file_layer)
-                    .with(console_layer)
-                    .init();
+                if use_stderr_console {
+                    Registry::default()
+                        .with(file_layer)
+                        .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                        .init();
+                } else {
+                    Registry::default()
+                        .with(file_layer)
+                        .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                        .init();
+                }
             }
         }
     }
@@ -143,6 +174,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Atualiza gauge de coleções ativas
     metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
+
+    // Inicia servidor MCP via STDIO quando --mcp ou FERRESDB_ENABLE_MCP=true (requer build com --features mcp)
+    #[cfg(feature = "mcp")]
+    if use_stderr_console {
+        ferres_db_server::mcp::spawn_mcp_server(Arc::new(app_state.clone()));
+        info!("MCP server started (STDIO)");
+    }
 
     // Inicia background task para auto-save a cada 30 segundos
     let app_state_for_save = app_state.clone();

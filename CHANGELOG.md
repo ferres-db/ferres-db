@@ -6,6 +6,8 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 
 ### Added
 
+- **Feature: Embedded Model Context Protocol (MCP) support via STDIO.** — Servidor MCP embutido no binário do FerresDB; ativação com a flag `--mcp` ou a variável de ambiente `FERRESDB_ENABLE_MCP=true`. Ferramentas expostas: `search_points` (busca vetorial com pre-filtering nativo), `upsert_points` e `get_stats`. O protocolo usa stdin/stdout; os logs do servidor são redirecionados para stderr quando o modo MCP está ativo. Requer build com a feature `mcp` (`cargo build -p ferres-db-server --features mcp`). Documentação em `docs/api.md` (seção Model Context Protocol) e `README.md` (conexão com Claude Desktop).
+
 - **Dashboard: Added real-time ingestion throughput and latency charts.** — Página Analytics passa a exibir gráfico de linha (Recharts) para ingestão (throughput, pontos/min nos últimos 10 min) e gráfico de área para latência de busca (ms) nas últimas consultas; KPIs incluem "Cache Hit Rate %" baseado no `search_cache` do core. Backend: `query_log_analytics` com `entries_10m()`, `p95_latency_10m()` e `avg_points_per_second_10m()`; buffer de ingestão em `AppState` para séries temporais; endpoint `GET /api/v1/stats/analytics` estendido com `time_series_10m` e `cache_hit_rate_pct`. Documentação em `docs/api.md`.
 
 - **Feature: Support for named multi-vector points per document.** — Cada ponto pode ter um vetor principal (`vector`) e opcionalmente múltiplos vetores nomeados (`vectors: HashMap<String, Vec<f32>>`), por exemplo `title_vector` e `content_vector`. A busca aceita o parâmetro `vector_field` para consultar contra o vetor principal (`default`) ou contra um campo nomeado. Índices ANN separados são mantidos por campo vetorial; inserção, remoção e persistência (JSONL/bincode) suportam a nova estrutura. Documentação em `docs/api.md`.
@@ -17,10 +19,6 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 - **Search: Implemented native HNSW pre-filtering for higher accuracy with metadata.** — O filtro é aplicado durante a exploração do grafo (nós que não satisfazem o predicado são ignorados antes de entrar na lista de candidatos). A busca continua explorando com `ef` crescente até obter até `limit` resultados válidos ou exaurir o grafo.
 
 - **Performance: SIMD kernels implemented with hardware status visibility in Dashboard.** — Kernels SIMD (AVX2/SSE4.1) para `euclidean_distance` e `dot_product` em `crates/core/src/search.rs` (foco em `QuantizedHnswIndex` SQ8); detecção em runtime via `simd_enabled()`. Endpoint `GET /api/v1/stats/global` expõe `simd_enabled: bool`; Dashboard (Overview) exibe Badge "SIMD Acceleration: Active" ou "SIMD: Scalar Fallback".
-
-## [Dev-001-Unreleased]
-
-### Added
 
 - **Performance: Added SIMD-accelerated distance kernels (AVX2/SSE).** — Kernels de distância (`euclidean_distance`, `dot_product`) em `crates/core/src/search.rs` usam a crate `pulp` para abstração SIMD segura, com despacho em tempo de execução para AVX2 (8× f32) ou SSE4.1 (4× f32) e fallback escalar automático. Distância assimétrica SQ8 (f32×u8) permanece otimizada em `quantization.rs` (múltiplos bytes em paralelo).
 
