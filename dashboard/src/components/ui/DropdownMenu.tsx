@@ -40,8 +40,8 @@ export const DropdownMenu = ({ children, trigger }: DropdownMenuProps) => {
         {trigger || <MoreVertical className="h-4 w-4" />}
       </Button>
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-48 rounded-md border border-bg-tertiary bg-bg-secondary shadow-lg z-50">
-          <div className="py-1" onClick={() => setIsOpen(false)}>
+        <div className="absolute right-0 z-50 mt-2 w-48 rounded-lg border border-white/[0.08] bg-bg-secondary py-1 shadow-modal">
+          <div onClick={() => setIsOpen(false)}>
             {children}
           </div>
         </div>
@@ -61,7 +61,7 @@ export const DropdownMenuItem = ({ children, onClick, className }: DropdownMenuI
     <button
       onClick={onClick}
       className={cn(
-        'w-full text-left px-4 py-2 text-sm text-gray-50 hover:bg-bg-tertiary transition-colors',
+        'w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-white/[0.06] transition-colors',
         className
       )}
     >

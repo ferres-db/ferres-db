@@ -12,12 +12,12 @@ export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
       <span
         ref={ref}
         className={cn(
-          'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium',
+          'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium',
           {
-            'bg-bg-tertiary text-gray-300': variant === 'default',
-            'bg-success/20 text-success': variant === 'success',
-            'bg-yellow-500/20 text-yellow-400': variant === 'warning',
-            'bg-error/20 text-error': variant === 'danger',
+            'bg-white/[0.1] text-gray-300': variant === 'default',
+            'bg-success/15 text-emerald-400': variant === 'success',
+            'bg-amber-500/15 text-amber-400': variant === 'warning',
+            'bg-error/15 text-red-400': variant === 'danger',
           },
           className
         )}

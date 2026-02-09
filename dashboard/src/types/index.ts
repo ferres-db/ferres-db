@@ -1,15 +1,24 @@
 // Types for FerresDB Dashboard
 
+/** Backend pode retornar quantization como "None" ou { "Scalar": { dtype, always_ram?, quantile? } } */
+export type CollectionQuantizationResponse =
+  | 'None'
+  | { Scalar: { dtype: string; always_ram?: boolean; quantile?: number } };
+
 export interface Collection {
   name: string;
-  dimension: number; // Backend usa "dimension" ao invés de "vector_size"
-  num_points: number; // Backend usa "num_points" ao invés de "point_count"
-  created_at: number; // Backend retorna como u64 (timestamp Unix)
-  distance?: string; // Backend retorna "distance" (DistanceMetric)
-  // Campos opcionais/compatibilidade
-  distance_metric?: string; // Alias para distance
-  vector_size?: number; // Alias para dimension (para compatibilidade)
-  point_count?: number; // Alias para num_points (para compatibilidade)
+  dimension: number;
+  num_points: number;
+  created_at: number;
+  distance?: string;
+  distance_metric?: string;
+  vector_size?: number;
+  point_count?: number;
+  /** Quantização (GET collection). None ou Scalar (SQ8). */
+  quantization?: CollectionQuantizationResponse;
+  enable_bm25?: boolean;
+  bm25_text_field?: string;
+  tiered_storage?: TieredStorageConfig;
 }
 
 export interface Point {
@@ -68,6 +77,50 @@ export interface CollectionStats {
   p50_latency_ms: number;
   p95_latency_ms: number;
   p99_latency_ms: number;
+  tombstone_count?: number;
+  tombstone_memory_waste_bytes?: number;
+}
+
+// Analytics (GET /api/v1/stats/analytics)
+export interface AnalyticsTierDistribution {
+  hot: number;
+  warm: number;
+  cold: number;
+  hot_memory_bytes: number;
+  warm_memory_bytes: number;
+  cold_memory_bytes: number;
+}
+
+export interface LatencyPerMinuteBucket {
+  timestamp: number;
+  avg_ms: number;
+  p50_ms: number;
+}
+
+export interface AnalyticsLatency {
+  avg_ms: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  latency_per_minute: LatencyPerMinuteBucket[];
+}
+
+export interface AnalyticsTombstones {
+  total_count: number;
+  total_memory_waste_bytes: number;
+  total_points: number;
+}
+
+export interface AnalyticsCircuitBreaker {
+  state: 'closed' | 'open' | 'half_open' | string;
+  failure_count: number;
+}
+
+export interface AnalyticsResponse {
+  tier_distribution: AnalyticsTierDistribution;
+  latency: AnalyticsLatency;
+  tombstones: AnalyticsTombstones;
+  circuit_breaker: AnalyticsCircuitBreaker;
 }
 
 export interface ApiKeyInfo {

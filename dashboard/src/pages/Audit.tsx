@@ -68,8 +68,8 @@ export const Audit = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Audit</h1>
-          <p className="text-gray-600 mt-2">Action log for FerresDB (Admin only)</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-gray-50">Audit</h1>
+          <p className="mt-1 text-sm text-gray-400">Action log for FerresDB (Admin only)</p>
         </div>
         <Button variant="secondary" onClick={() => refetch()} disabled={isFetching}>
           <RefreshCw className={`h-4 w-4 mr-2 ${isFetching ? 'animate-spin' : ''}`} />

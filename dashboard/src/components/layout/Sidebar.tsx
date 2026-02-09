@@ -1,11 +1,12 @@
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Database, Sparkles, Key, Users as UsersIcon, ShieldCheck, Cpu, Radio } from 'lucide-react';
+import { LayoutDashboard, Database, Sparkles, Key, Users as UsersIcon, ShieldCheck, Cpu, Radio, BarChart3 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { getStoredRole, type Role } from '@/api/ferresdb';
 
 const allNav = [
   { name: 'Overview', href: '/', icon: LayoutDashboard, roles: ['admin', 'editor', 'viewer'] as Role[] },
   { name: 'Collections', href: '/collections', icon: Database, roles: ['admin', 'editor', 'viewer'] as Role[] },
+  { name: 'Analytics', href: '/analytics', icon: BarChart3, roles: ['admin', 'editor', 'viewer'] as Role[] },
   { name: 'Embeddings', href: '/embeddings', icon: Cpu, roles: ['admin', 'editor'] as Role[] },
   { name: 'Streaming', href: '/streaming', icon: Radio, roles: ['admin', 'editor'] as Role[] },
   { name: 'Query Tester', href: '/query-tester', icon: Sparkles, roles: ['admin', 'editor'] as Role[] },
@@ -20,30 +21,33 @@ export const Sidebar = () => {
   const navigation = role ? allNav.filter((item) => item.roles.includes(role)) : allNav;
 
   return (
-    <div className="flex h-full w-64 flex-col bg-bg-secondary text-gray-50">
-      <div className="flex h-16 items-center px-6 border-b border-bg-tertiary">
-        <img src="/logo.png" alt="FerresDB" className="h-8 w-auto object-contain" />
+    <aside className="flex h-full w-[240px] flex-col border-r border-white/[0.06] bg-bg-secondary">
+      <div className="flex h-14 shrink-0 items-center gap-3 px-4 border-b border-white/[0.06]">
+        <img src="/logo.png" alt="FerresDB" className="h-7 w-auto object-contain" />
       </div>
-      <nav className="flex-1 space-y-1 px-3 py-4">
-        {navigation.map((item) => {
-          const isActive = location.pathname === item.href;
-          return (
-            <Link
-              key={item.name}
-              to={item.href}
-              className={cn(
-                'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-                isActive
-                  ? 'bg-bg-tertiary text-white'
-                  : 'text-gray-400 hover:bg-bg-tertiary hover:text-white'
-              )}
-            >
-              <item.icon className="h-5 w-5" />
-              {item.name}
-            </Link>
-          );
-        })}
+      <nav className="flex-1 overflow-y-auto scrollbar-thin px-3 py-4">
+        <ul className="space-y-0.5">
+          {navigation.map((item) => {
+            const isActive = location.pathname === item.href;
+            return (
+              <li key={item.name}>
+                <Link
+                  to={item.href}
+                  className={cn(
+                    'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150',
+                    isActive
+                      ? 'bg-white/[0.08] text-white'
+                      : 'text-gray-400 hover:bg-white/[0.04] hover:text-gray-200'
+                  )}
+                >
+                  <item.icon className="h-[18px] w-[18px] shrink-0 opacity-90" />
+                  <span>{item.name}</span>
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
       </nav>
-    </div>
+    </aside>
   );
 };

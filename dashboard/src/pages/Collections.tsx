@@ -93,13 +93,13 @@ export const Collections = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Collections</h1>
-          <p className="text-gray-600 mt-2">Manage your vector collections</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-gray-50">Collections</h1>
+          <p className="mt-1 text-sm text-gray-400">Manage your vector collections</p>
         </div>
         {canEdit && (
-          <Button onClick={() => setIsCreateModalOpen(true)}>
+          <Button onClick={() => setIsCreateModalOpen(true)} size="md">
             <Plus className="h-4 w-4 mr-2" />
             New Collection
           </Button>
@@ -170,7 +170,7 @@ export const Collections = () => {
                 ))}
                 {(!collections || !Array.isArray(collections) || collections.length === 0) && (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-gray-500">
+                    <TableCell colSpan={6} className="py-12 text-center text-sm text-gray-500">
                       No collections found
                     </TableCell>
                   </TableRow>
@@ -207,7 +207,7 @@ export const Collections = () => {
           <div>
             <label className="block text-sm font-medium mb-1">Distance Metric</label>
             <select
-              className="flex h-10 w-full rounded-md border border-bg-tertiary bg-bg-secondary px-3 py-2 text-sm text-gray-50 ring-offset-bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-2 [&>option]:bg-bg-secondary [&>option]:text-gray-50"
+              className="flex h-9 w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-sm text-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/60 [&>option]:bg-bg-secondary [&>option]:text-gray-50"
               value={newDistanceMetric}
               onChange={(e) => setNewDistanceMetric(e.target.value)}
             >
@@ -218,27 +218,27 @@ export const Collections = () => {
           </div>
 
           {/* ─── SQ8 Quantization ─────────────────────────────── */}
-          <div className="border-t border-bg-tertiary pt-4">
-            <label className="flex items-center gap-2 text-sm font-medium mb-3 cursor-pointer">
+          <div className="border-t border-white/[0.06] pt-4">
+            <label className="mb-3 flex cursor-pointer items-center gap-2 text-sm font-medium">
               <input
                 type="checkbox"
                 checked={enableQuantization}
                 onChange={(e) => setEnableQuantization(e.target.checked)}
-                className="rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+                className="rounded border-white/[0.2] bg-white/[0.04] text-orange-500 focus:ring-orange-500"
               />
               Enable Scalar Quantization (SQ8)
             </label>
             {enableQuantization && (
-              <div className="ml-6 space-y-3 p-3 bg-bg-tertiary/50 rounded-md">
+              <div className="ml-6 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.03] p-3">
                 <p className="text-xs text-gray-400">
                   Compresses f32 vectors to u8 (~4x memory savings) with minimal recall loss.
                 </p>
-                <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
                   <input
                     type="checkbox"
                     checked={alwaysRam}
                     onChange={(e) => setAlwaysRam(e.target.checked)}
-                    className="rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+                    className="rounded border-white/[0.2] bg-white/[0.04] text-orange-500 focus:ring-orange-500"
                   />
                   Always keep original vectors in RAM (re-rank with f32)
                 </label>
@@ -265,18 +265,18 @@ export const Collections = () => {
           </div>
 
           {/* ─── BM25 ─────────────────────────────────────────── */}
-          <div className="border-t border-bg-tertiary pt-4">
-            <label className="flex items-center gap-2 text-sm font-medium mb-3 cursor-pointer">
+          <div className="border-t border-white/[0.06] pt-4">
+            <label className="mb-3 flex cursor-pointer items-center gap-2 text-sm font-medium">
               <input
                 type="checkbox"
                 checked={enableBm25}
                 onChange={(e) => setEnableBm25(e.target.checked)}
-                className="rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+                className="rounded border-white/[0.2] bg-white/[0.04] text-orange-500 focus:ring-orange-500"
               />
               Enable BM25 Full-Text Search
             </label>
             {enableBm25 && (
-              <div className="ml-6 space-y-3 p-3 bg-bg-tertiary/50 rounded-md">
+              <div className="ml-6 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.03] p-3">
                 <p className="text-xs text-gray-400">
                   Enables hybrid search (vector + keyword) via BM25 ranking.
                 </p>
@@ -286,7 +286,6 @@ export const Collections = () => {
                     value={bm25TextField}
                     onChange={(e) => setBm25TextField(e.target.value)}
                     placeholder="text"
-                    className="bg-bg-secondary border-bg-tertiary text-gray-50"
                   />
                 </div>
               </div>
@@ -294,18 +293,18 @@ export const Collections = () => {
           </div>
 
           {/* ─── Tiered Storage ─────────────────────────────── */}
-          <div className="border-t border-bg-tertiary pt-4">
-            <label className="flex items-center gap-2 text-sm font-medium mb-3 cursor-pointer">
+          <div className="border-t border-white/[0.06] pt-4">
+            <label className="mb-3 flex cursor-pointer items-center gap-2 text-sm font-medium">
               <input
                 type="checkbox"
                 checked={enableTiered}
                 onChange={(e) => setEnableTiered(e.target.checked)}
-                className="rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+                className="rounded border-white/[0.2] bg-white/[0.04] text-orange-500 focus:ring-orange-500"
               />
               Enable Tiered Storage
             </label>
             {enableTiered && (
-              <div className="ml-6 space-y-3 p-3 bg-bg-tertiary/50 rounded-md">
+              <div className="ml-6 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.03] p-3">
                 <p className="text-xs text-gray-400">
                   Automatically moves vectors between Hot (RAM), Warm (mmap), and Cold (disk) tiers based on access frequency.
                 </p>
@@ -317,29 +316,26 @@ export const Collections = () => {
                       value={hotThreshold}
                       onChange={(e) => setHotThreshold(e.target.value)}
                       placeholder="24"
-                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
                     />
-                    <p className="text-[10px] text-gray-500 mt-1">Points accessed within this time stay in RAM</p>
+                    <p className="mt-1 text-[10px] text-gray-500">Points accessed within this time stay in RAM</p>
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1">Warm Threshold (hours)</label>
+                    <label className="mb-1 block text-xs text-gray-400">Warm Threshold (hours)</label>
                     <Input
                       type="number"
                       value={warmThreshold}
                       onChange={(e) => setWarmThreshold(e.target.value)}
                       placeholder="168"
-                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
                     />
-                    <p className="text-[10px] text-gray-500 mt-1">Points accessed within this time use memory-mapped files</p>
+                    <p className="mt-1 text-[10px] text-gray-500">Points accessed within this time use memory-mapped files</p>
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1">Compaction Interval (seconds)</label>
+                    <label className="mb-1 block text-xs text-gray-400">Compaction Interval (seconds)</label>
                     <Input
                       type="number"
                       value={compactionInterval}
                       onChange={(e) => setCompactionInterval(e.target.value)}
                       placeholder="3600"
-                      className="bg-bg-secondary border-bg-tertiary text-gray-50"
                     />
                     <p className="text-[10px] text-gray-500 mt-1">How often the background task checks for tier demotions</p>
                   </div>
@@ -348,7 +344,7 @@ export const Collections = () => {
             )}
           </div>
 
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex justify-end gap-2 border-t border-white/[0.06] pt-4">
             <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>
               Cancel
             </Button>
