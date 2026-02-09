@@ -575,6 +575,7 @@ async fn process_upsert_batch(
                     };
                     drop(collection); // Release lock before emit
                     drop(collection_arc);
+                    app_state.record_ingest(unix_now(), result.inserted as u64);
                     app_state.emit_event(event);
 
                     return Ok((result.inserted, failed, took_ms));

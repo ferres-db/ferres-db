@@ -367,6 +367,14 @@ impl FerresDb for FerresGrpcService {
             (upserted, failed)
         };
 
+        if upserted > 0 {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            self.state.record_ingest(now_secs, upserted as u64);
+        }
+
         Ok(Response::new(UpsertPointsResponse {
             upserted: upserted as u64,
             failed,
@@ -913,6 +921,14 @@ fn do_upsert_sync(
         }
     };
     coll.mark_dirty();
+
+    if upserted > 0 {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        state.record_ingest(now_secs, upserted as u64);
+    }
 
     Ok(UpsertPointsResponse {
         upserted: upserted as u64,

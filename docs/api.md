@@ -1010,17 +1010,40 @@ Retorna estatísticas globais: totais do servidor (coleções, pontos) e agregad
   "total_points": 150,
   "total_queries_24h": 420,
   "avg_latency_ms": 3.5,
-  "queries_per_minute": [{ "timestamp": 1738742400, "count": 12 }]
+  "queries_per_minute": [{ "timestamp": 1738742400, "count": 12 }],
+  "simd_enabled": true
 }
 ```
 
-| Campo                | Tipo   | Descrição                                                 |
-| -------------------- | ------ | --------------------------------------------------------- |
-| `total_collections`  | number | Número de coleções                                        |
-| `total_points`       | number | Soma de pontos em todas as coleções                       |
-| `total_queries_24h`  | number | Queries nas últimas 24h (do log)                          |
-| `avg_latency_ms`     | number | Latência média (ms) nas últimas 24h                       |
-| `queries_per_minute` | array  | Buckets por minuto: `timestamp` (Unix do minuto), `count` |
+| Campo                | Tipo    | Descrição                                                                            |
+| -------------------- | ------- | ------------------------------------------------------------------------------------ |
+| `total_collections`  | number  | Número de coleções                                                                   |
+| `total_points`       | number  | Soma de pontos em todas as coleções                                                  |
+| `total_queries_24h`  | number  | Queries nas últimas 24h (do log)                                                     |
+| `avg_latency_ms`     | number  | Latência média (ms) nas últimas 24h                                                  |
+| `queries_per_minute` | array   | Buckets por minuto: `timestamp` (Unix do minuto), `count`                            |
+| `simd_enabled`       | boolean | Se as instruções SIMD (AVX2/SSE4.1) estão ativas em runtime nos kernels de distância |
+
+---
+
+### GET /api/v1/stats/analytics
+
+Retorna JSON consolidado para o dashboard: distribuição por tier, latência (avg, P50/P95/P99, histórico por minuto nas 24h), tombstones, circuit breaker, **séries temporais dos últimos 10 minutos** e **Cache Hit Rate** do search_cache.
+
+**Resposta:** `200 OK`
+
+**Campos de agregação de séries temporais (últimos 10 min):**
+
+| Campo | Tipo | Descrição |
+| ----- | ---- | --------- |
+| `time_series_10m` | object | Agregados da janela de 10 minutos para monitoramento em tempo real |
+| `time_series_10m.avg_points_per_second` | number | Média de pontos inseridos por segundo (ingestão) nos últimos 10 min |
+| `time_series_10m.p95_latency_ms` | number | P95 da latência de busca (ms) nas últimas 10 min (queries.log) |
+| `time_series_10m.throughput_per_minute` | array | Buckets por minuto para gráfico de throughput: `{ "timestamp": number, "points": number }` |
+| `time_series_10m.recent_latencies` | array | Últimas consultas para gráfico de latência: `{ "timestamp": number, "took_ms": number }` (até 100 entradas) |
+| `cache_hit_rate_pct` | number \| null | Percentual de hits do search_cache (core) agregado em todas as coleções; `null` se ainda não houve buscas |
+
+O buffer de ingestão é alimentado a cada upsert (REST, gRPC e WebSocket); o P95 e as latências recentes vêm do `queries.log` (cache 1h). O Cache Hit Rate é calculado a partir dos contadores `search_cache_hits` e `search_cache_misses` de cada coleção (quando `search_cache_size` > 0).
 
 ---
 
