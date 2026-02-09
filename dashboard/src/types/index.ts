@@ -2,7 +2,7 @@
 
 /** Backend pode retornar quantization como "None" ou { "Scalar": { dtype, always_ram?, quantile? } } */
 export type CollectionQuantizationResponse =
-  | 'None'
+  | "None"
   | { Scalar: { dtype: string; always_ram?: boolean; quantile?: number } };
 
 export interface Collection {
@@ -53,6 +53,7 @@ export interface GlobalStats {
   total_queries_24h: number;
   avg_latency_ms: number;
   queries_per_minute: QueriesPerMinuteBucket[];
+  simd_enabled: boolean;
 }
 
 export interface QueryEntry {
@@ -120,8 +121,25 @@ export interface AnalyticsTombstones {
 }
 
 export interface AnalyticsCircuitBreaker {
-  state: 'closed' | 'open' | 'half_open' | string;
+  state: "closed" | "open" | "half_open" | string;
   failure_count: number;
+}
+
+export interface ThroughputPerMinuteBucket {
+  timestamp: number;
+  points: number;
+}
+
+export interface RecentLatencyEntry {
+  timestamp: number;
+  took_ms: number;
+}
+
+export interface TimeSeries10m {
+  avg_points_per_second: number;
+  p95_latency_ms: number;
+  throughput_per_minute: ThroughputPerMinuteBucket[];
+  recent_latencies: RecentLatencyEntry[];
 }
 
 export interface AnalyticsResponse {
@@ -129,6 +147,8 @@ export interface AnalyticsResponse {
   latency: AnalyticsLatency;
   tombstones: AnalyticsTombstones;
   circuit_breaker: AnalyticsCircuitBreaker;
+  time_series_10m: TimeSeries10m;
+  cache_hit_rate_pct: number | null;
 }
 
 export interface ApiKeyInfo {

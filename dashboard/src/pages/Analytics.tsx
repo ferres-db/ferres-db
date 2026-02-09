@@ -8,6 +8,8 @@ import {
   Cell,
   LineChart,
   Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -15,7 +17,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
-import { Activity, Gauge, ShieldAlert, BarChart3 } from 'lucide-react';
+import { Activity, Gauge, ShieldAlert, BarChart3, TrendingUp, Database } from 'lucide-react';
 import { format } from 'date-fns';
 
 const TIER_COLORS = ['#f97316', '#eab308', '#3b82f6']; // Hot, Warm, Cold
@@ -65,6 +67,21 @@ export const Analytics = () => {
   }));
   const circuitState = data?.circuit_breaker?.state ?? 'unknown';
   const failureCount = data?.circuit_breaker?.failure_count ?? 0;
+  const timeSeries10m = data?.time_series_10m;
+  const throughputPerMinute = timeSeries10m?.throughput_per_minute ?? [];
+  const recentLatencies = timeSeries10m?.recent_latencies ?? [];
+  const avgPointsPerSecond = timeSeries10m?.avg_points_per_second ?? 0;
+  const cacheHitRatePct = data?.cache_hit_rate_pct ?? null;
+  const throughputChartData = throughputPerMinute.map((b) => ({
+    time: format(new Date(b.timestamp * 1000), 'HH:mm'),
+    timestamp: b.timestamp,
+    points: b.points,
+  }));
+  const latencyAreaData = recentLatencies.map((e) => ({
+    time: format(new Date(e.timestamp * 1000), 'HH:mm:ss'),
+    timestamp: e.timestamp,
+    took_ms: e.took_ms,
+  }));
 
   const circuitVariant =
     circuitState === 'closed' ? 'success' : circuitState === 'open' ? 'danger' : 'warning';
@@ -141,6 +158,26 @@ export const Analytics = () => {
             )}
           </CardContent>
         </Card>
+
+        <Card className="overflow-hidden">
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium text-gray-400">Cache Hit Rate %</CardTitle>
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/10">
+              <Database className="h-4 w-4 text-emerald-500" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <Skeleton className="h-8 w-16 rounded" />
+            ) : cacheHitRatePct !== null ? (
+              <p className="text-2xl font-semibold tabular-nums text-gray-50">
+                {typeof cacheHitRatePct === 'number' ? cacheHitRatePct.toFixed(1) : cacheHitRatePct}%
+              </p>
+            ) : (
+              <p className="text-sm text-gray-400">No searches yet</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* Circuit breaker */}
@@ -163,6 +200,100 @@ export const Analytics = () => {
           )}
         </CardContent>
       </Card>
+
+      {/* Real-time: Throughput (Line) + Latency (Area) */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <TrendingUp className="h-5 w-5 text-orange-500" />
+              Ingestão (Throughput) — últimos 10 min
+            </CardTitle>
+            <p className="text-sm text-gray-400">
+              Média: {typeof avgPointsPerSecond === 'number' ? avgPointsPerSecond.toFixed(2) : 0} pts/s
+            </p>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <Skeleton className="h-[250px] w-full rounded" />
+            ) : throughputChartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={250}>
+                <LineChart data={throughputChartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#3f3f3f" />
+                  <XAxis dataKey="time" stroke="#9ca3af" />
+                  <YAxis stroke="#9ca3af" />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#2d2d2d',
+                      border: '1px solid #3f3f3f',
+                      borderRadius: '8px',
+                    }}
+                    labelStyle={{ color: '#f9fafb' }}
+                  />
+                  <Legend />
+                  <Line
+                    type="monotone"
+                    dataKey="points"
+                    stroke="#22c55e"
+                    strokeWidth={2}
+                    name="Pontos/min"
+                    dot={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="py-12 text-center text-sm text-gray-400">Sem dados de ingestão nos últimos 10 min</p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Latência de Busca (ms) — últimas consultas</CardTitle>
+            <p className="text-sm text-gray-400">
+              P95 (10 min): {timeSeries10m?.p95_latency_ms != null ? Number(timeSeries10m.p95_latency_ms).toFixed(2) : '—'} ms
+            </p>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <Skeleton className="h-[250px] w-full rounded" />
+            ) : latencyAreaData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={250}>
+                <AreaChart data={latencyAreaData}>
+                  <defs>
+                    <linearGradient id="latencyGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.4} />
+                      <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#3f3f3f" />
+                  <XAxis dataKey="time" stroke="#9ca3af" />
+                  <YAxis stroke="#9ca3af" />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#2d2d2d',
+                      border: '1px solid #3f3f3f',
+                      borderRadius: '8px',
+                    }}
+                    labelStyle={{ color: '#f9fafb' }}
+                  />
+                  <Legend />
+                  <Area
+                    type="monotone"
+                    dataKey="took_ms"
+                    stroke="#f97316"
+                    strokeWidth={2}
+                    fill="url(#latencyGradient)"
+                    name="Latência (ms)"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="py-12 text-center text-sm text-gray-400">Sem consultas recentes</p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Pie: tier distribution */}

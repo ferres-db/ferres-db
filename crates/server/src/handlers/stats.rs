@@ -6,6 +6,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use ferres_db_core::simd_enabled;
+
 use crate::api_err;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -42,6 +44,8 @@ pub struct GlobalStatsResponse {
     pub total_queries_24h: u64,
     pub avg_latency_ms: f64,
     pub queries_per_minute: Vec<QueriesPerMinuteBucket>,
+    /// Whether SIMD (AVX2/SSE4.1) acceleration is active at runtime for distance kernels.
+    pub simd_enabled: bool,
 }
 
 // ─── Queries list (GET /api/v1/stats/queries) ─────────────────────────────
@@ -135,6 +139,33 @@ pub struct AnalyticsCircuitBreaker {
     pub failure_count: u64,
 }
 
+/// Bucket de throughput por minuto (série temporal, últimos 10 min).
+#[derive(Debug, Serialize)]
+pub struct ThroughputPerMinuteBucket {
+    pub timestamp: u64,
+    pub points: u64,
+}
+
+/// Latência de uma query recente (para gráfico de área).
+#[derive(Debug, Serialize)]
+pub struct RecentLatencyEntry {
+    pub timestamp: u64,
+    pub took_ms: u64,
+}
+
+/// Agregações de série temporal (últimos 10 min): throughput e latência.
+#[derive(Debug, Serialize)]
+pub struct TimeSeries10m {
+    /// Média de pontos inseridos por segundo (últimos 10 min).
+    pub avg_points_per_second: f64,
+    /// P95 da latência de busca (ms) nas últimas 10 min.
+    pub p95_latency_ms: f64,
+    /// Throughput por minuto para gráfico de ingestão.
+    pub throughput_per_minute: Vec<ThroughputPerMinuteBucket>,
+    /// Últimas consultas (timestamp, took_ms) para gráfico de latência.
+    pub recent_latencies: Vec<RecentLatencyEntry>,
+}
+
 /// Resposta de GET /api/v1/stats/analytics.
 #[derive(Debug, Serialize)]
 pub struct AnalyticsResponse {
@@ -142,6 +173,10 @@ pub struct AnalyticsResponse {
     pub latency: AnalyticsLatency,
     pub tombstones: AnalyticsTombstones,
     pub circuit_breaker: AnalyticsCircuitBreaker,
+    /// Séries temporais dos últimos 10 min (throughput + P95 + dados para gráficos).
+    pub time_series_10m: TimeSeries10m,
+    /// Cache hit rate % (search_cache do core, agregado em todas as coleções). None se nenhuma busca.
+    pub cache_hit_rate_pct: Option<f64>,
 }
 
 /// Handler para GET /api/v1/collections/{name}/stats
@@ -225,6 +260,7 @@ pub async fn get_global_stats(
         total_queries_24h,
         avg_latency_ms,
         queries_per_minute,
+        simd_enabled: simd_enabled(),
     }))
 }
 
@@ -319,6 +355,38 @@ pub async fn get_analytics(
     };
     let failure_count = cb.failure_count();
 
+    // Séries temporais (10 min): throughput e P95 latência
+    let (avg_points_per_second, throughput_raw) = app_state.time_series_ingest_10m();
+    let p95_latency_10m = cache.p95_latency_10m();
+    let entries_10m = cache.entries_10m();
+    let start = entries_10m.len().saturating_sub(100);
+    let recent_latencies: Vec<RecentLatencyEntry> = entries_10m[start..]
+        .iter()
+        .map(|e| RecentLatencyEntry {
+            timestamp: e.timestamp_secs,
+            took_ms: e.took_ms,
+        })
+        .collect();
+    let throughput_per_minute: Vec<ThroughputPerMinuteBucket> = throughput_raw
+        .into_iter()
+        .map(|(timestamp, points)| ThroughputPerMinuteBucket { timestamp, points })
+        .collect();
+
+    // Cache hit rate (search_cache agregado em todas as coleções)
+    let mut total_hits = 0_u64;
+    let mut total_misses = 0_u64;
+    for entry in app_state.collections.iter() {
+        if let Ok(coll) = entry.value().read() {
+            let (h, m) = coll.search_cache_stats();
+            total_hits += h;
+            total_misses += m;
+        }
+    }
+    let cache_hit_rate_pct = match total_hits + total_misses {
+        0 => None,
+        total => Some((total_hits as f64 / total as f64) * 100.0),
+    };
+
     Ok(Json(AnalyticsResponse {
         tier_distribution: AnalyticsTierDistribution {
             hot,
@@ -344,6 +412,13 @@ pub async fn get_analytics(
             state: state_str.to_string(),
             failure_count,
         },
+        time_series_10m: TimeSeries10m {
+            avg_points_per_second,
+            p95_latency_ms: p95_latency_10m,
+            throughput_per_minute,
+            recent_latencies,
+        },
+        cache_hit_rate_pct,
     }))
 }
 
