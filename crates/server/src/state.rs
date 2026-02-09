@@ -584,16 +584,17 @@ impl AppState {
                 tokio::task::spawn_blocking(move || {
                     let coll = collection_arc.read().ok()?;
                     coll.validate_dimension(&query).ok()?;
-                    let raw = coll.search(&query, limit).ok()?;
+                    let raw = coll.search(&query, limit, None).ok()?;
                     let results: Vec<SearchResult> = raw
                         .into_iter()
-                        .filter_map(|(id, score)| {
-                            let point = coll.get(&id)?;
+                        .filter_map(|(storage_id, score)| {
+                            let point = coll.get(&storage_id)?;
                             Some(SearchResult {
-                                id,
+                                id: point.id.clone(),
                                 score,
                                 metadata: point.metadata.clone(),
                                 vector: None,
+                                namespace: point.namespace.clone(),
                             })
                         })
                         .collect();

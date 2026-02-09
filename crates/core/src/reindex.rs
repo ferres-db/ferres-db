@@ -21,7 +21,11 @@
 //! ## Auto-reindex
 //!
 //! When tombstones exceed 20 % of indexed points, a reindex is recommended.
-//! The server can trigger this automatically after delete operations.
+//! The server can trigger this automatically after delete operations or via a
+//! background worker. For [`needs_reindex`], the caller must pass
+//! `total_indexed` = number of entries in the index = live points + tombstones,
+//! i.e. `collection.len() + collection.tombstone_count()` (or
+//! `collection.total_indexed_len()` if available).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -205,12 +209,26 @@ pub fn apply_delta(
 /// Check if a collection needs reindexing based on tombstone ratio.
 ///
 /// Returns `true` if tombstones > 20 % of total indexed points.
+///
+/// **`total_indexed`** must be the number of entries in the index (live + tombstones),
+/// e.g. `collection.len() + collection.tombstone_count()` or `collection.total_indexed_len()`.
 pub fn needs_reindex(tombstone_count: usize, total_indexed: usize) -> bool {
     if total_indexed == 0 {
         return false;
     }
     let ratio = tombstone_count as f64 / total_indexed as f64;
     ratio > AUTO_REINDEX_TOMBSTONE_RATIO
+}
+
+/// Tombstone ratio for logging and metrics: `tombstone_count / total_indexed`.
+///
+/// Returns 0.0 when `total_indexed` is 0. Callers should pass
+/// `total_indexed = len() + tombstone_count()` (or `total_indexed_len()`).
+pub fn tombstone_ratio(tombstone_count: usize, total_indexed: usize) -> f64 {
+    if total_indexed == 0 {
+        return 0.0;
+    }
+    tombstone_count as f64 / total_indexed as f64
 }
 
 /// Estimate the size of an index in bytes.
@@ -301,7 +319,7 @@ mod tests {
         ];
 
         let index = build_new_index(&config, &points).unwrap();
-        let results = index.search(&[1.0, 0.0, 0.0], 2).unwrap();
+        let results = index.search(&[1.0, 0.0, 0.0], 2, None).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, "a");
     }
@@ -330,7 +348,7 @@ mod tests {
         assert_eq!(removed, 0);
 
         // "c" should now be searchable
-        let results = new_index.search(&[0.0, 0.0, 1.0], 1).unwrap();
+        let results = new_index.search(&[0.0, 0.0, 1.0], 1, None).unwrap();
         assert_eq!(results[0].0, "c");
     }
 
@@ -404,7 +422,7 @@ mod tests {
         assert_eq!(col.tombstone_count(), 0, "tombstones should be 0 after reindex");
 
         // Search should still work
-        let results = col.search(&[1.0, 0.0, 0.0], 3).unwrap();
+        let results = col.search(&[1.0, 0.0, 0.0], 3, None).unwrap();
         assert_eq!(results.len(), 2); // a and c
         assert_eq!(results[0].0, "a");
     }
@@ -428,14 +446,14 @@ mod tests {
         let new_index = build_new_index(&config, &snapshot).unwrap();
 
         // Meanwhile, search should still work on old index
-        let results = col.search(&[1.0, 0.0, 0.0], 5).unwrap();
+        let results = col.search(&[1.0, 0.0, 0.0], 5, None).unwrap();
         assert!(!results.is_empty(), "search should work during reindex build");
 
         // Swap
         col.swap_index(new_index);
 
         // Search should still work after swap
-        let results_after = col.search(&[1.0, 0.0, 0.0], 5).unwrap();
+        let results_after = col.search(&[1.0, 0.0, 0.0], 5, None).unwrap();
         assert!(!results_after.is_empty(), "search should work after swap");
     }
 
@@ -469,12 +487,12 @@ mod tests {
         col.swap_index(new_index);
 
         // Verify: "c" (added during build) should appear
-        let results = col.search(&[0.0, 0.0, 1.0], 5).unwrap();
+        let results = col.search(&[0.0, 0.0, 1.0], 5, None).unwrap();
         let ids: Vec<&str> = results.iter().map(|r| r.0.as_str()).collect();
         assert!(ids.contains(&"c"), "point added during reindex should appear after swap");
 
         // "b" (removed during build) should NOT appear
-        let all_results = col.search(&[0.0, 1.0, 0.0], 5).unwrap();
+        let all_results = col.search(&[0.0, 1.0, 0.0], 5, None).unwrap();
         let all_ids: Vec<&str> = all_results.iter().map(|r| r.0.as_str()).collect();
         assert!(!all_ids.contains(&"b"), "point removed during reindex should not appear");
 

@@ -137,6 +137,7 @@ function QueryTesterContent() {
   const [selectedCollection, setSelectedCollection] = useState('');
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(5);
+  const [searchNamespace, setSearchNamespace] = useState('');
 
   // RAG state
   const [isLoading, setIsLoading] = useState(false);
@@ -206,7 +207,13 @@ function QueryTesterContent() {
       const embeddingMs = Math.round(performance.now() - embeddingStart);
 
       const searchStart = performance.now();
-      const searchResults = await pointsApi.search(selectedCollection, embedding, limit);
+      const searchResults = await pointsApi.search(
+        selectedCollection,
+        embedding,
+        limit,
+        undefined,
+        { namespace: searchNamespace.trim() || undefined },
+      );
       const searchMs = Math.round(performance.now() - searchStart);
       setResults(searchResults);
 
@@ -260,6 +267,7 @@ function QueryTesterContent() {
       } else {
         params.rrf_k = parseInt(hybridRrfK, 10) || 60;
       }
+      if (searchNamespace.trim()) params.namespace = searchNamespace.trim();
       const res = await pointsApi.hybridSearch(selectedCollection, params as any);
       setHybridResults(res);
     } catch (err) {
@@ -283,6 +291,7 @@ function QueryTesterContent() {
       const res = await pointsApi.explain(selectedCollection, {
         vector: embedding,
         limit,
+        namespace: searchNamespace.trim() || undefined,
       });
       setExplainResult(res);
     } catch (err) {
@@ -306,6 +315,7 @@ function QueryTesterContent() {
       const res = await pointsApi.estimate(selectedCollection, {
         vector: embedding,
         limit,
+        namespace: searchNamespace.trim() || undefined,
       });
       setEstimateResult(res);
     } catch (err) {
@@ -473,6 +483,17 @@ function QueryTesterContent() {
                 onChange={(e) => setLimit(Number(e.target.value))}
                 min={1}
                 max={100}
+                className="bg-bg-secondary border-bg-tertiary text-gray-50"
+              />
+            </div>
+
+            {/* Namespace (optional, for multitenancy) */}
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Namespace (optional)</label>
+              <Input
+                value={searchNamespace}
+                onChange={(e) => setSearchNamespace(e.target.value)}
+                placeholder="Restrict search to namespace"
                 className="bg-bg-secondary border-bg-tertiary text-gray-50"
               />
             </div>

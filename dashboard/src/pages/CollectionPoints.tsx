@@ -1,5 +1,6 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCollection, useTierDistribution } from '@/hooks/useCollections';
 import { usePoints } from '@/hooks/usePoints';
 import { useCollectionStats, useCollectionQueries } from '@/hooks/useCollectionStats';
@@ -10,10 +11,11 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
 import { DropdownMenu, DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs';
-import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive } from 'lucide-react';
+import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive, RefreshCw, Loader2 } from 'lucide-react';
 import type { CollectionQuantizationResponse } from '@/types';
 import { format } from 'date-fns';
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { reindexApi } from '@/api/ferresdb';
 
 interface FilterField {
   id: string;
@@ -32,11 +34,19 @@ export const CollectionPoints = () => {
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [filterFields, setFilterFields] = useState<FilterField[]>([]);
   const [newFilter, setNewFilter] = useState<FilterField>({ id: '', field: '', operator: '$eq', value: '' });
-  
+  const [namespaceFilter, setNamespaceFilter] = useState('');
+  const [reindexStarting, setReindexStarting] = useState(false);
+
+  const queryClient = useQueryClient();
   const { data: collection, isLoading: collectionLoading } = useCollection(name || '');
   const { data: stats, isLoading: statsLoading } = useCollectionStats(name || '');
   const { data: queries, isLoading: queriesLoading } = useCollectionQueries(name || '');
   const { data: tierDistribution } = useTierDistribution(name || '');
+  const { data: reindexJobs, isLoading: reindexJobsLoading, refetch: refetchReindexJobs } = useQuery({
+    queryKey: ['reindex', name],
+    queryFn: () => reindexApi.listJobs(name || ''),
+    enabled: !!name && activeTab === 'metrics',
+  });
   
   // Construir filtro a partir dos campos de filtro
   const filter = useMemo(() => {
@@ -80,6 +90,7 @@ export const CollectionPoints = () => {
     limit,
     offset: page * limit,
     filter,
+    namespace: namespaceFilter.trim() || undefined,
   });
   
   const totalPages = points ? Math.ceil(points.total / limit) : 0;
@@ -217,6 +228,17 @@ export const CollectionPoints = () => {
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+  };
+
+  const handleStartReindex = async () => {
+    if (!name) return;
+    setReindexStarting(true);
+    try {
+      await reindexApi.start(name);
+      await refetchReindexJobs();
+    } finally {
+      setReindexStarting(false);
+    }
   };
 
   if (!name) {
@@ -422,6 +444,18 @@ export const CollectionPoints = () => {
               </div>
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-2">
+                  <label className="text-sm text-gray-400">Namespace:</label>
+                  <Input
+                    placeholder="Filter by namespace"
+                    value={namespaceFilter}
+                    onChange={(e) => {
+                      setNamespaceFilter(e.target.value);
+                      setPage(0);
+                    }}
+                    className="h-8 w-32 bg-bg-secondary border-bg-tertiary text-gray-50 text-sm"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
                   <label className="text-sm text-gray-400">Limit:</label>
                   <select
                     value={limit}
@@ -591,6 +625,17 @@ export const CollectionPoints = () => {
                               <div className="text-xs text-gray-400 mb-1">ID</div>
                               <div className="font-mono text-sm text-gray-50 break-all">{point.id}</div>
                             </div>
+                            {(point.namespace != null && point.namespace !== '') && (
+                              <div className="mb-2">
+                                <div className="text-xs text-gray-400 mb-0.5">Namespace</div>
+                                <Badge variant="default" className="text-xs font-normal">{point.namespace}</Badge>
+                              </div>
+                            )}
+                            {point.ttl != null && (
+                              <div className="mb-2 text-xs text-gray-400">
+                                TTL: {point.ttl}s
+                              </div>
+                            )}
 
                             {textContent && (
                               <div className="mb-4">
@@ -740,6 +785,54 @@ export const CollectionPoints = () => {
                     </CardContent>
                   </Card>
                 </div>
+
+                {/* Reindex: Tombstones + manual reindex + jobs */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <RefreshCw className="h-5 w-5" />
+                      Reindex
+                    </CardTitle>
+                    <p className="text-sm text-gray-400 mt-1">
+                      Tombstones: {stats.tombstone_count ?? 0}. Auto-reindex runs every 30 min when tombstones exceed 20% of indexed points.
+                    </p>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={handleStartReindex}
+                      disabled={reindexStarting}
+                    >
+                      {reindexStarting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
+                      Run reindex
+                    </Button>
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-gray-400">Reindex jobs</span>
+                        <Button variant="ghost" size="sm" onClick={() => refetchReindexJobs()} className="h-7 text-xs">
+                          Refresh
+                        </Button>
+                      </div>
+                      {reindexJobsLoading ? (
+                        <Skeleton className="h-20 w-full" />
+                      ) : reindexJobs && reindexJobs.length > 0 ? (
+                        <ul className="space-y-2 text-sm">
+                          {reindexJobs.map((job) => (
+                            <li key={job.id} className="flex items-center justify-between rounded border border-bg-tertiary bg-bg-secondary/50 px-3 py-2">
+                              <span className="font-mono text-xs text-gray-400 truncate max-w-[200px]" title={job.id}>{job.id}</span>
+                              <Badge variant="default">{job.status}</Badge>
+                              <span className="text-gray-500 text-xs">{Math.round(job.progress * 100)}%</span>
+                              <span className="text-gray-500 text-xs">{format(new Date(job.started_at * 1000), 'MMM d, HH:mm')}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-sm text-gray-500">No reindex jobs yet.</p>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
 
                 {/* Tier Distribution Chart */}
                 {tierDistribution && (tierDistribution.warm > 0 || tierDistribution.cold > 0) && (

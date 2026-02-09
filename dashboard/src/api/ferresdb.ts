@@ -206,6 +206,8 @@ export const pointsApi = {
       limit?: number;
       offset?: number;
       filter?: Record<string, unknown>;
+      /** When set, restricts list to this namespace via filter { $namespace: value }. */
+      namespace?: string;
     },
   ): Promise<{
     points: Point[];
@@ -217,8 +219,12 @@ export const pointsApi = {
     const params = new URLSearchParams();
     if (options?.limit) params.append("limit", options.limit.toString());
     if (options?.offset) params.append("offset", options.offset.toString());
-    if (options?.filter)
-      params.append("filter", JSON.stringify(options.filter));
+    let filter = options?.filter;
+    if (options?.namespace != null && options.namespace !== "") {
+      filter = { ...filter, $namespace: options.namespace };
+    }
+    if (filter != null && Object.keys(filter).length > 0)
+      params.append("filter", JSON.stringify(filter));
 
     const queryString = params.toString();
     const url = `/api/v1/collections/${collection}/points${queryString ? `?${queryString}` : ""}`;
@@ -232,16 +238,30 @@ export const pointsApi = {
     });
   },
 
-  get: async (collection: string, id: string): Promise<Point> => {
-    const response = await apiClient.get(
-      `/api/v1/collections/${collection}/points/${id}`,
-    );
+  get: async (
+    collection: string,
+    id: string,
+    options?: { namespace?: string },
+  ): Promise<Point> => {
+    const params = new URLSearchParams();
+    if (options?.namespace != null && options.namespace !== "")
+      params.append("namespace", options.namespace);
+    const queryString = params.toString();
+    const url = `/api/v1/collections/${collection}/points/${encodeURIComponent(id)}${queryString ? `?${queryString}` : ""}`;
+    const response = await apiClient.get(url);
     return response.data;
   },
 
-  delete: async (collection: string, ids: string[]): Promise<void> => {
+  delete: async (
+    collection: string,
+    ids: string[],
+    options?: { namespace?: string },
+  ): Promise<void> => {
+    const body: { ids: string[]; namespace?: string } = { ids };
+    if (options?.namespace != null && options.namespace !== "")
+      body.namespace = options.namespace;
     await apiClient.delete(`/api/v1/collections/${collection}/points`, {
-      data: { ids },
+      data: body,
     });
   },
 
@@ -250,14 +270,14 @@ export const pointsApi = {
     vector: number[],
     limit: number = 10,
     filter?: Record<string, unknown>,
+    options?: { namespace?: string },
   ): Promise<SearchResult[]> => {
+    const body: Record<string, unknown> = { vector, limit, filter };
+    if (options?.namespace != null && options.namespace !== "")
+      body.namespace = options.namespace;
     const response = await apiClient.post(
       `/api/v1/collections/${collection}/search`,
-      {
-        vector,
-        limit,
-        filter,
-      },
+      body,
     );
     return response.data.results || [];
   },

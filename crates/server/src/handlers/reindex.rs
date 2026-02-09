@@ -13,12 +13,12 @@ use axum::{
     response::Json,
 };
 use serde::Serialize;
-use tracing::{info, warn, error};
+use tracing::{debug, info, warn, error};
 use uuid::Uuid;
 
 use ferres_db_core::{
     ReindexJob, ReindexStatus, ReindexStats,
-    apply_delta, build_new_index, estimate_index_size, needs_reindex,
+    apply_delta, build_new_index, estimate_index_size, needs_reindex, tombstone_ratio,
     Point,
 };
 
@@ -409,20 +409,21 @@ pub async fn list_reindex_jobs(
 
 /// Trigger an automatic reindex if tombstones exceed the threshold.
 ///
-/// Called from the delete handler after removing points. This is a
-/// fire-and-forget operation — errors are logged but not propagated.
+/// Called from the delete handler after removing points, or from the
+/// background auto-reindex worker. This is a fire-and-forget operation —
+/// errors are logged but not propagated.
 pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
     let collection_arc = match app_state.collections.get(collection_name) {
         Some(entry) => entry.value().clone(),
         None => return,
     };
 
-    let (tombstones, total) = match collection_arc.read() {
-        Ok(coll) => (coll.tombstone_count(), coll.len()),
+    let (tombstones, total_indexed) = match collection_arc.read() {
+        Ok(coll) => (coll.tombstone_count(), coll.total_indexed_len()),
         Err(_) => return,
     };
 
-    if !needs_reindex(tombstones, total) {
+    if !needs_reindex(tombstones, total_indexed) {
         return;
     }
 
@@ -431,11 +432,12 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
         return;
     }
 
+    let ratio = tombstone_ratio(tombstones, total_indexed);
     info!(
         collection = %collection_name,
         tombstones,
-        total,
-        ratio = format!("{:.1}%", (tombstones as f64 / total.max(1) as f64) * 100.0),
+        total_indexed,
+        ratio = format!("{:.1}%", ratio * 100.0),
         "auto-reindex triggered: tombstone threshold exceeded"
     );
 
@@ -475,6 +477,11 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
         if let Ok(mut j) = job_arc.write() {
             j.set_building();
         }
+        info!(
+            job_id = %job_id_bg,
+            collection = %name_bg,
+            "auto-reindex compaction started"
+        );
 
         let config_clone = config.clone();
         let snapshot_clone = snapshot_points;
@@ -490,6 +497,12 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
                 if let Ok(mut j) = job_arc.write() {
                     j.set_failed(format!("build failed: {e}"));
                 }
+                info!(
+                    job_id = %job_id_bg,
+                    collection = %name_bg,
+                    status = "failed",
+                    "auto-reindex compaction finished"
+                );
                 return;
             }
             Err(e) => {
@@ -497,6 +510,12 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
                 if let Ok(mut j) = job_arc.write() {
                     j.set_failed(format!("task panicked: {e}"));
                 }
+                info!(
+                    job_id = %job_id_bg,
+                    collection = %name_bg,
+                    status = "failed",
+                    "auto-reindex compaction finished"
+                );
                 return;
             }
         };
@@ -533,16 +552,104 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
                         estimate_index_size(count, config.dimension, config.hnsw.max_nb_connection);
                     j.set_completed();
                 }
-                info!(job_id = %job_id_bg, collection = %name_bg, "auto-reindex completed");
+                info!(
+                    job_id = %job_id_bg,
+                    collection = %name_bg,
+                    "auto-reindex completed"
+                );
+                info!(
+                    job_id = %job_id_bg,
+                    collection = %name_bg,
+                    status = "completed",
+                    "auto-reindex compaction finished"
+                );
             }
             Err(e) => {
                 warn!(job_id = %job_id_bg, error = %e, "auto-reindex swap failed");
                 if let Ok(mut j) = job_arc.write() {
-                    j.set_failed(e);
+                    j.set_failed(e.clone());
                 }
+                info!(
+                    job_id = %job_id_bg,
+                    collection = %name_bg,
+                    status = "failed",
+                    "auto-reindex compaction finished"
+                );
             }
         }
     });
+}
+
+/// Run one cycle of the auto-reindex worker: check all collections for
+/// tombstone ratio and trigger reindex when above threshold (and no job running).
+///
+/// Called from the background task in main every 30 minutes.
+pub fn run_auto_reindex_cycle(app_state: &AppState) {
+    let num_collections = app_state.collections.len();
+    info!(
+        num_collections,
+        "auto-reindex worker cycle started"
+    );
+
+    for entry in app_state.collections.iter() {
+        let name = entry.key().clone();
+        let collection_arc = entry.value().clone();
+
+        let (tombstone_count, total_indexed) = match collection_arc.read() {
+            Ok(coll) => (coll.tombstone_count(), coll.total_indexed_len()),
+            Err(_) => continue,
+        };
+
+        if total_indexed == 0 {
+            continue;
+        }
+
+        if !needs_reindex(tombstone_count, total_indexed) {
+            continue;
+        }
+
+        if has_running_job(app_state, &name) {
+            debug!(
+                collection = %name,
+                "reindex already running, skipping"
+            );
+            continue;
+        }
+
+        info!(
+            collection = %name,
+            "auto-reindex triggered by background worker"
+        );
+        maybe_auto_reindex(app_state, &name);
+    }
+
+    info!("auto-reindex worker cycle finished");
+}
+
+/// Run one cycle of the TTL vacuum worker: remove expired points from all collections.
+///
+/// Called from the background task in main every 60 seconds.
+pub fn run_auto_vacuum_cycle(app_state: &AppState) {
+    let mut total_removed = 0usize;
+    for entry in app_state.collections.iter() {
+        let name = entry.key().clone();
+        let collection_arc = entry.value().clone();
+        let removed = match collection_arc.write() {
+            Ok(mut coll) => coll.vacuum_expired_points(),
+            Err(_) => continue,
+        };
+        if removed > 0 {
+            total_removed += removed;
+            info!(
+                collection = %name,
+                removed,
+                "TTL vacuum removed expired points"
+            );
+        }
+    }
+    if total_removed > 0 {
+        info!(total_removed, "auto-vacuum cycle finished");
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────
