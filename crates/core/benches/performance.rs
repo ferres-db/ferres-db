@@ -336,6 +336,8 @@ fn benchmark_sq8(c: &mut Criterion) {
                     vector,
                     metadata: serde_json::Value::Null,
                     created_at: 0,
+                    namespace: None,
+                    expires_at: None,
                 }
             })
             .collect();
@@ -406,7 +408,7 @@ fn benchmark_sq8(c: &mut Criterion) {
             |b, queries| {
                 b.iter(|| {
                     for q in queries {
-                        let _ = black_box(normal_index.search(q, k).unwrap());
+                        let _ = black_box(normal_index.search(q, k, None).unwrap());
                     }
                 });
             },
@@ -419,7 +421,7 @@ fn benchmark_sq8(c: &mut Criterion) {
             |b, queries| {
                 b.iter(|| {
                     for q in queries {
-                        let _ = black_box(sq_index.search(q, k).unwrap());
+                        let _ = black_box(sq_index.search(q, k, None).unwrap());
                     }
                 });
             },
@@ -430,8 +432,8 @@ fn benchmark_sq8(c: &mut Criterion) {
         let mut total_overlap = 0usize;
         let mut total_possible = 0usize;
         for q in &queries {
-            let normal_results = normal_index.search(q, k).unwrap();
-            let sq_results = sq_index.search(q, k).unwrap();
+            let normal_results = normal_index.search(q, k, None).unwrap();
+            let sq_results = sq_index.search(q, k, None).unwrap();
 
             let normal_ids: std::collections::HashSet<&str> =
                 normal_results.iter().map(|r| r.0.as_str()).collect();

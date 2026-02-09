@@ -2,6 +2,12 @@
 
 Referência dos endpoints REST do servidor FerresDB. Base URL de exemplo: `http://localhost:8080`.
 
+## Requisitos de CPU para performance máxima
+
+Para melhor throughput em buscas vetoriais, o servidor utiliza kernels SIMD quando disponíveis. Recomenda-se CPU com suporte a **AVX2** ou, na falta, **SSE4.1**, para performance máxima nas operações de distância (Euclidean, DotProduct, Cosine) e no re-ranking com quantização SQ8. Em CPUs sem essas instruções, o código usa implementação escalar (comportamento correto, com performance menor). A detecção é automática em tempo de execução; não é necessária configuração.
+
+---
+
 ## Convenções
 
 - **Content-Type:** `application/json` para requests com body.
@@ -457,11 +463,13 @@ Insere ou atualiza pontos em lote (até 1000 pontos por request).
 
 Cada elemento de `points`:
 
-| Campo      | Tipo   | Obrigatório | Descrição                                             |
-| ---------- | ------ | ----------- | ----------------------------------------------------- |
-| `id`       | string | sim         | ID único do ponto                                     |
-| `vector`   | array  | sim         | Array de números (float), dimensão igual à da coleção |
-| `metadata` | object | não         | JSON arbitrário (default: `{}`)                       |
+| Campo       | Tipo   | Obrigatório | Descrição                                                                                        |
+| ----------- | ------ | ----------- | ------------------------------------------------------------------------------------------------ |
+| `id`        | string | sim         | ID único do ponto                                                                                |
+| `vector`    | array  | sim         | Array de números (float), dimensão igual à da coleção                                            |
+| `metadata`  | object | não         | JSON arbitrário (default: `{}`)                                                                  |
+| `namespace` | string | não         | Namespace lógico (multitenancy). Quando omitido, o ponto não tem namespace.                      |
+| `ttl`       | number | não         | TTL em segundos; se presente, o ponto expira após esse tempo e é removido pelo worker de vacuum. |
 
 **Schema de request:**
 
@@ -471,7 +479,8 @@ Cada elemento de `points`:
     {
       "id": "doc-1",
       "vector": [0.1, 0.2, -0.1],
-      "metadata": { "text": "Conteúdo do documento" }
+      "metadata": { "text": "Conteúdo do documento" },
+      "ttl": 3600
     }
   ]
 }
@@ -508,9 +517,15 @@ Remove pontos pelo ID.
 
 **Request body:**
 
+| Campo       | Tipo   | Obrigatório | Descrição                                                                   |
+| ----------- | ------ | ----------- | --------------------------------------------------------------------------- |
+| `ids`       | array  | sim         | Lista de IDs dos pontos a remover                                           |
+| `namespace` | string | não         | Quando informado, remove apenas pontos desse namespace (para os ids dados). |
+
 ```json
 {
-  "ids": ["doc-1", "doc-2"]
+  "ids": ["doc-1", "doc-2"],
+  "namespace": "tenant-a"
 }
 ```
 
@@ -540,7 +555,13 @@ Retorna um ponto pelo ID.
 
 **Path:** `name` — nome da coleção; `id` — ID do ponto.
 
-**Resposta:** `200 OK`
+**Query params:**
+
+| Campo       | Tipo   | Descrição                                                              |
+| ----------- | ------ | ---------------------------------------------------------------------- |
+| `namespace` | string | Quando o ponto foi inserido com namespace, informe-o para localização. |
+
+**Resposta:** `200 OK`. Inclui o campo `namespace` quando o ponto tiver namespace.
 
 **Schema de resposta:**
 
@@ -549,7 +570,8 @@ Retorna um ponto pelo ID.
   "id": "doc-1",
   "vector": [0.1, 0.2, -0.1],
   "metadata": { "text": "Conteúdo" },
-  "created_at": 1707123456
+  "created_at": 1707123456,
+  "namespace": "tenant-a"
 }
 ```
 
@@ -574,6 +596,7 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 | `vector`    | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                                      |
 | `limit`     | number | sim         | Número máximo de resultados (> 0)                                                  |
 | `filter`    | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo.          |
+| `namespace` | string | não         | Restringe resultados a este namespace (multitenancy).                              |
 | `budget_ms` | number | não         | Orçamento máximo em ms. Se a estimativa exceder, retorna 422 sem executar a busca. |
 
 **Schema de request:**
@@ -589,7 +612,7 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 
 **Resposta:** `200 OK`
 
-**Schema de resposta:**
+**Schema de resposta:** cada resultado pode incluir `namespace` quando o ponto tiver namespace.
 
 ```json
 {
@@ -597,7 +620,8 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
     {
       "id": "doc-1",
       "score": 0.92,
-      "metadata": { "text": "Conteúdo" }
+      "metadata": { "text": "Conteúdo" },
+      "namespace": "tenant-a"
     }
   ],
   "took_ms": 2
@@ -609,10 +633,12 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search \
   -H "Content-Type: application/json" \
-  -d '{"vector":[0.1,0.2,-0.1],"limit":5}'
+  -d '{"vector":[0.1,0.2,-0.1],"limit":5,"namespace":"tenant-a"}'
 ```
 
 #### Filtro de metadata
+
+Quando o campo `filter` é informado, a busca utiliza **pre-filtering nativo no HNSW**: o filtro é aplicado durante a exploração do grafo (não após a busca), garantindo maior precisão e consistência no número de resultados retornados (até `limit` que satisfazem o filtro), sem depender de multiplicador fixo.
 
 O campo `filter` é um objeto JSON. Cada chave é um campo de metadata; o valor pode ser:
 
@@ -621,6 +647,9 @@ O campo `filter` é um objeto JSON. Cada chave é um campo de metadata; o valor 
   - `$eq`, `$ne`: valor exato (qualquer tipo JSON).
   - `$in`: array de valores permitidos.
   - `$gt`, `$lt`, `$gte`, `$lte`: comparação numérica (o campo no metadata deve ser número).
+- **Chave reservada `$namespace`** — restringe resultados ao namespace indicado (multitenancy): `{"$namespace": "tenant-id"}`. Pode ser combinada com outras condições.
+
+Alternativamente, use o parâmetro de primeiro nível `namespace` no body da busca em vez de `$namespace` no filter.
 
 Múltiplos campos são combinados com **AND**. Exemplo:
 
@@ -654,6 +683,7 @@ Busca híbrida: combina resultados vetoriais e BM25 (keyword) via estratégia de
 | `alpha`        | number | não         | Peso da busca vetorial 0..1 (default: 0.5). (1 - alpha) = peso keyword. Usado com `fusion: "weighted"`               |
 | `fusion`       | string | não         | Estratégia de fusão: `"weighted"` (default) ou `"rrf"`                                                               |
 | `rrf_k`        | number | não         | Constante k para RRF (default: 60). Apenas usado quando `fusion: "rrf"`. Valores maiores suavizam diferenças de rank |
+| `namespace`    | string | não         | Restringe resultados a este namespace (multitenancy)                                                                 |
 
 **Estratégias de fusão:**
 
@@ -723,11 +753,12 @@ Busca vetorial com explicação detalhada de cada resultado. Retorna **por que**
 
 **Request body:**
 
-| Campo    | Tipo   | Obrigatório | Descrição                                                                |
-| -------- | ------ | ----------- | ------------------------------------------------------------------------ |
-| `vector` | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                            |
-| `limit`  | number | sim         | Número máximo de resultados (> 0)                                        |
-| `filter` | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) acima. |
+| Campo       | Tipo   | Obrigatório | Descrição                                                                |
+| ----------- | ------ | ----------- | ------------------------------------------------------------------------ |
+| `vector`    | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                            |
+| `limit`     | number | sim         | Número máximo de resultados (> 0)                                        |
+| `filter`    | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) acima. |
+| `namespace` | string | não         | Restringe resultados a este namespace (multitenancy)                     |
 
 **Schema de request:**
 
@@ -735,7 +766,8 @@ Busca vetorial com explicação detalhada de cada resultado. Retorna **por que**
 {
   "vector": [0.1, 0.2, -0.1],
   "limit": 5,
-  "filter": { "category": "tech" }
+  "filter": { "category": "tech" },
+  "namespace": "tenant-a"
 }
 ```
 
@@ -818,6 +850,7 @@ Estima o custo de uma busca vetorial **antes de executá-la**. Retorna latência
 | ----------------- | ------- | ----------- | ---------------------------------------------------------------- |
 | `limit`           | number  | sim         | Número de resultados que serão solicitados na busca              |
 | `filter`          | object  | não         | Filtro de metadata (mesmo formato do endpoint de busca)          |
+| `namespace`       | string  | não         | Restringe a estimativa ao cenário com filtro por este namespace  |
 | `include_history` | boolean | não         | Se `true`, inclui dados históricos de latência (p50/p95/p99/avg) |
 
 **Schema de request:**
@@ -911,6 +944,8 @@ Retorna a página HTML do dashboard (single-file com Alpine.js, Tailwind CDN e C
 ## Estatísticas e analytics
 
 Os endpoints de analytics leem o arquivo `queries.log` (JSONL) e mantêm cache em memória por 1h.
+
+**Auto-reindex em background:** Um worker interno percorre todas as coleções a cada 30 minutos e, quando o rácio de tombstones (`tombstone_count / total_indexed`) excede 20%, dispara um reindex automático (mesma lógica de swap de índice dos endpoints de reindex). O estado do worker não é exposto em nenhum endpoint de stats; a observabilidade é feita via logs estruturados (`tracing`): início e fim de cada ciclo do worker e início e fim de cada compactação.
 
 ### GET /api/v1/stats/global
 
@@ -1660,9 +1695,9 @@ O servidor REST continua funcionando normalmente mesmo sem a feature `grpc`.
 ### Portas
 
 | Protocolo | Porta padrão | Configuração         |
-|-----------|-------------|----------------------|
-| REST/HTTP | 8080        | `PORT` env ou config |
-| gRPC      | 50051       | `GRPC_PORT` env      |
+| --------- | ------------ | -------------------- |
+| REST/HTTP | 8080         | `PORT` env ou config |
+| gRPC      | 50051        | `GRPC_PORT` env      |
 
 Ambos os servidores rodam simultaneamente quando a feature está habilitada.
 
@@ -1699,20 +1734,20 @@ service FerresDB {
 
 ### Mapeamento REST → gRPC
 
-| REST Endpoint                                       | gRPC RPC          |
-|-----------------------------------------------------|-------------------|
-| `POST /api/v1/collections`                          | `CreateCollection`|
-| `GET  /api/v1/collections`                          | `ListCollections` |
-| `GET  /api/v1/collections/{name}`                   | `GetCollection`   |
-| `DELETE /api/v1/collections/{name}`                  | `DeleteCollection`|
-| `POST /api/v1/collections/{name}/points`             | `UpsertPoints`    |
-| `DELETE /api/v1/collections/{name}/points`           | `DeletePoints`    |
-| `GET  /api/v1/collections/{name}/points/{id}`        | `GetPoint`        |
-| `GET  /api/v1/collections/{name}/points`             | `ListPoints`      |
-| `POST /api/v1/collections/{name}/search`             | `Search`          |
-| `POST /api/v1/collections/{name}/search/hybrid`      | `HybridSearch`    |
-| `POST /api/v1/collections/{name}/search/explain`     | `ExplainSearch`   |
-| WebSocket streaming                                  | `StreamUpsert` / `StreamSearch` |
+| REST Endpoint                                    | gRPC RPC                        |
+| ------------------------------------------------ | ------------------------------- |
+| `POST /api/v1/collections`                       | `CreateCollection`              |
+| `GET  /api/v1/collections`                       | `ListCollections`               |
+| `GET  /api/v1/collections/{name}`                | `GetCollection`                 |
+| `DELETE /api/v1/collections/{name}`              | `DeleteCollection`              |
+| `POST /api/v1/collections/{name}/points`         | `UpsertPoints`                  |
+| `DELETE /api/v1/collections/{name}/points`       | `DeletePoints`                  |
+| `GET  /api/v1/collections/{name}/points/{id}`    | `GetPoint`                      |
+| `GET  /api/v1/collections/{name}/points`         | `ListPoints`                    |
+| `POST /api/v1/collections/{name}/search`         | `Search`                        |
+| `POST /api/v1/collections/{name}/search/hybrid`  | `HybridSearch`                  |
+| `POST /api/v1/collections/{name}/search/explain` | `ExplainSearch`                 |
+| WebSocket streaming                              | `StreamUpsert` / `StreamSearch` |
 
 ### Diferenças em relação à API REST
 

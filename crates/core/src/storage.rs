@@ -671,7 +671,7 @@ mod tests {
 
         // Validate search still works after reload
         let query = collection.get("pt-0").unwrap().vector.clone();
-        let results = loaded.search(&query, 5).unwrap();
+        let results = loaded.search(&query, 5, None).unwrap();
         assert_eq!(results.len(), 5);
         assert_eq!(results[0].0, "pt-0");
 

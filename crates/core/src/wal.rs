@@ -964,7 +964,7 @@ mod tests {
 
         // Valida que busca ainda funciona após recovery
         let query = vec![1.0, 0.0, 0.0];
-        let results = recovered.search(&query, 5).unwrap();
+        let results = recovered.search(&query, 5, None).unwrap();
         assert!(!results.is_empty());
         // O ponto mais próximo deve ser "a"
         assert_eq!(results[0].0, "a");
@@ -1096,7 +1096,7 @@ mod tests {
         
         // Valida que busca funciona corretamente após recovery
         let query = vec![0.0, 0.0, 0.0];
-        let results = recovered.search(&query, 5).unwrap();
+        let results = recovered.search(&query, 5, None).unwrap();
         
         // Deve encontrar os pontos próximos à origem
         assert_eq!(results.len(), 2);

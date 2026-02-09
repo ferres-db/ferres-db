@@ -332,7 +332,10 @@ impl FerresDb for FerresGrpcService {
                 };
 
                 match Point::new(input.id.clone(), input.vector.clone(), metadata) {
-                    Ok(point) => points.push(point),
+                    Ok(mut point) => {
+                        point.namespace = input.namespace.clone();
+                        points.push(point);
+                    }
                     Err(e) => {
                         failed.push(FailedPoint {
                             id: input.id.clone(),
@@ -383,11 +386,15 @@ impl FerresDb for FerresGrpcService {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
 
+        let keys: Vec<String> = req.ids
+            .iter()
+            .map(|id| Point::storage_id_from_parts(req.namespace.as_deref(), id))
+            .collect();
         let deleted = {
             let mut coll = collection_arc
                 .write()
                 .map_err(|e| Status::internal(format!("lock error: {e}")))?;
-            coll.delete_points_batch(&req.ids)
+            coll.delete_points_batch(&keys)
                 .map_err(|e| Status::internal(e.to_string()))?
         };
 
@@ -414,8 +421,9 @@ impl FerresDb for FerresGrpcService {
             .read()
             .map_err(|e| Status::internal(format!("lock error: {e}")))?;
 
+        let key = Point::storage_id_from_parts(req.namespace.as_deref(), &req.id);
         let point = coll
-            .get(&req.id)
+            .get(&key)
             .ok_or_else(|| Status::not_found(format!("point '{}' not found", req.id)))?;
 
         let metadata_json = serde_json::to_string(&point.metadata)
@@ -426,6 +434,7 @@ impl FerresDb for FerresGrpcService {
             vector: point.vector.clone(),
             metadata_json,
             created_at: point.created_at,
+            namespace: point.namespace.clone(),
         }))
     }
 
@@ -458,6 +467,7 @@ impl FerresDb for FerresGrpcService {
                 metadata_json: serde_json::to_string(&p.metadata)
                     .unwrap_or_else(|_| "null".to_string()),
                 created_at: p.created_at,
+                namespace: p.namespace.clone(),
             })
             .collect();
 
@@ -515,43 +525,48 @@ impl FerresDb for FerresGrpcService {
         coll.validate_dimension(&req.vector)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let raw = coll
-            .search(&req.vector, req.limit as usize)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let mut results: Vec<SearchResult> = raw
-            .into_iter()
-            .filter_map(|(id, score)| {
-                let point = coll.get(&id)?;
-                Some(SearchResult {
-                    id,
-                    score,
-                    metadata_json: serde_json::to_string(&point.metadata)
-                        .unwrap_or_else(|_| "null".to_string()),
-                })
-            })
-            .collect();
-
-        // Drop lock antes de filtrar
-        drop(coll);
-        drop(collection_arc);
-
-        // Aplica filtro
-        if !req.filter_json.is_empty() {
+        let mut filter = if req.filter_json.is_empty() {
+            MetadataFilter::empty()
+        } else {
             let filter_value: serde_json::Value =
                 serde_json::from_str(&req.filter_json).map_err(|e| {
                     Status::invalid_argument(format!("invalid filter JSON: {e}"))
                 })?;
-            let filter = MetadataFilter::from_json(filter_value)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
-            if !filter.is_empty() {
-                results.retain(|r| {
-                    let meta: serde_json::Value =
-                        serde_json::from_str(&r.metadata_json).unwrap_or(serde_json::Value::Null);
-                    filter.matches(&meta)
-                });
-            }
+            MetadataFilter::from_json(filter_value)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?
+        };
+        if let Some(ref ns) = req.namespace {
+            filter.namespace = Some(ns.clone());
         }
+        let raw = if filter.is_empty() {
+            coll.search(&req.vector, req.limit as usize, None)
+                .map_err(|e| Status::internal(e.to_string()))?
+        } else {
+            let predicate = |id: &str| {
+                coll.get(id)
+                    .map(|p| filter.matches_point(&p))
+                    .unwrap_or(false)
+            };
+            coll.search(&req.vector, req.limit as usize, Some(&predicate))
+                .map_err(|e| Status::internal(e.to_string()))?
+        };
+
+        let results: Vec<SearchResult> = raw
+            .into_iter()
+            .filter_map(|(storage_id, score)| {
+                let point = coll.get(&storage_id)?;
+                Some(SearchResult {
+                    id: point.id.clone(),
+                    score,
+                    metadata_json: serde_json::to_string(&point.metadata)
+                        .unwrap_or_else(|_| "null".to_string()),
+                    namespace: point.namespace.clone(),
+                })
+            })
+            .collect();
+
+        drop(coll);
+        drop(collection_arc);
 
         let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
@@ -632,13 +647,19 @@ impl FerresDb for FerresGrpcService {
 
         let results: Vec<SearchResult> = hybrid_results
             .into_iter()
-            .filter_map(|(id, score)| {
-                let point = coll.get(&id)?;
+            .filter_map(|(storage_id, score)| {
+                let point = coll.get(&storage_id)?;
+                if let Some(ref ns) = req.namespace {
+                    if point.namespace.as_deref() != Some(ns.as_str()) {
+                        return None;
+                    }
+                }
                 Some(SearchResult {
-                    id,
+                    id: point.id.clone(),
                     score,
                     metadata_json: serde_json::to_string(&point.metadata)
                         .unwrap_or_else(|_| "null".to_string()),
+                    namespace: point.namespace.clone(),
                 })
             })
             .collect();
@@ -671,15 +692,19 @@ impl FerresDb for FerresGrpcService {
         let req = request.into_inner();
         let start = Instant::now();
 
-        // Parse do filtro
-        let filter = if !req.filter_json.is_empty() {
+        // Parse do filtro e merge de namespace
+        let mut filter = if !req.filter_json.is_empty() {
             let fv: serde_json::Value = serde_json::from_str(&req.filter_json)
                 .map_err(|e| Status::invalid_argument(format!("invalid filter JSON: {e}")))?;
             Some(MetadataFilter::from_json(fv)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?)
         } else {
-            None
+            Some(MetadataFilter::empty())
         };
+        if let (Some(ref mut f), Some(ref ns)) = (filter.as_mut(), &req.namespace) {
+            f.namespace = Some(ns.clone());
+        }
+        let filter = filter.and_then(|f| if f.is_empty() { None } else { Some(f) });
 
         let collection_arc = self
             .state
@@ -852,7 +877,16 @@ fn do_upsert_sync(
             })?
         };
         match Point::new(input.id.clone(), input.vector.clone(), metadata) {
-            Ok(point) => points.push(point),
+            Ok(mut point) => {
+                if let Some(ttl_seconds) = input.ttl_seconds {
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system clock before UNIX epoch")
+                        .as_secs();
+                    point.expires_at = Some(now_secs.saturating_add(ttl_seconds));
+                }
+                points.push(point);
+            }
             Err(e) => failed.push(FailedPoint {
                 id: input.id.clone(),
                 reason: e.to_string(),
@@ -902,40 +936,46 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
     coll.validate_dimension(&req.vector)
         .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-    let raw = coll
-        .search(&req.vector, req.limit as usize)
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let mut filter = if req.filter_json.is_empty() {
+        MetadataFilter::empty()
+    } else {
+        let fv: serde_json::Value = serde_json::from_str(&req.filter_json)
+            .map_err(|e| Status::invalid_argument(format!("invalid filter: {e}")))?;
+        MetadataFilter::from_json(fv)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?
+    };
+    if let Some(ref ns) = req.namespace {
+        filter.namespace = Some(ns.clone());
+    }
+    let raw = if filter.is_empty() {
+        coll.search(&req.vector, req.limit as usize, None)
+            .map_err(|e| Status::internal(e.to_string()))?
+    } else {
+        let predicate = |id: &str| {
+            coll.get(id)
+                .map(|p| filter.matches_point(&p))
+                .unwrap_or(false)
+        };
+        coll.search(&req.vector, req.limit as usize, Some(&predicate))
+            .map_err(|e| Status::internal(e.to_string()))?
+    };
 
-    let mut results: Vec<SearchResult> = raw
+    let results: Vec<SearchResult> = raw
         .into_iter()
-        .filter_map(|(id, score)| {
-            let point = coll.get(&id)?;
+        .filter_map(|(storage_id, score)| {
+            let point = coll.get(&storage_id)?;
             Some(SearchResult {
-                id,
+                id: point.id.clone(),
                 score,
                 metadata_json: serde_json::to_string(&point.metadata)
                     .unwrap_or_else(|_| "null".to_string()),
+                namespace: point.namespace.clone(),
             })
         })
         .collect();
 
-    // Drop lock antes de filtrar
     drop(coll);
     drop(collection_arc);
-
-    if !req.filter_json.is_empty() {
-        let fv: serde_json::Value = serde_json::from_str(&req.filter_json)
-            .map_err(|e| Status::invalid_argument(format!("invalid filter: {e}")))?;
-        let filter = MetadataFilter::from_json(fv)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        if !filter.is_empty() {
-            results.retain(|r| {
-                let meta: serde_json::Value =
-                    serde_json::from_str(&r.metadata_json).unwrap_or(serde_json::Value::Null);
-                filter.matches(&meta)
-            });
-        }
-    }
 
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
