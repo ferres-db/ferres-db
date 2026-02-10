@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Notify};
 use tracing::{info, warn};
 
-use ferres_db_core::{Collection, FileStorage, ReindexJob, SearchResult, StorageCircuitBreaker};
+use ferres_db_core::{
+    list_restore_points, recover_collection_to_timestamp, Collection, FileStorage, ReindexJob,
+    SearchResult, StorageCircuitBreaker, Wal,
+};
 
 use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
@@ -196,6 +199,12 @@ pub struct ServerConfig {
     /// Secret Access Key para S3 (opcional; pode usar AWS_SECRET_ACCESS_KEY). Env: FERRESDB_S3_SECRET_ACCESS_KEY.
     #[serde(skip_serializing)]
     pub s3_secret_access_key: Option<String>,
+    /// Caminho para modelo ONNX de Cross-Encoder (re-ranking). Requer build com feature `rerank`. Env: FERRESDB_RERANK_MODEL.
+    #[serde(skip_serializing)]
+    pub rerank_model_path: Option<PathBuf>,
+    /// Dimensão do vetor esperada pelo modelo de rerank (default: 384). Env: FERRESDB_RERANK_DIMENSION.
+    #[serde(skip_serializing)]
+    pub rerank_dimension: Option<usize>,
 }
 
 fn default_host() -> String {
@@ -298,6 +307,16 @@ impl ServerConfig {
                 config.s3_secret_access_key = Some(v.trim().to_string());
             }
         }
+        if let Ok(v) = std::env::var("FERRESDB_RERANK_MODEL") {
+            if !v.trim().is_empty() {
+                config.rerank_model_path = Some(PathBuf::from(v.trim()));
+            }
+        }
+        if let Ok(v) = std::env::var("FERRESDB_RERANK_DIMENSION") {
+            if let Ok(d) = v.trim().parse::<usize>() {
+                config.rerank_dimension = Some(d);
+            }
+        }
 
         // --replica-of <ADDR> (override env)
         let args: Vec<String> = std::env::args().collect();
@@ -335,6 +354,8 @@ impl Default for ServerConfig {
             s3_bucket: None,
             s3_access_key_id: None,
             s3_secret_access_key: None,
+            rerank_model_path: None,
+            rerank_dimension: None,
         }
     }
 }
@@ -462,6 +483,8 @@ pub struct AppState {
     pub max_ws_connections: u64,
     /// Active and completed reindex jobs, keyed by job ID.
     pub reindex_jobs: Arc<DashMap<String, Arc<RwLock<ReindexJob>>>>,
+    /// Cross-Encoder re-ranker (ONNX). None se não configurado ou build sem feature rerank.
+    pub reranker: Option<Arc<dyn ferres_db_core::Reranker>>,
     /// Circuit breaker for storage I/O (disk full, repeated failures).
     pub storage_circuit_breaker: Arc<StorageCircuitBreaker>,
     /// Eventos de ingestão (timestamp_sec, points_count) para séries temporais (últimos 10 min).
@@ -479,6 +502,7 @@ impl AppState {
         api_key_store: Option<Arc<ApiKeyStore>>,
         user_store: Option<Arc<UserStore>>,
         cloud_settings_store: Option<Arc<CloudSettingsStore>>,
+        reranker: Option<Arc<dyn ferres_db_core::Reranker>>,
     ) -> Result<Self, ferres_db_core::FerresError> {
         info!(
             storage_path = %config.storage_path.display(),
@@ -603,6 +627,7 @@ impl AppState {
             ws_connections_active: Arc::new(AtomicU64::new(0)),
             max_ws_connections: 100,
             reindex_jobs: Arc::new(DashMap::new()),
+            reranker,
             storage_circuit_breaker: Arc::new(StorageCircuitBreaker::new()),
             ingest_events: Arc::new(RwLock::new(Vec::with_capacity(2000))),
         })
@@ -811,6 +836,102 @@ impl AppState {
         }
 
         info!(saved = saved_count, "saved all collections during shutdown");
+        Ok(())
+    }
+
+    /// Lista pontos de restauração (PITR) para uma coleção ou todas.
+    /// Retorna mapa nome_coleção -> RestorePoints (last_snapshot_timestamp + wal_timestamps).
+    pub fn list_restore_points(
+        &self,
+        collection_name: Option<&str>,
+    ) -> Result<std::collections::HashMap<String, ferres_db_core::RestorePoints>, ferres_db_core::FerresError>
+    {
+        let collections_dir = self.config.storage_path.join("collections");
+        let mut out = std::collections::HashMap::new();
+        if !collections_dir.exists() {
+            return Ok(out);
+        }
+        for entry in std::fs::read_dir(&collections_dir).map_err(|e| {
+            ferres_db_core::FerresError::Storage(format!("read dir: {e}"))
+        })? {
+            let entry = entry.map_err(|e| ferres_db_core::FerresError::Storage(format!("read dir entry: {e}")))?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if collection_name.map(|n| n == name).unwrap_or(true) && path.is_dir() {
+                if path.join("config.json").exists() {
+                    match list_restore_points(&path) {
+                        Ok(rp) => {
+                            out.insert(name, rp);
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Point-in-Time Recovery: restaura uma coleção ao estado no timestamp dado.
+    /// Carrega o último snapshot, reaplica o WAL até o timestamp, substitui a coleção em memória,
+    /// persiste no disco e trunca o WAL.
+    pub fn restore_collection_to_timestamp(
+        &self,
+        name: &str,
+        target_timestamp: u64,
+    ) -> Result<(), ferres_db_core::FerresError> {
+        let collections_dir = self.config.storage_path.join("collections");
+        let collection_dir = collections_dir.join(name);
+        if !collection_dir.join("config.json").exists() {
+            return Err(ferres_db_core::FerresError::CollectionNotFound(name.to_string()));
+        }
+
+        let collection = match self.storage_circuit_breaker.call(|| {
+            recover_collection_to_timestamp(&collection_dir, target_timestamp)
+        })? {
+            Some(c) => c,
+            None => return Err(ferres_db_core::FerresError::CollectionNotFound(name.to_string())),
+        };
+
+        {
+            let guard = self.collections.get(name).ok_or_else(|| {
+                ferres_db_core::FerresError::CollectionNotFound(name.to_string())
+            })?;
+            let mut coll_guard = guard.write().map_err(|e| {
+                ferres_db_core::FerresError::Storage(format!("lock: {e}"))
+            })?;
+            *coll_guard = collection;
+        }
+
+        let guard = self.collections.get(name).ok_or_else(|| {
+            ferres_db_core::FerresError::CollectionNotFound(name.to_string())
+        })?;
+        let collection = guard.read().map_err(|e| {
+            ferres_db_core::FerresError::Storage(format!("lock: {e}"))
+        })?;
+        self.storage_circuit_breaker.call(|| {
+            FileStorage::save_collection(
+                &collection,
+                &collection_dir,
+                self.config.binary_snapshot,
+                self.config.namespace_physical_isolation,
+            )
+        })?;
+        collection.mark_clean();
+        drop(collection);
+        drop(guard);
+
+        let mut wal = Wal::open(
+            &collection_dir,
+            Wal::DEFAULT_SNAPSHOT_THRESHOLD,
+            self.config.wal_compression,
+        )?;
+        wal.truncate_after_snapshot()?;
+
+        info!(
+            collection = %name,
+            target_timestamp,
+            "PITR restore completed"
+        );
         Ok(())
     }
 }

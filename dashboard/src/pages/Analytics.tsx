@@ -199,6 +199,26 @@ export const Analytics = () => {
             )}
           </CardContent>
         </Card>
+
+        <Card className="overflow-hidden">
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium text-gray-400">Re-ranking Overhead (ms)</CardTitle>
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
+              <BarChart3 className="h-4 w-4 text-violet-500" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <Skeleton className="h-8 w-16 rounded" />
+            ) : data?.rerank_overhead_ms_avg != null ? (
+              <p className="text-2xl font-semibold tabular-nums text-gray-50">
+                {Number(data.rerank_overhead_ms_avg).toFixed(2)}
+              </p>
+            ) : (
+              <p className="text-sm text-gray-400">No rerank queries yet</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* Top Namespaces by Storage */}

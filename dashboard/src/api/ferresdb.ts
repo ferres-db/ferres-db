@@ -3,6 +3,7 @@ import type {
   Collection,
   Point,
   SearchResult,
+  SearchPointsResponse,
   GlobalStats,
   QueryEntry,
   CollectionStats,
@@ -275,18 +276,25 @@ export const pointsApi = {
     vector: number[],
     limit: number = 10,
     filter?: Record<string, unknown>,
-    options?: { namespace?: string; vector_field?: string },
-  ): Promise<SearchResult[]> => {
+    options?: { namespace?: string; vector_field?: string; rerank?: boolean },
+  ): Promise<SearchPointsResponse> => {
     const body: Record<string, unknown> = { vector, limit, filter };
     if (options?.namespace != null && options.namespace !== "")
       body.namespace = options.namespace;
     if (options?.vector_field != null && options.vector_field !== "")
       body.vector_field = options.vector_field;
+    if (options?.rerank === true) body.rerank = true;
     const response = await apiClient.post(
       `/api/v1/collections/${collection}/search`,
       body,
     );
-    return response.data.results || [];
+    const data = response.data || {};
+    return {
+      results: data.results || [],
+      took_ms: data.took_ms,
+      query_id: data.query_id,
+      rerank_ms: data.rerank_ms,
+    };
   },
 
   hybridSearch: async (
@@ -382,10 +390,27 @@ export const keysApi = {
     return Array.isArray(response.data) ? response.data : [];
   },
 
-  create: async (name: string): Promise<CreateApiKeyResponse> => {
+  create: async (
+    name: string,
+    allowed_namespaces?: string[] | null,
+  ): Promise<CreateApiKeyResponse> => {
     const response = await apiClient.post<CreateApiKeyResponse>(
       "/api/v1/keys",
-      { name: name.trim() },
+      {
+        name: name.trim(),
+        ...(allowed_namespaces != null && { allowed_namespaces }),
+      },
+    );
+    return response.data;
+  },
+
+  updateNamespaces: async (
+    id: number,
+    allowed_namespaces: string[] | null,
+  ): Promise<{ updated: boolean; id: number }> => {
+    const response = await apiClient.put<{ updated: boolean; id: number }>(
+      `/api/v1/keys/${id}`,
+      { allowed_namespaces },
     );
     return response.data;
   },
@@ -488,7 +513,9 @@ export interface CloudSettings {
 
 export const settingsApi = {
   getCloud: async (): Promise<CloudSettings> => {
-    const response = await apiClient.get<CloudSettings>("/api/v1/admin/settings/cloud");
+    const response = await apiClient.get<CloudSettings>(
+      "/api/v1/admin/settings/cloud",
+    );
     return response.data;
   },
 
@@ -499,13 +526,16 @@ export const settingsApi = {
     access_key_id?: string | null;
     secret_access_key?: string | null;
   }): Promise<{ ok: boolean }> => {
-    const response = await apiClient.put<{ ok: boolean }>("/api/v1/admin/settings/cloud", body);
+    const response = await apiClient.put<{ ok: boolean }>(
+      "/api/v1/admin/settings/cloud",
+      body,
+    );
     return response.data;
   },
 
   testS3: async (): Promise<{ ok: boolean; message?: string }> => {
     const response = await apiClient.post<{ ok: boolean; message?: string }>(
-      "/api/v1/admin/settings/test-s3"
+      "/api/v1/admin/settings/test-s3",
     );
     return response.data;
   },
@@ -527,6 +557,36 @@ export const backupApi = {
       size_bytes: number;
       region?: string;
     }>("/api/v1/admin/backup");
+    return response.data;
+  },
+};
+
+// Restore API (Admin only — Point-in-Time Recovery)
+export interface CollectionRestorePoints {
+  last_snapshot_timestamp: number;
+  wal_timestamps: number[];
+}
+
+export const restoreApi = {
+  getRestorePoints: async (
+    collection?: string,
+  ): Promise<Record<string, CollectionRestorePoints>> => {
+    const params = collection ? { collection } : {};
+    const response = await apiClient.get<{
+      collections: Record<string, CollectionRestorePoints>;
+    }>("/api/v1/admin/restore/points", { params });
+    return response.data.collections ?? {};
+  },
+
+  restoreToTimestamp: async (
+    timestamp: number,
+    collection?: string,
+  ): Promise<{ ok: boolean; restored: string[]; errors: string[] }> => {
+    const response = await apiClient.post<{
+      ok: boolean;
+      restored: string[];
+      errors: string[];
+    }>("/api/v1/admin/restore", { timestamp, collection: collection ?? null });
     return response.data;
   },
 };

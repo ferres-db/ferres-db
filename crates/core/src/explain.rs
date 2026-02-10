@@ -436,7 +436,7 @@ pub fn build_search_explanation_with_resolver(
     let index_stats = IndexStats {
         total_points: collection.len(),
         hnsw_layers: collection.config().hnsw.max_layer,
-        ef_search_used: collection.config().hnsw.ef_search,
+        ef_search_used: collection.current_hnsw_ef_search(),
         tombstones_skipped: total_tombstones_skipped,
     };
 

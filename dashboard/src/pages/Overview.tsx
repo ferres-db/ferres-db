@@ -60,6 +60,12 @@ export const Overview = () => {
                 <Cpu className="h-3.5 w-3.5" />
                 {stats?.simd_enabled ? 'SIMD: Active' : 'SIMD: Scalar'}
               </Badge>
+              {(stats?.index_optimization_label ?? stats?.hnsw_auto_tune_enabled) && (
+                <Badge variant="secondary" className="inline-flex items-center gap-1.5">
+                  <Zap className="h-3.5 w-3.5" />
+                  {stats?.index_optimization_label ?? 'Optimized by FerresEngine'}
+                </Badge>
+              )}
               {stats?.namespace_physical_isolation && (
                 <Badge variant="secondary" className="inline-flex items-center gap-1.5">
                   <Shield className="h-3.5 w-3.5" />
@@ -171,6 +177,26 @@ export const Overview = () => {
                     : Math.round(avgLatencyMs)}
                   <span className="ml-0.5 text-sm font-normal text-gray-400">ms</span>
                 </p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="overflow-hidden border-white/[0.06] transition-colors hover:border-orange-500/20">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium text-gray-400">Index</CardTitle>
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/10">
+                <Zap className="h-4 w-4 text-amber-500" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              {statsLoading ? (
+                <Skeleton className="h-8 w-24 rounded" />
+              ) : (stats?.index_optimization_label ?? stats?.hnsw_auto_tune_enabled) ? (
+                <p className="text-lg font-semibold text-gray-50">
+                  {stats?.index_optimization_label ?? 'Optimized by FerresEngine'}
+                </p>
+              ) : (
+                <p className="text-sm text-gray-500">—</p>
               )}
             </CardContent>
           </Card>

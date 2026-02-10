@@ -52,6 +52,7 @@ pub mod fusion;
 pub mod point;
 pub mod quantization;
 pub mod reindex;
+pub mod rerank;
 pub mod search;
 pub mod storage;
 pub mod tiered;
@@ -74,7 +75,10 @@ pub use tiered::{
     AccessTracker, CompactionResult, ColdStorage, StorageTier, TierDistribution,
     TierMetadata, TieredCollection, TieredStorageConfig, WarmStorage,
 };
-pub use wal::{Wal, WalEntry, WalOperation, recover_collection};
+pub use wal::{
+    recover_collection, recover_collection_to_timestamp, list_restore_points, read_last_snapshot_timestamp,
+    RestorePoints, Wal, WalEntry, WalOperation,
+};
 pub use cost::{CostBreakdown, CostEstimateParams, QueryCostEstimate, estimate_search_cost};
 pub use explain::{
     ConditionResult, ExplainMeta, ExplainResult, FilterExplanation, IndexStats,
@@ -86,6 +90,10 @@ pub use reindex::{
     ReindexJob, ReindexStats, ReindexStatus, AUTO_REINDEX_TOMBSTONE_RATIO,
     apply_delta, build_new_index, estimate_index_size, needs_reindex, tombstone_ratio,
 };
+pub use rerank::Reranker;
+
+#[cfg(feature = "rerank")]
+pub use rerank::CrossEncoderOrt;
 
 // MetadataFilter e SearchResult já são públicos e definidos neste módulo
 

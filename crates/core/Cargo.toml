@@ -5,6 +5,11 @@ edition = "2021"
 description = "Motor de busca vetorial do FerresDB — coleções, pontos, storage e HNSW search"
 license = "MIT"
 
+[features]
+default = []
+# Cross-Encoder re-ranking via ONNX Runtime (e.g. BGE-Reranker-style models).
+rerank = ["dep:ort"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,6 +26,7 @@ lru = { workspace = true }
 memmap2 = { workspace = true }
 pulp = "0.22"
 zstd = { workspace = true }
+ort = { version = "2.0.0-rc.11", optional = true }
 
 [[bin]]
 name = "ferres-db"

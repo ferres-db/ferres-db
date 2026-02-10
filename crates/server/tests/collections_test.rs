@@ -55,7 +55,7 @@ async fn setup_server() -> TestServer {
     };
 
     // Inicializa AppState
-    let app_state = AppState::new(config.clone(), None, None).unwrap();
+    let app_state = AppState::new(config.clone(), None, None, None, None).unwrap();
 
     // Cria o router com middleware
     let app = routes::create_router()

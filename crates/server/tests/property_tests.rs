@@ -53,7 +53,7 @@ async fn setup_server() -> TestServer {
         api_keys: Some(TEST_API_KEY.to_string()),
     };
 
-    let app_state = AppState::new(config.clone(), None, None).unwrap();
+    let app_state = AppState::new(config.clone(), None, None, None, None).unwrap();
 
     let app = routes::create_router()
         .layer(axum::middleware::from_fn(middleware::request_logger))

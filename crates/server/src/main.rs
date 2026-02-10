@@ -12,6 +12,7 @@ use ferres_db_server::cloud_settings::CloudSettingsStore;
 use ferres_db_server::state::{AppState, ServerConfig};
 use ferres_db_server::users::UserStore;
 use ferres_db_server::handlers::reindex::{run_auto_reindex_cycle, run_auto_vacuum_cycle};
+use ferres_db_server::handlers::stats::run_hnsw_auto_tune_cycle;
 use ferres_db_server::routes;
 use ferres_db_server::middleware;
 use ferres_db_server::metrics;
@@ -140,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let api_key_store = Some(Arc::new(api_key_store));
     info!("API key store initialized (multi-key support enabled)");
+    ferres_db_server::api_keys::set_global_store(api_key_store.clone());
 
     // Chaves do config/env continuam válidas como "super" (legacy) além das do SQLite
     auth::init_api_keys_from(config.api_keys.as_deref());
@@ -175,8 +177,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // As métricas são registradas automaticamente via lazy_static no módulo metrics
     info!("Prometheus metrics initialized");
 
+    // Re-ranker opcional (Cross-Encoder ONNX). Requer feature "rerank" e FERRESDB_RERANK_MODEL (ou config).
+    #[cfg(feature = "rerank")]
+    let reranker = match &config.rerank_model_path {
+        Some(path) => {
+            let dim = config.rerank_dimension.unwrap_or(384);
+            match ferres_db_core::CrossEncoderOrt::load(path, dim, None, None) {
+                Ok(r) => {
+                    info!(path = %path.display(), dimension = dim, "cross-encoder reranker loaded");
+                    Some(std::sync::Arc::new(r))
+                }
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to load reranker, continuing without");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "rerank"))]
+    let reranker = None;
+
     // Inicializa AppState (com store de API keys, usuários e cloud settings)
-    let app_state = AppState::new(config.clone(), api_key_store, user_store, cloud_settings_store)
+    let app_state = AppState::new(config.clone(), api_key_store, user_store, cloud_settings_store, reranker)
         .map_err(|e| {
             error!(error = %e, "failed to initialize collections");
             e
@@ -276,6 +299,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ = shutdown_notify_vacuum.notified() => {
                     info!("auto-vacuum worker task shutting down");
+                    break;
+                }
+            }
+        }
+    });
+
+    // HNSW auto-tune: ajusta ef_search dinamicamente com base na latência P95 (FerresEngine).
+    const HNSW_AUTO_TUNE_INTERVAL_SECS: u64 = 60;
+    let app_state_auto_tune = app_state.clone();
+    let shutdown_notify_auto_tune = app_state.shutdown_notify();
+    let is_shutting_down_auto_tune = app_state.is_shutting_down.clone();
+    tokio::spawn(async move {
+        let mut auto_tune_interval = interval(Duration::from_secs(HNSW_AUTO_TUNE_INTERVAL_SECS));
+        loop {
+            tokio::select! {
+                _ = auto_tune_interval.tick() => {
+                    if !is_shutting_down_auto_tune.load(std::sync::atomic::Ordering::Acquire) {
+                        run_hnsw_auto_tune_cycle(&app_state_auto_tune);
+                    }
+                }
+                _ = shutdown_notify_auto_tune.notified() => {
+                    info!("hnsw auto-tune worker task shutting down");
                     break;
                 }
             }

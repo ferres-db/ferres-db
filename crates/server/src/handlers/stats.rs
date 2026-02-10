@@ -25,6 +25,12 @@ pub struct CollectionStatsResponse {
     pub tombstone_count: usize,
     /// Estimated bytes held by tombstoned points until next reindex (quantized index only).
     pub tombstone_memory_waste_bytes: usize,
+    /// Current HNSW ef_search (may be auto-tuned by FerresEngine).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ef_search_current: Option<usize>,
+    /// Whether HNSW auto-tune is active for this instance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hnsw_auto_tune_enabled: Option<bool>,
 }
 
 // ─── Global stats (analytics: lê de queries.log, cache 1h) ───────────────
@@ -50,6 +56,12 @@ pub struct GlobalStatsResponse {
     pub role: String,
     /// Whether namespace physical isolation is enabled (points per namespace in separate dirs).
     pub namespace_physical_isolation: bool,
+    /// HNSW index optimization: dynamic ef_search auto-tuning is active (FerresEngine).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hnsw_auto_tune_enabled: Option<bool>,
+    /// Label for dashboard: "Optimized by FerresEngine" when auto-tune is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_optimization_label: Option<String>,
 }
 
 // ─── Queries list (GET /api/v1/stats/queries) ─────────────────────────────
@@ -191,6 +203,8 @@ pub struct AnalyticsResponse {
     pub cache_hit_rate_pct: Option<f64>,
     /// Top namespaces por armazenamento (pontos + bytes estimados), para identificar tenants que mais consomem recursos.
     pub top_namespaces_by_storage: Vec<TopNamespaceByStorage>,
+    /// Média do tempo gasto em re-ranking (ms) nas queries recentes que usaram rerank. None se nenhuma.
+    pub rerank_overhead_ms_avg: Option<f64>,
 }
 
 /// Handler para GET /api/v1/collections/{name}/stats
@@ -205,13 +219,14 @@ pub async fn get_collection_stats(
     let collection_arc = app_state.collections.get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    // Obtém número de pontos, tombstone count e waste
-    let (num_points, tombstone_count, tombstone_memory_waste_bytes) = {
+    // Obtém número de pontos, tombstone count, waste e ef_search atual (um único lock).
+    let (num_points, tombstone_count, tombstone_memory_waste_bytes, ef_search_current) = {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
         (
             collection.len(),
             collection.tombstone_count(),
             collection.tombstone_memory_waste(),
+            Some(collection.current_hnsw_ef_search()),
         )
     };
 
@@ -227,6 +242,8 @@ pub async fn get_collection_stats(
         stats
     };
 
+    let hnsw_auto_tune_enabled = Some(true);
+
     Ok(Json(CollectionStatsResponse {
         num_points,
         num_queries,
@@ -236,6 +253,8 @@ pub async fn get_collection_stats(
         p99_latency_ms,
         tombstone_count,
         tombstone_memory_waste_bytes,
+        ef_search_current,
+        hnsw_auto_tune_enabled,
     }))
 }
 
@@ -283,7 +302,30 @@ pub async fn get_global_stats(
         simd_enabled: simd_enabled(),
         role: role.to_string(),
         namespace_physical_isolation: app_state.config.namespace_physical_isolation,
+        hnsw_auto_tune_enabled: Some(true),
+        index_optimization_label: Some("Optimized by FerresEngine".to_string()),
     }))
+}
+
+/// Runs one cycle of HNSW auto-tune: for each collection, reads P95 latency from query_stats
+/// and applies dynamic ef_search adjustment (FerresEngine).
+pub fn run_hnsw_auto_tune_cycle(app_state: &AppState) {
+    for entry in app_state.collections.iter() {
+        let name = entry.key().clone();
+        let collection_arc = entry.value();
+        let (p95_ms, recall_priority) = match app_state.query_stats.get(&name) {
+            Some(stats) => {
+                let (_avg, _p50, p95, _p99) = stats.calculate_percentiles();
+                (p95, true)
+            }
+            None => continue,
+        };
+        let collection = match collection_arc.read() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        collection.apply_hnsw_auto_tune(p95_ms, recall_priority);
+    }
 }
 
 /// Handler para GET /api/v1/stats/analytics
@@ -448,6 +490,25 @@ pub async fn get_analytics(
     top_namespaces_by_storage.sort_by(|a, b| b.storage_bytes_estimate.cmp(&a.storage_bytes_estimate));
     top_namespaces_by_storage.truncate(30);
 
+    // Re-ranking overhead: média da fase "rerank" nos perfis de query recentes
+    let rerank_overhead_ms_avg = {
+        let mut sum_ms: u64 = 0;
+        let mut count: usize = 0;
+        for entry in app_state.query_profiles.iter() {
+            for phase in &entry.value().phases {
+                if phase.name == "rerank" {
+                    sum_ms += phase.duration_ms;
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            Some(sum_ms as f64 / count as f64)
+        } else {
+            None
+        }
+    };
+
     Ok(Json(AnalyticsResponse {
         tier_distribution: AnalyticsTierDistribution {
             hot,
@@ -481,6 +542,7 @@ pub async fn get_analytics(
         },
         cache_hit_rate_pct,
         top_namespaces_by_storage,
+        rerank_overhead_ms_avg,
     }))
 }
 

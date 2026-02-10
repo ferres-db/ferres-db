@@ -517,6 +517,19 @@ impl Wal {
 
 // ─── Recovery ─────────────────────────────────────────────────────────
 
+/// Lê o timestamp do último snapshot (gravado por `FileStorage::save_collection`).
+/// Retorna 0 se o ficheiro não existir (compatibilidade com instalações antigas).
+pub fn read_last_snapshot_timestamp(collection_dir: &Path) -> u64 {
+    let path = collection_dir.join("last_snapshot_timestamp");
+    if !path.exists() {
+        return 0;
+    }
+    match fs::read_to_string(&path) {
+        Ok(s) => s.trim().parse().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
 /// Carrega uma coleção do snapshot e re-aplica entradas pendentes do WAL.
 ///
 /// Fluxo de recuperação:
@@ -594,6 +607,83 @@ pub fn recover_collection(collection_dir: &Path) -> Result<Option<Collection>, F
     }
 
     Ok(Some(collection))
+}
+
+/// Point-in-Time Recovery: carrega o último snapshot e re-aplica o WAL apenas
+/// até o momento solicitado (`target_timestamp` inclusive).
+///
+/// - O snapshot on-disk representa o estado no momento do último `save_collection`.
+/// - Apenas entradas do WAL com `entry.timestamp <= target_timestamp` são aplicadas.
+/// - Se `target_timestamp` for anterior ao snapshot, apenas o snapshot é carregado
+///   (nenhuma entrada WAL é aplicada); o snapshot já representa um estado anterior.
+///
+/// Retorna erro se a coleção não existir ou não puder ser carregada.
+pub fn recover_collection_to_timestamp(
+    collection_dir: &Path,
+    target_timestamp: u64,
+) -> Result<Option<Collection>, FerresError> {
+    let config_path = collection_dir.join("config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let snapshot_ts = read_last_snapshot_timestamp(collection_dir);
+    let mut collection = FileStorage::load_collection(collection_dir)?;
+
+    let entries = Wal::read_entries(collection_dir)?;
+    // When snapshot_ts is 0 (legacy: file missing), apply all WAL entries up to target.
+    let to_apply: Vec<_> = entries
+        .iter()
+        .filter(|e| {
+            e.timestamp <= target_timestamp
+                && (snapshot_ts == 0 || e.timestamp > snapshot_ts)
+        })
+        .collect();
+
+    if !to_apply.is_empty() {
+        info!(
+            collection = %collection.name(),
+            target_timestamp,
+            applying = to_apply.len(),
+            "PITR: replaying WAL entries up to timestamp"
+        );
+        for entry in to_apply {
+            match &entry.operation {
+                WalOperation::Upsert { point } => {
+                    let _ = collection.insert(point.clone());
+                }
+                WalOperation::Delete { id } => {
+                    let _ = collection.remove(id);
+                }
+            }
+        }
+    }
+
+    Ok(Some(collection))
+}
+
+/// Lista pontos de restauração para PITR: timestamp do último snapshot mais
+/// os timestamps únicos das entradas do WAL (ordenados). Útil para a UI escolher
+/// um momento para restaurar.
+pub fn list_restore_points(collection_dir: &Path) -> Result<RestorePoints, FerresError> {
+    let snapshot_ts = read_last_snapshot_timestamp(collection_dir);
+    let entries = Wal::read_entries(collection_dir)?;
+    let mut wal_timestamps: Vec<u64> = entries.iter().map(|e| e.timestamp).collect();
+    wal_timestamps.sort();
+    wal_timestamps.dedup();
+    Ok(RestorePoints {
+        last_snapshot_timestamp: snapshot_ts,
+        wal_timestamps,
+    })
+}
+
+/// Pontos de restauração disponíveis para uma coleção (PITR).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RestorePoints {
+    /// Timestamp Unix do último snapshot.
+    pub last_snapshot_timestamp: u64,
+    /// Timestamps únicos das entradas no WAL (ordenados).
+    pub wal_timestamps: Vec<u64>,
 }
 
 /// Helper: timestamp Unix atual em segundos.
