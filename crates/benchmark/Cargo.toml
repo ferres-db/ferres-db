@@ -1,0 +1,22 @@
+[package]
+name = "ferres-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Benchmark e stress test oficial para o FerresDB"
+license = "MIT"
+
+[[bin]]
+name = "ferres-bench"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }
+indicatif = { workspace = true }
+hdrhistogram = { workspace = true }
+humantime = { workspace = true }
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = { workspace = true }
+ferres-db-sdk = { path = "../sdk-rust" }

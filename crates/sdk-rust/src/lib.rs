@@ -9,6 +9,7 @@ pub use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, Point};
 
 pub mod integrations;
 
+use http::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -17,6 +18,7 @@ use thiserror::Error;
 /// Cliente HTTP para o FerresDB.
 ///
 /// Conecta a um servidor FerresDB via REST e expõe métodos para busca vetorial e híbrida.
+/// Quando criado com `new_with_api_key`, todas as requisições incluem `Authorization: Bearer <key>`.
 #[derive(Debug, Clone)]
 pub struct FerresDbClient {
     base_url: String,
@@ -30,6 +32,34 @@ impl FerresDbClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client: reqwest::Client::new(),
         }
+    }
+
+    /// Usa um `reqwest::Client` existente (útil para keep-alive e connection pooling compartilhado).
+    pub fn new_with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            client,
+        }
+    }
+
+    /// Cria um cliente com API key para autenticação.
+    /// Todas as requisições incluem o header `Authorization: Bearer <api_key>` (conforme docs/api.md).
+    pub fn new_with_api_key(
+        base_url: impl Into<String>,
+        api_key: impl AsRef<str>,
+    ) -> Result<Self, SdkError> {
+        let mut headers = HeaderMap::new();
+        let value = HeaderValue::from_str(&format!("Bearer {}", api_key.as_ref()))
+            .map_err(|_| SdkError::InvalidApiKey)?;
+        headers.insert(AUTHORIZATION, value);
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .map_err(SdkError::Request)?;
+        Ok(Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            client,
+        })
     }
 
     /// Cria uma coleção (dimension, distance, opcional enable_bm25).
@@ -188,6 +218,8 @@ pub enum SdkError {
     },
     #[error("failed to decode response: {0}")]
     Decode(reqwest::Error),
+    #[error("invalid API key (must be valid header value)")]
+    InvalidApiKey,
 }
 
 // ─── Request/Response types (espelho do server) ─────────────────────────

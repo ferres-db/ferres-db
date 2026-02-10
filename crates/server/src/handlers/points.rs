@@ -673,8 +673,9 @@ pub async fn search_points(
     }
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let collection_name = name.clone();
-    let vector_preview = payload.vector.clone();
-    let filter_clone = payload.filter.clone();
+    // Uma única clonagem do vetor/filtro para o spawn do query_logger (evita clonar duas vezes).
+    let vector_for_log = payload.vector.clone();
+    let filter_for_log = payload.filter.clone();
 
     // Monta perfil por fases (percentual sobre total)
     let total = took_ms as f64;
@@ -736,15 +737,13 @@ pub async fn search_points(
 
     let query_logger_clone = query_logger.clone();
     let collection_name_for_log = collection_name.clone();
-    let vector_preview_for_log = vector_preview.clone();
-    let filter_for_log = filter_clone.clone();
     let query_id_for_log = query_id.clone();
     tokio::spawn(async move {
         query_logger_clone
             .log_query(
                 Some(&query_id_for_log),
                 &collection_name_for_log,
-                &vector_preview_for_log,
+                &vector_for_log,
                 payload.limit,
                 filter_for_log.as_ref(),
                 results_count,

@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/server",
-    "crates/sdk-rust",
+    "crates/sdk-rust", "crates/benchmark",
 ]
 
 # Dependências compartilhadas no workspace — cada crate herda a versão
@@ -28,6 +28,9 @@ quickcheck = "1"
 quickcheck_macros = "1"
 memmap2 = "0.9"
 zstd = "0.13"
+indicatif = "0.17"
+hdrhistogram = "7"
+humantime = "2"
 
 # O core é dependência dos outros crates do workspace
 ferres-db-core = { path = "crates/core" }
