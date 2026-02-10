@@ -863,6 +863,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
 
         let mut collection = Collection::new(config);
@@ -926,6 +927,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
         let mut collection = Collection::new(config);
         collection
@@ -963,6 +965,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
         let mut collection = Collection::new(config);
         collection
@@ -1032,6 +1035,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
         let mut collection = Collection::new(config);
 
