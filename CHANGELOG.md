@@ -28,6 +28,16 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 
 - **Replication (Experimental)** — Base para Read Replicas: no core, `Wal::stream_from(collection_dir, position)` para leitura incremental do WAL; servidor com `--replica-of <ADDR>` ou `FERRESDB_REPLICA_OF` inicia como réplica; endpoints de escrita (POST/PUT/DELETE em coleções, pontos, save, reindex, etc.) retornam **405 Method Not Allowed** em réplicas; worker (feature `grpc`) consome WAL do líder via gRPC `StreamWal` e aplica no VectorDB local; dashboard exibe "Role: Leader" ou "Role: Replica" no Overview; `GET /api/v1/stats/global` inclui campo `role`. Documentação em `docs/api.md` (seção Replication).
 
+- **Dashboard: Visual Explainer no Query Tester.** — Na aba "Query Tester", o botão "Explain" passa a exibir um **Visual Explainer** com pipeline da busca: camadas HNSW percorridas, comparações de distância, pontos filtrados pelo Native Pre-filtering e resultados. Tempo total do request (embedding + explain API) é exibido. Dados vêm do endpoint `POST /api/v1/collections/{name}/search/explain` (`explain_meta`, `candidates_scanned`, `candidates_after_filter`).
+
+- **Dashboard: PITR UI com datetime picker e confirmação.** — Na página "Snapshots & Recovery": seletor de data/hora (datetime-local) para escolher o ponto de restauração; botão "Point-in-Time Restore" envia o timestamp para `POST /api/v1/admin/restore`. Modal de confirmação de segurança antes de executar o restauro, alertando que a operação reinicia o estado do banco.
+
+- **Dashboard: página Cluster ativa no menu.** — A página "Cluster" permanece disponível no menu lateral e exibe os nós ativos retornados por `GET /api/v1/cluster`, indicando Leader e Followers (campo `role` por nó e `leader_id` no status).
+
+### Documentation
+
+- **api.md:** Schema de resposta final de `POST /api/v1/collections/{name}/search/explain` já documentado; adicionada secção **GET /api/v1/cluster** com schema de resposta (raft_enabled, leader_id, nodes com id, addr, role, replication_lag).
+
 ## [0.1.0-STABLE] - 09/02/2026
 
 Primeira versão estável do FerresDB, com polimento final de performance, analytics e documentação.

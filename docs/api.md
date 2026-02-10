@@ -1266,6 +1266,45 @@ Retorna estatísticas globais: totais do servidor (coleções, pontos) e agregad
 
 **HNSW Auto-Tune (FerresEngine):** O servidor ajusta `ef_search` dinamicamente com base na latência P95 observada por coleção (fonte: `query_stats`). A cada 60 segundos, para cada coleção: se P95 &lt; 10 ms e recall é prioridade, `ef_search` é aumentado (até um máximo); se P95 &gt; 50 ms (proxy para CPU sob estresse), é reduzido. A lógica está em `ferres_db_core::collection::Collection::apply_hnsw_auto_tune`. Os valores atuais são expostos em `GET /api/v1/collections/{name}/stats` (`ef_search_current`) e no Dashboard (Overview: "Optimized by FerresEngine").
 
+### GET /api/v1/cluster
+
+Retorna o estado do cluster (nós ativos, líder e status de replicação). Usado pela página **Cluster** do Dashboard para exibir Leader e Followers. Em modo standalone (sem feature `raft`), retorna um único nó com role `leader` ou `replica` conforme `--replica-of`. Com a feature `raft` ativa, reflete o estado do Raft (nodes, leader_id).
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "raft_enabled": false,
+  "leader_id": "1",
+  "nodes": [
+    {
+      "id": "1",
+      "addr": "127.0.0.1:8080",
+      "role": "leader",
+      "replication_lag": null
+    }
+  ]
+}
+```
+
+| Campo            | Tipo    | Descrição                                                                 |
+| ---------------- | ------- | ------------------------------------------------------------------------- |
+| `raft_enabled`   | boolean | Se o consenso Raft está ativo (build com `--features raft` e configurado). |
+| `leader_id`      | string  | *Opcional.* ID do nó líder (ex.: `"1"`). Ausente se ainda não houver líder. |
+| `nodes`          | array   | Lista de nós conhecidos (incluindo este).                                  |
+| `nodes[].id`     | string  | Identificador do nó.                                                       |
+| `nodes[].addr`   | string  | Endereço (host:port).                                                      |
+| `nodes[].role`   | string  | Papel: `"leader"`, `"follower"`, `"learner"` ou `"replica"` (modo réplica). |
+| `nodes[].replication_lag` | number | *Opcional.* Lag de replicação (índice do último log aplicado). Apenas para followers. |
+
+**Exemplo curl:**
+
+```bash
+curl -s -H "Authorization: Bearer YOUR_KEY" http://localhost:8080/api/v1/cluster
+```
+
 ---
 
 ## Replication (Experimental)
