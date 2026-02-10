@@ -13,6 +13,7 @@ Para melhor throughput em buscas vetoriais, o servidor utiliza kernels SIMD quan
 ## Convenções
 
 - **Content-Type:** `application/json` para requests com body.
+- **Autenticação:** Rotas protegidas aceitam API key no header `Authorization: Bearer <api-key>` (ver seção de API Keys e auth). A ferramenta oficial de benchmark (`ferres-bench`) suporta `--api-key` e env `FERRESDB_API_KEY`; ver [benchmark.md](benchmark.md).
 - **Erros:** Respostas de erro usam o schema abaixo e o status HTTP apropriado.
 
 ### Schema de erro
