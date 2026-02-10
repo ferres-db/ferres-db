@@ -105,7 +105,7 @@ O servidor e o core suportam opções para reduzir uso de disco e tempo de carre
 | ------------------------------ | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `wal_compression`              | boolean | false   | Comprime o Write-Ahead Log (wal.log) com Zstd. Reduz o tamanho do WAL em disco. Ativo quando o servidor usa VectorDB com WAL.                                                                                                              |
 | `binary_snapshot`              | boolean | false   | Grava snapshots de pontos em formato binário (points.bin com bincode) em vez de JSONL (points.jsonl). Reduz tamanho dos ficheiros e acelera o carregamento. O carregamento detecta automaticamente o formato (points.bin ou points.jsonl). |
-| `namespace_physical_isolation` | boolean | false   | Isolamento físico por namespace: pontos com `namespace` são gravados em `data/collections/<name>/namespaces/<namespace>/points.bin`. Permite snapshot e limpeza por tenant sem afetar outros.                                                |
+| `namespace_physical_isolation` | boolean | false   | Isolamento físico por namespace: pontos com `namespace` são gravados em `data/collections/<name>/namespaces/<namespace>/points.bin`. Permite snapshot e limpeza por tenant sem afetar outros.                                              |
 
 **Layout de diretórios com isolamento físico por namespace**
 
@@ -190,6 +190,108 @@ s3_bucket = "ferres-backups"
 
 As credenciais podem ser omitidas no ficheiro (recomendado) e definidas apenas por variáveis de ambiente ou pelo perfil AWS configurado no sistema.
 
+### Point-in-Time Recovery (PITR) e recuperação de desastres
+
+O FerresDB suporta **Point-in-Time Recovery (PITR)** usando o Write-Ahead Log (WAL) com timestamps. Cada entrada no WAL tem um timestamp Unix; ao gravar um snapshot, o servidor persiste o instante em `last_snapshot_timestamp` no diretório da coleção. Assim é possível restaurar uma coleção (ou todas) ao estado num momento passado.
+
+**Fluxo de PITR:**
+
+1. Carregar o último snapshot em disco (estado no momento do último `save`).
+2. Ler as entradas do `wal.log` e reaplicar apenas as que têm `timestamp > last_snapshot_timestamp` e `timestamp <= target_timestamp`.
+3. Substituir a coleção em memória pelo estado resultante, persistir no disco e truncar o WAL.
+
+**Quando usar:** Após um erro humano (ex.: delete em massa), corrupção parcial ou para auditar o estado num instante passado. Recomenda-se combinar com backups regulares (ex.: `POST /api/v1/admin/backup` para S3) para recuperação de desastres que afetem o disco inteiro.
+
+#### GET /api/v1/admin/restore/points
+
+Lista os pontos de restauração disponíveis por coleção: timestamp do último snapshot e lista de timestamps das entradas no WAL. Requer autenticação e **role Admin**.
+
+**Query params (opcionais):**
+
+| Parâmetro    | Tipo   | Descrição                                  |
+| ------------ | ------ | ------------------------------------------ |
+| `collection` | string | Se presente, restringe à coleção indicada. |
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "collections": {
+    "my_collection": {
+      "last_snapshot_timestamp": 1739182800,
+      "wal_timestamps": [1739182810, 1739182820, 1739182830]
+    }
+  }
+}
+```
+
+Use estes timestamps como alvo em `POST /api/v1/admin/restore`.
+
+**Exemplo curl:**
+
+```bash
+curl -s -H "Authorization: Bearer YOUR_ADMIN_KEY" "http://localhost:8080/api/v1/admin/restore/points"
+curl -s -H "Authorization: Bearer YOUR_ADMIN_KEY" "http://localhost:8080/api/v1/admin/restore/points?collection=my_collection"
+```
+
+#### POST /api/v1/admin/restore
+
+Restaura uma ou todas as coleções ao estado no timestamp dado (Point-in-Time Recovery). Requer autenticação e **role Admin**.
+
+**Request body:**
+
+| Campo        | Tipo   | Obrigatório | Descrição                                                         |
+| ------------ | ------ | ----------- | ----------------------------------------------------------------- |
+| `timestamp`  | number | sim         | Timestamp Unix em segundos para o qual restaurar.                 |
+| `collection` | string | não         | Se presente, restaura apenas esta coleção; caso contrário, todas. |
+
+**Schema de request:**
+
+```json
+{
+  "timestamp": 1739182800,
+  "collection": "my_collection"
+}
+```
+
+**Resposta:** `200 OK` (ou `422` se todas as restaurações falharem)
+
+**Schema de resposta:**
+
+```json
+{
+  "ok": true,
+  "restored": ["my_collection"],
+  "errors": []
+}
+```
+
+| Campo      | Tipo     | Descrição                                            |
+| ---------- | -------- | ---------------------------------------------------- |
+| `ok`       | boolean  | `true` se não houve erros.                           |
+| `restored` | string[] | Nomes das coleções restauradas com sucesso.          |
+| `errors`   | string[] | Mensagens de erro por coleção (ex.: não encontrada). |
+
+Após a restauração, o estado em disco e em memória passa a ser o do momento `timestamp`; o WAL é truncado para refletir que não há operações pendentes após esse ponto.
+
+**Exemplo curl:**
+
+```bash
+# Restaurar apenas a coleção "docs" ao estado às 12:00 UTC do dia 2025-02-10
+curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer YOUR_ADMIN_KEY" \
+  http://localhost:8080/api/v1/admin/restore \
+  -d '{"timestamp":1739182800,"collection":"docs"}'
+
+# Restaurar todas as coleções a um momento
+curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer YOUR_ADMIN_KEY" \
+  http://localhost:8080/api/v1/admin/restore \
+  -d '{"timestamp":1739182800}'
+```
+
+**Dashboard:** A aba **Snapshots & Recovery** permite visualizar os pontos de restauração por coleção e acionar uma restauração informando o timestamp (e opcionalmente a coleção).
+
 ---
 
 ## Coleções
@@ -250,8 +352,8 @@ Lista todas as coleções. Opcionalmente restringe a coleções que possuem pelo
 
 **Query params:**
 
-| Param       | Tipo   | Descrição                                                                 |
-| ----------- | ------ | ------------------------------------------------------------------------- |
+| Param       | Tipo   | Descrição                                                                                            |
+| ----------- | ------ | ---------------------------------------------------------------------------------------------------- |
 | `namespace` | string | Quando definido, retorna apenas coleções que têm pelo menos um ponto neste namespace (multitenancy). |
 
 **Resposta:** `200 OK`
@@ -712,14 +814,15 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 
 **Request body:**
 
-| Campo          | Tipo   | Obrigatório | Descrição                                                                                                                                                                                                   |
-| -------------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `vector`       | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                                                                                                                                                               |
-| `limit`        | number | sim         | Número máximo de resultados (> 0)                                                                                                                                                                           |
-| `filter`       | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo.                                                                                                                                   |
-| `namespace`    | string | não         | Restringe resultados a este namespace (multitenancy).                                                                                                                                                       |
-| `vector_field` | string | não         | Campo vetorial contra o qual buscar: omitido ou `"default"` = vetor principal; outro nome (ex.: `"title_vector"`, `"content_vector"`) = índice nomeado. Retorna 400 se o campo não existir em nenhum ponto. |
-| `budget_ms`    | number | não         | Orçamento máximo em ms. Se a estimativa exceder, retorna 422 sem executar a busca.                                                                                                                          |
+| Campo          | Tipo    | Obrigatório | Descrição                                                                                                                                                                                                                                                                                              |
+| -------------- | ------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `vector`       | array   | sim         | Vetor de consulta (mesma dimensão da coleção)                                                                                                                                                                                                                                                          |
+| `limit`        | number  | sim         | Número máximo de resultados (> 0)                                                                                                                                                                                                                                                                      |
+| `filter`       | object  | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo.                                                                                                                                                                                                                              |
+| `namespace`    | string  | não         | Restringe resultados a este namespace (multitenancy).                                                                                                                                                                                                                                                  |
+| `vector_field` | string  | não         | Campo vetorial contra o qual buscar: omitido ou `"default"` = vetor principal; outro nome (ex.: `"title_vector"`, `"content_vector"`) = índice nomeado. Retorna 400 se o campo não existir em nenhum ponto.                                                                                            |
+| `budget_ms`    | number  | não         | Orçamento máximo em ms. Se a estimativa exceder, retorna 422 sem executar a busca.                                                                                                                                                                                                                     |
+| `rerank`       | boolean | não         | Quando `true`, re-pontua candidatos com Cross-Encoder (ONNX) e retorna os top `limit` reordenados. Requer que o servidor tenha modelo de re-ranking configurado e que a dimensão da coleção coincida com a do modelo. Se não houver reranker ou dimensão incompatível, a busca é feita sem re-ranking. |
 
 **Schema de request:**
 
@@ -729,13 +832,14 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
   "limit": 5,
   "filter": null,
   "vector_field": "content_vector",
-  "budget_ms": 50
+  "budget_ms": 50,
+  "rerank": false
 }
 ```
 
 **Resposta:** `200 OK`
 
-**Schema de resposta:** cada resultado pode incluir `namespace` quando o ponto tiver namespace.
+**Schema de resposta:** cada resultado pode incluir `namespace` quando o ponto tiver namespace. O campo `rerank_ms` está presente apenas quando `rerank: true` foi enviado e o servidor aplicou re-ranking (modelo carregado e dimensão compatível).
 
 ```json
 {
@@ -747,9 +851,18 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
       "namespace": "tenant-a"
     }
   ],
-  "took_ms": 2
+  "took_ms": 2,
+  "query_id": "uuid-opcional",
+  "rerank_ms": 12
 }
 ```
+
+| Campo resposta | Tipo   | Descrição                                                                                                         |
+| -------------- | ------ | ----------------------------------------------------------------------------------------------------------------- |
+| `results`      | array  | Lista de pontos ordenados por similaridade (ou por score do Cross-Encoder quando rerank foi aplicado).            |
+| `took_ms`      | number | Tempo total da busca (ms).                                                                                        |
+| `query_id`     | string | (opcional) ID da query para debug (`GET /api/v1/debug/query-profile/{query_id}`).                                 |
+| `rerank_ms`    | number | (opcional) Tempo gasto em re-ranking (ms). Presente apenas quando `rerank: true` e o servidor aplicou re-ranking. |
 
 **Exemplo curl:**
 
@@ -1086,19 +1199,27 @@ Retorna estatísticas globais: totais do servidor (coleções, pontos) e agregad
   "avg_latency_ms": 3.5,
   "queries_per_minute": [{ "timestamp": 1738742400, "count": 12 }],
   "simd_enabled": true,
-  "role": "leader"
+  "role": "leader",
+  "namespace_physical_isolation": false,
+  "hnsw_auto_tune_enabled": true,
+  "index_optimization_label": "Optimized by FerresEngine"
 }
 ```
 
-| Campo                | Tipo    | Descrição                                                                            |
-| -------------------- | ------- | ------------------------------------------------------------------------------------ |
-| `total_collections`  | number  | Número de coleções                                                                   |
-| `total_points`       | number  | Soma de pontos em todas as coleções                                                  |
-| `total_queries_24h`  | number  | Queries nas últimas 24h (do log)                                                     |
-| `avg_latency_ms`     | number  | Latência média (ms) nas últimas 24h                                                  |
-| `queries_per_minute` | array   | Buckets por minuto: `timestamp` (Unix do minuto), `count`                            |
-| `simd_enabled`       | boolean | Se as instruções SIMD (AVX2/SSE4.1) estão ativas em runtime nos kernels de distância |
-| `role`               | string  | Replication role: `"leader"` ou `"replica"` (experimental)                           |
+| Campo                          | Tipo    | Descrição                                                                            |
+| ------------------------------ | ------- | ------------------------------------------------------------------------------------ |
+| `total_collections`            | number  | Número de coleções                                                                   |
+| `total_points`                 | number  | Soma de pontos em todas as coleções                                                  |
+| `total_queries_24h`            | number  | Queries nas últimas 24h (do log)                                                     |
+| `avg_latency_ms`               | number  | Latência média (ms) nas últimas 24h                                                  |
+| `queries_per_minute`           | array   | Buckets por minuto: `timestamp` (Unix do minuto), `count`                            |
+| `simd_enabled`                 | boolean | Se as instruções SIMD (AVX2/SSE4.1) estão ativas em runtime nos kernels de distância |
+| `role`                         | string  | Replication role: `"leader"` ou `"replica"` (experimental)                           |
+| `namespace_physical_isolation` | boolean | Se o armazenamento por namespace está isolado (multitenancy)                         |
+| `hnsw_auto_tune_enabled`       | boolean | Se o auto-tune dinâmico de `ef_search` HNSW está ativo (FerresEngine)                |
+| `index_optimization_label`     | string  | Rótulo para o dashboard, ex.: `"Optimized by FerresEngine"`                          |
+
+**HNSW Auto-Tune (FerresEngine):** O servidor ajusta `ef_search` dinamicamente com base na latência P95 observada por coleção (fonte: `query_stats`). A cada 60 segundos, para cada coleção: se P95 &lt; 10 ms e recall é prioridade, `ef_search` é aumentado (até um máximo); se P95 &gt; 50 ms (proxy para CPU sob estresse), é reduzido. A lógica está em `ferres_db_core::collection::Collection::apply_hnsw_auto_tune`. Os valores atuais são expostos em `GET /api/v1/collections/{name}/stats` (`ef_search_current`) e no Dashboard (Overview: "Optimized by FerresEngine").
 
 ---
 
@@ -1132,15 +1253,16 @@ Retorna JSON consolidado para o dashboard: distribuição por tier, latência (a
 
 **Campos de agregação de séries temporais (últimos 10 min):**
 
-| Campo                                   | Tipo           | Descrição                                                                                                   |
-| --------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
-| `time_series_10m`                       | object         | Agregados da janela de 10 minutos para monitoramento em tempo real                                          |
-| `time_series_10m.avg_points_per_second` | number         | Média de pontos inseridos por segundo (ingestão) nos últimos 10 min                                         |
-| `time_series_10m.p95_latency_ms`        | number         | P95 da latência de busca (ms) nas últimas 10 min (queries.log)                                              |
-| `time_series_10m.throughput_per_minute` | array          | Buckets por minuto para gráfico de throughput: `{ "timestamp": number, "points": number }`                  |
-| `time_series_10m.recent_latencies`      | array          | Últimas consultas para gráfico de latência: `{ "timestamp": number, "took_ms": number }` (até 100 entradas) |
-| `cache_hit_rate_pct`                    | number \| null | Percentual de hits do search_cache (core) agregado em todas as coleções; `null` se ainda não houve buscas   |
+| Campo                                   | Tipo           | Descrição                                                                                                                                                                                                                       |
+| --------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `time_series_10m`                       | object         | Agregados da janela de 10 minutos para monitoramento em tempo real                                                                                                                                                              |
+| `time_series_10m.avg_points_per_second` | number         | Média de pontos inseridos por segundo (ingestão) nos últimos 10 min                                                                                                                                                             |
+| `time_series_10m.p95_latency_ms`        | number         | P95 da latência de busca (ms) nas últimas 10 min (queries.log)                                                                                                                                                                  |
+| `time_series_10m.throughput_per_minute` | array          | Buckets por minuto para gráfico de throughput: `{ "timestamp": number, "points": number }`                                                                                                                                      |
+| `time_series_10m.recent_latencies`      | array          | Últimas consultas para gráfico de latência: `{ "timestamp": number, "took_ms": number }` (até 100 entradas)                                                                                                                     |
+| `cache_hit_rate_pct`                    | number \| null | Percentual de hits do search_cache (core) agregado em todas as coleções; `null` se ainda não houve buscas                                                                                                                       |
 | `top_namespaces_by_storage`             | array          | Top namespaces por armazenamento (até 30): `{ "namespace": string, "point_count": number, "storage_bytes_estimate": number }`. Identifica tenants que mais consomem recursos. Pontos sem namespace aparecem como `"(default)"`. |
+| `rerank_overhead_ms_avg`                | number \| null | Média do tempo gasto em re-ranking (ms) nas queries recentes que usaram rerank; `null` se nenhuma. Usado no Dashboard (Analytics) como métrica "Re-ranking Overhead (ms)".                                                      |
 
 O buffer de ingestão é alimentado a cada upsert (REST, gRPC e WebSocket). Para a janela de **10 minutos**, o endpoint de analytics usa leitura fresca do `queries.log` (sem depender do cache de 1h), de modo que `time_series_10m.throughput_per_minute`, `time_series_10m.recent_latencies` e `time_series_10m.p95_latency_ms` reflitam os dados mais recentes. O Cache Hit Rate é calculado a partir dos contadores `search_cache_hits` e `search_cache_misses` de cada coleção (quando `search_cache_size` > 0).
 
@@ -1197,7 +1319,7 @@ Queries com latência acima do threshold (lê de `queries.log`, cache 1h).
 
 ### GET /api/v1/collections/{name}/stats
 
-Retorna estatísticas de uso da coleção (pontos e queries).
+Retorna estatísticas de uso da coleção (pontos, queries, percentis de latência e parâmetros do índice HNSW).
 
 **Path:** `name` — nome da coleção.
 
@@ -1212,9 +1334,23 @@ Retorna estatísticas de uso da coleção (pontos e queries).
   "avg_latency_ms": 2.5,
   "p50_latency_ms": 2.0,
   "p95_latency_ms": 5.0,
-  "p99_latency_ms": 8.0
+  "p99_latency_ms": 8.0,
+  "tombstone_count": 0,
+  "tombstone_memory_waste_bytes": 0,
+  "ef_search_current": 50,
+  "hnsw_auto_tune_enabled": true
 }
 ```
+
+| Campo                                                                  | Tipo    | Descrição                                                                 |
+| ---------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------- |
+| `num_points`                                                           | number  | Número de pontos na coleção                                               |
+| `num_queries`                                                          | number  | Total de queries registradas (buffer recente)                             |
+| `avg_latency_ms`, `p50_latency_ms`, `p95_latency_ms`, `p99_latency_ms` | number  | Latência média e percentis (ms)                                           |
+| `tombstone_count`                                                      | number  | Pontos marcados como removidos (ainda no índice até reindex)              |
+| `tombstone_memory_waste_bytes`                                         | number  | Bytes estimados de tombstones (índice quantizado)                         |
+| `ef_search_current`                                                    | number  | Valor atual de `ef_search` HNSW usado na busca (pode estar auto-ajustado) |
+| `hnsw_auto_tune_enabled`                                               | boolean | Se o auto-tune FerresEngine está ativo para esta instância                |
 
 **Exemplo curl:**
 
@@ -1295,6 +1431,40 @@ Cada usuário possui um `role` (Admin, Editor, Viewer) e opcionalmente `permissi
 **Restrição de Metadata:**
 
 Opcional. Quando presente, resultados de busca são filtrados automaticamente (AND com filtros do request). Garante isolamento de dados por equipe/departamento.
+
+**Namespace Allowance (API keys):**
+
+API keys can be restricted to one or more namespaces (multitenancy). When `allowed_namespaces` is set on a key (non-empty list), that key may only access the requested namespace if it appears in the list. If the key has no restriction (null or empty), it may access any namespace.
+
+- **Validation:** The server checks the requested namespace from: (1) query parameter `namespace` (e.g. `GET /api/v1/collections?namespace=tenant-a`), (2) header `X-Namespace`, and (3) request body fields `namespace` (search, upsert, delete points). If the key is restricted and the requested namespace is not in its list, the server returns `403` with `code: "forbidden_namespace"`.
+- **Creating/updating keys:** Use `allowed_namespaces` in `POST /api/v1/keys` (optional) and `PUT /api/v1/keys/:id` (body: `{ "allowed_namespaces": ["tenant-a", "tenant-b"] }` or `null` for “all”). Omitted or empty list = no restriction (all namespaces).
+
+### API Keys (list, create, update namespaces, delete)
+
+**GET /api/v1/keys** — Lista todas as chaves (Editor ou Admin). Resposta: array de objetos com `id`, `name`, `key_prefix`, `created_at`, e opcionalmente `allowed_namespaces` (array de strings; ausente ou vazio = todos os namespaces).
+
+**POST /api/v1/keys** — Cria uma nova API key (Editor ou Admin).
+
+**Request body:**
+
+| Campo                | Tipo     | Obrigatório | Descrição                                                          |
+| -------------------- | -------- | ----------- | ------------------------------------------------------------------ |
+| `name`               | string   | sim         | Nome da chave (ex.: "production", "staging").                      |
+| `allowed_namespaces` | string[] | não         | Lista de namespaces permitidos. Omitido ou vazio = acesso a todos. |
+
+**Resposta:** `200 OK` com `id`, `name`, `key`, `key_prefix`, `created_at`. O valor `key` é mostrado apenas uma vez.
+
+**PUT /api/v1/keys/{id}** — Atualiza os namespaces permitidos (Editor ou Admin).
+
+**Request body:**
+
+| Campo                | Tipo            | Descrição                                   |
+| -------------------- | --------------- | ------------------------------------------- |
+| `allowed_namespaces` | array ou `null` | Lista de namespaces ou `null` para “todos”. |
+
+**Resposta:** `200 OK` com `{ "updated": true, "id": <id> }`.
+
+**DELETE /api/v1/keys/{id}** — Remove a chave (Editor ou Admin). Resposta: `200 OK` com `{ "deleted": true, "id": <id> }`.
 
 ### POST /api/v1/users (com permissões)
 
@@ -1403,6 +1573,8 @@ curl -s -X PUT http://localhost:8080/api/v1/users/analyst/permissions \
 3. **Role legado** → Editor pode read/write/create; Viewer pode read
 
 **MetadataRestriction:** Se o usuário tem uma `metadata_restriction` na permissão de Read, o filtro é injetado automaticamente (AND com filtros do request). Exemplo: um usuário com `department=sales` só verá resultados com `department=sales`.
+
+**Namespace (API keys):** Se a API key tiver `allowed_namespaces` definido, o servidor valida o namespace solicitado (query `namespace`, header `X-Namespace` ou body `namespace`). Se não permitido, retorna `403` com `code: "forbidden_namespace"`.
 
 ---
 

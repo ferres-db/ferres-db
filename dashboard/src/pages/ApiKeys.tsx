@@ -1,16 +1,16 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getStoredRole } from '@/api/ferresdb';
-import { useApiKeys, useCreateApiKey, useDeleteApiKey } from '@/hooks/useApiKeys';
+import { useApiKeys, useCreateApiKey, useDeleteApiKey, useUpdateKeyNamespaces } from '@/hooks/useApiKeys';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { Plus, Trash2, Copy, Check } from 'lucide-react';
+import { Plus, Trash2, Copy, Check, Pencil } from 'lucide-react';
 import { format } from 'date-fns';
-import type { CreateApiKeyResponse } from '@/types';
+import type { ApiKeyInfo, CreateApiKeyResponse } from '@/types';
 
 export const ApiKeys = () => {
   const navigate = useNavigate();
@@ -21,19 +21,55 @@ export const ApiKeys = () => {
   const { data: keys, isLoading, isError: listErrorFlag, error: listErrorRaw } = useApiKeys();
   const createKey = useCreateApiKey();
   const deleteKey = useDeleteApiKey();
+  const updateNamespaces = useUpdateKeyNamespaces();
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyNamespaces, setNewKeyNamespaces] = useState('');
   const [createdKey, setCreatedKey] = useState<CreateApiKeyResponse | null>(null);
   const [copied, setCopied] = useState(false);
+  const [editKey, setEditKey] = useState<ApiKeyInfo | null>(null);
+  const [editNamespacesValue, setEditNamespacesValue] = useState('');
+
+  const parseNamespaces = (s: string): string[] =>
+    s
+      .split(',')
+      .map((n) => n.trim())
+      .filter(Boolean);
 
   const handleCreate = async () => {
     const name = newKeyName.trim();
     if (!name) return;
+    const allowed_namespaces = parseNamespaces(newKeyNamespaces);
     try {
-      const result = await createKey.mutateAsync(name);
+      const result = await createKey.mutateAsync({
+        name,
+        allowed_namespaces: allowed_namespaces.length > 0 ? allowed_namespaces : undefined,
+      });
       setIsCreateModalOpen(false);
       setNewKeyName('');
+      setNewKeyNamespaces('');
       setCreatedKey(result);
+    } catch {
+      // Error handled by mutation
+    }
+  };
+
+  const openEditNamespaces = (key: ApiKeyInfo) => {
+    setEditKey(key);
+    setEditNamespacesValue(
+      (key.allowed_namespaces && key.allowed_namespaces.length > 0 ? key.allowed_namespaces : []).join(', '),
+    );
+  };
+
+  const handleUpdateNamespaces = async () => {
+    if (editKey == null) return;
+    const list = parseNamespaces(editNamespacesValue);
+    try {
+      await updateNamespaces.mutateAsync({
+        id: editKey.id,
+        allowed_namespaces: list.length > 0 ? list : null,
+      });
+      setEditKey(null);
     } catch {
       // Error handled by mutation
     }
@@ -107,6 +143,7 @@ export const ApiKeys = () => {
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Key prefix</TableHead>
+                  <TableHead>Namespaces</TableHead>
                   <TableHead>Created</TableHead>
                   <TableHead>Actions</TableHead>
                 </TableRow>
@@ -117,24 +154,40 @@ export const ApiKeys = () => {
                     <TableRow key={key.id}>
                       <TableCell className="font-medium">{key.name}</TableCell>
                       <TableCell className="font-mono text-sm text-gray-400">{key.key_prefix}…</TableCell>
+                      <TableCell className="text-gray-400 text-sm">
+                        {key.allowed_namespaces && key.allowed_namespaces.length > 0
+                          ? key.allowed_namespaces.join(', ')
+                          : 'All'}
+                      </TableCell>
                       <TableCell>{format(new Date(key.created_at * 1000), 'MMM dd, yyyy HH:mm')}</TableCell>
-                      <TableCell>
+                      <TableCell className="flex items-center gap-1">
                         {(role === 'admin' || role === 'editor') && (
-                          <Button
-                            variant="danger"
-                            size="sm"
-                            onClick={() => handleDelete(key.id, key.name)}
-                            disabled={deleteKey.isPending}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+                          <>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => openEditNamespaces(key)}
+                              disabled={updateNamespaces.isPending}
+                              title="Edit namespaces"
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="danger"
+                              size="sm"
+                              onClick={() => handleDelete(key.id, key.name)}
+                              disabled={deleteKey.isPending}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </>
                         )}
                       </TableCell>
                     </TableRow>
                   ))}
                 {(!keys || !Array.isArray(keys) || keys.length === 0) && (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center text-gray-500 py-8">
+                    <TableCell colSpan={5} className="text-center text-gray-500 py-8">
                       No API keys yet. Create one to get started.
                     </TableCell>
                   </TableRow>
@@ -165,6 +218,17 @@ export const ApiKeys = () => {
               placeholder="e.g. production, staging"
               autoFocus
             />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Allowed namespaces (optional)</label>
+            <Input
+              value={newKeyNamespaces}
+              onChange={(e) => setNewKeyNamespaces(e.target.value)}
+              placeholder="e.g. tenant-a, tenant-b (leave empty for all)"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Restrict this key to specific namespaces. Empty = access to all namespaces.
+            </p>
           </div>
           {createKey.isError && (
             <p className="text-sm text-red-400">
@@ -209,6 +273,43 @@ export const ApiKeys = () => {
           </p>
           <div className="flex justify-end">
             <Button onClick={handleCloseCreatedModal}>Done</Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={editKey != null}
+        onClose={() => setEditKey(null)}
+        title="Edit namespaces"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-400">
+            Key: <strong className="text-gray-200">{editKey?.name}</strong>. Restrict access to specific namespaces or leave empty for all.
+          </p>
+          <div>
+            <label className="block text-sm font-medium mb-1">Allowed namespaces</label>
+            <Input
+              value={editNamespacesValue}
+              onChange={(e) => setEditNamespacesValue(e.target.value)}
+              placeholder="e.g. tenant-a, tenant-b (empty = all)"
+            />
+          </div>
+          {updateNamespaces.isError && (
+            <p className="text-sm text-red-400">
+              {(updateNamespaces.error as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+                (updateNamespaces.error instanceof Error ? updateNamespaces.error.message : 'Failed to update')}
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="secondary" onClick={() => setEditKey(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleUpdateNamespaces}
+              disabled={updateNamespaces.isPending}
+            >
+              {updateNamespaces.isPending ? 'Saving…' : 'Save'}
+            </Button>
           </div>
         </div>
       </Modal>

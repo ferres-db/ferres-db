@@ -23,6 +23,8 @@ pub enum AuditResult {
     Denied,
     /// Ação falhou com erro.
     Error,
+    /// Ação executada parcialmente (ex.: restore com alguns erros).
+    Partial,
 }
 
 /// Entrada de auditoria.

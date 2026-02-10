@@ -11,7 +11,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
 import { DropdownMenu, DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs';
-import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive, RefreshCw, Loader2 } from 'lucide-react';
+import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive, RefreshCw, Loader2, Zap } from 'lucide-react';
 import type { CollectionQuantizationResponse } from '@/types';
 import { format } from 'date-fns';
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -784,6 +784,32 @@ export const CollectionPoints = () => {
                     </CardContent>
                   </Card>
                 </div>
+
+                {/* HNSW index (ef_search, auto-tune) */}
+                {(stats.ef_search_current != null || stats.hnsw_auto_tune_enabled) && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-sm font-medium text-gray-400">
+                        <Search className="h-4 w-4" />
+                        Index (HNSW)
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="flex flex-wrap items-center gap-4">
+                      {stats.ef_search_current != null && (
+                        <div>
+                          <p className="text-xs text-gray-500">ef_search (current)</p>
+                          <p className="text-lg font-semibold text-gray-50">{stats.ef_search_current}</p>
+                        </div>
+                      )}
+                      {stats.hnsw_auto_tune_enabled && (
+                        <Badge variant="secondary" className="inline-flex items-center gap-1">
+                          <Zap className="h-3 w-3" />
+                          Optimized by FerresEngine
+                        </Badge>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
 
                 {/* Reindex: Tombstones + manual reindex + jobs */}
                 <Card>

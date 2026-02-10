@@ -31,7 +31,7 @@ export const useSearch = () => {
       namespace?: string;
       vector_field?: string;
     }): Promise<SearchResult[]> =>
-      pointsApi.search(collection, vector, limit, filter, { namespace, vector_field }),
+      pointsApi.search(collection, vector, limit, filter, { namespace, vector_field }).then((r) => r.results),
   });
 };
 

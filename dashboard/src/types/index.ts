@@ -42,6 +42,15 @@ export interface SearchResult {
   namespace?: string;
 }
 
+/** Response from POST /api/v1/collections/{name}/search (includes optional rerank_ms). */
+export interface SearchPointsResponse {
+  results: SearchResult[];
+  took_ms?: number;
+  query_id?: string;
+  /** Present when rerank=true was used and server applied re-ranking. */
+  rerank_ms?: number;
+}
+
 export interface QueriesPerMinuteBucket {
   timestamp: number; // u64 no backend
   count: number; // u64 no backend
@@ -58,6 +67,10 @@ export interface GlobalStats {
   role?: string;
   /** Namespace physical isolation (multitenancy storage). */
   namespace_physical_isolation?: boolean;
+  /** HNSW ef_search auto-tuning active (FerresEngine). */
+  hnsw_auto_tune_enabled?: boolean;
+  /** Dashboard label: e.g. "Optimized by FerresEngine". */
+  index_optimization_label?: string;
 }
 
 export interface QueryEntry {
@@ -92,6 +105,10 @@ export interface CollectionStats {
   p99_latency_ms: number;
   tombstone_count?: number;
   tombstone_memory_waste_bytes?: number;
+  /** Current HNSW ef_search (may be auto-tuned). */
+  ef_search_current?: number;
+  /** HNSW auto-tune enabled for this instance. */
+  hnsw_auto_tune_enabled?: boolean;
 }
 
 // Analytics (GET /api/v1/stats/analytics)
@@ -162,6 +179,8 @@ export interface AnalyticsResponse {
   cache_hit_rate_pct: number | null;
   /** Top namespaces por armazenamento (identificar tenants que mais consomem). */
   top_namespaces_by_storage?: TopNamespaceByStorage[];
+  /** Média do tempo de re-ranking (ms) nas queries recentes que usaram rerank. */
+  rerank_overhead_ms_avg?: number | null;
 }
 
 export interface ApiKeyInfo {
@@ -169,6 +188,8 @@ export interface ApiKeyInfo {
   name: string;
   key_prefix: string;
   created_at: number;
+  /** Namespaces permitidos (vazio/undefined = todos). */
+  allowed_namespaces?: string[] | null;
 }
 
 export interface CreateApiKeyResponse {

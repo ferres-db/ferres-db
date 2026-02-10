@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod points;
 pub mod reindex;
 pub mod save;
+pub mod restore;
 pub mod settings;
 pub mod stats;
 pub mod streaming;
