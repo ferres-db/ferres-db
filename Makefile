@@ -1,4 +1,4 @@
-.PHONY: help build run test docker-build docker-run docker-stop docker-logs clean
+.PHONY: help build run test bench docker-build docker-run docker-stop docker-logs clean
 
 # Variáveis
 BINARY_NAME=ferres-db-server
@@ -23,6 +23,21 @@ run: ## Executa o servidor Rust localmente (modo dev)
 test: ## Executa os testes
 	@echo "Running tests..."
 	cargo test --workspace
+
+bench: ## Compila e executa benchmark padrão (ingest 10k + search 15s)
+	@echo "Building ferres-bench..."
+	cargo build --release -p ferres-bench
+	@echo "Running standard benchmark (ensure server is up at http://localhost:8080)..."
+	$(MAKE) bench-ingest bench-search
+
+bench-ingest: ## Apenas ingest: 10k vetores, dim 768, concorrência 20
+	cargo run --release -p ferres-bench -- ingest --vectors 10000 --dim 768 --concurrency 20
+
+bench-search: ## Apenas search: 15s, concorrência 50
+	cargo run --release -p ferres-bench -- search --duration 15s --concurrency 50
+
+bench-chaos: ## Chaos: 30s com writers/readers mistos
+	cargo run --release -p ferres-bench -- chaos --duration 30s --writers 20 --readers 50
 
 docker-build: ## Constrói a imagem Docker
 	@echo "Building Docker image $(DOCKER_IMAGE)..."
