@@ -380,6 +380,9 @@ struct PointBin {
     /// Vetores nomeados (multi-vector). Default None para compatibilidade com snapshots antigos.
     #[serde(default)]
     vectors: Option<std::collections::HashMap<String, Vec<f32>>>,
+    /// IDs dos pontos relacionados (grafo). Default None para compatibilidade com snapshots antigos.
+    #[serde(default)]
+    relations: Option<Vec<String>>,
 }
 
 impl PointBin {
@@ -392,6 +395,7 @@ impl PointBin {
             namespace: p.namespace.clone(),
             expires_at: p.expires_at,
             vectors: p.vectors.clone(),
+            relations: p.relations.clone(),
         }
     }
     fn into_point(self) -> Result<Point, FerresError> {
@@ -402,6 +406,7 @@ impl PointBin {
         pt.namespace = self.namespace;
         pt.expires_at = self.expires_at;
         pt.vectors = self.vectors;
+        pt.relations = self.relations;
         Ok(pt)
     }
 }

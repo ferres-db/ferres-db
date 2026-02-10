@@ -34,6 +34,32 @@ export interface Point {
   ttl?: number;
   /** Named vectors (e.g. title_vector, content_vector). Optional; search can target one via vector_field. */
   vectors?: Record<string, number[]>;
+  /** Related point IDs (graph edges). Returned by API when present. */
+  relations?: string[];
+}
+
+/** Graph node from subgraph API (id = storage_id). */
+export interface GraphNode {
+  id: string;
+  metadata?: Record<string, unknown>;
+  namespace?: string;
+  created_at?: number;
+  relations?: string[];
+  vector?: number[];
+}
+
+export interface GraphLink {
+  source: string;
+  target: string;
+}
+
+/** Alias for API "edges" response (same shape as GraphLink). */
+export type GraphEdge = GraphLink;
+
+export interface SubgraphResponse {
+  nodes: GraphNode[];
+  /** Edges (links) of the subgraph. */
+  edges: GraphEdge[];
 }
 
 export interface SearchResult {

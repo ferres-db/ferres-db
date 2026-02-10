@@ -34,9 +34,10 @@ use rayon::prelude::*;
 use crate::bm25::BM25Index;
 use crate::error::FerresError;
 use crate::explain::ExplainMeta;
+use crate::graph;
 use crate::point::Point;
 use crate::quantization::QuantizationConfig;
-use crate::search::{normalize_vectors_parallel, ANNIndex, DistanceMetric, HnswConfig, create_ann_index};
+use crate::search::{distance_between, normalize_vectors_parallel, ANNIndex, DistanceMetric, HnswConfig, create_ann_index};
 use crate::tiered::TieredStorageConfig;
 
 // ─── CollectionConfig ───────────────────────────────────────────────
@@ -140,6 +141,7 @@ fn synthetic_point_with_vector(p: &Point, vector: Vec<f32>) -> Point {
         namespace: p.namespace.clone(),
         expires_at: p.expires_at.clone(),
         vectors: None,
+        relations: p.relations.clone(),
     }
 }
 
@@ -781,6 +783,38 @@ impl Collection {
         }
     }
 
+    /// Busca conectada (graph + vetor): restringe candidatos ao subgrafo e ordena por similaridade.
+    ///
+    /// 1. Executa BFS a partir de `center_point_id` com `hops` saltos (subconjunto conectado).
+    /// 2. Dentro desse subconjunto, calcula a distância vetorial (Cosine/Euclidean/DotProduct)
+    ///    contra `query_vector`.
+    /// 3. Retorna os top `k` mais similares semanticamente e estruturalmente conectados.
+    pub fn search_connected(
+        &self,
+        query_vector: &[f32],
+        center_point_id: &str,
+        hops: u32,
+        k: usize,
+    ) -> Result<Vec<(String, f32)>, FerresError> {
+        self.validate_dimension(query_vector)?;
+        let get_point = |id: &str| self.points.get(id).cloned();
+        let candidates = graph::traverse_bfs(get_point, center_point_id, hops)?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let metric = self.config.distance;
+        let mut scored: Vec<(String, f32)> = candidates
+            .iter()
+            .map(|p| {
+                let dist = distance_between(query_vector, &p.vector, metric);
+                (p.storage_id(), dist)
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        Ok(scored)
+    }
+
     /// Busca híbrida: combina resultados vetoriais e BM25 via estratégia de fusão.
     ///
     /// Requer que a coleção tenha BM25 habilitado (`enable_bm25: true`).
@@ -861,6 +895,44 @@ impl Collection {
         if let Some(ref mut bm25) = self.bm25_index {
             bm25.remove_document(id);
         }
+        self.invalidate_search_cache();
+        self.dirty.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Adiciona uma relação entre dois pontos (grafo não direcionado).
+    ///
+    /// Atualiza a lista `relations` em ambos os pontos: `from_id` ganha `to_id`
+    /// e `to_id` ganha `from_id`. Os IDs devem ser as chaves de armazenamento
+    /// (storage_id), ou seja, o mesmo usado em `get(id)`.
+    pub fn add_relation(&mut self, from_id: &str, to_id: &str) -> Result<(), FerresError> {
+        if from_id == to_id {
+            return Err(FerresError::InvalidPointId(
+                "from and to must be different points".into(),
+            ));
+        }
+        let mut from_point = self
+            .points
+            .get(from_id)
+            .ok_or_else(|| FerresError::PointNotFound(from_id.to_string()))?
+            .clone();
+        let mut to_point = self
+            .points
+            .get(to_id)
+            .ok_or_else(|| FerresError::PointNotFound(to_id.to_string()))?
+            .clone();
+
+        fn ensure_contains(relations: &mut Option<Vec<String>>, id: &str) {
+            let list = relations.get_or_insert_with(Vec::new);
+            if !list.contains(&id.to_string()) {
+                list.push(id.to_string());
+            }
+        }
+        ensure_contains(&mut from_point.relations, to_id);
+        ensure_contains(&mut to_point.relations, from_id);
+
+        self.points.insert(from_id.to_string(), from_point);
+        self.points.insert(to_id.to_string(), to_point);
         self.invalidate_search_cache();
         self.dirty.store(true, Ordering::Release);
         Ok(())
@@ -1319,6 +1391,50 @@ mod tests {
         let mut col = Collection::new(test_config());
         let result = col.remove("ghost");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_relation_updates_both_points() {
+        let mut col = Collection::new(test_config());
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
+
+        col.add_relation("a", "b").unwrap();
+
+        let pa = col.get("a").unwrap();
+        let pb = col.get("b").unwrap();
+        assert_eq!(pa.relations.as_deref(), Some(&["b".to_string()][..]));
+        assert_eq!(pb.relations.as_deref(), Some(&["a".to_string()][..]));
+    }
+
+    #[test]
+    fn add_relation_same_id_returns_error() {
+        let mut col = Collection::new(test_config());
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        let result = col.add_relation("a", "a");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_relation_nonexistent_returns_error() {
+        let mut col = Collection::new(test_config());
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        let result = col.add_relation("a", "ghost");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn search_connected_returns_similar_within_hops() {
+        let mut col = Collection::new(test_config());
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        col.insert(make_point("b", vec![0.9, 0.1, 0.0])).unwrap();
+        col.insert(make_point("c", vec![0.0, 0.0, 1.0])).unwrap();
+        col.add_relation("a", "b").unwrap();
+        col.add_relation("a", "c").unwrap();
+        let results = col.search_connected(&[1.0, 0.0, 0.0], "a", 1, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "a");
+        assert_eq!(results[1].0, "b");
     }
 
     #[test]

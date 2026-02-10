@@ -338,6 +338,8 @@ fn benchmark_sq8(c: &mut Criterion) {
                     created_at: 0,
                     namespace: None,
                     expires_at: None,
+                    vectors: None,
+                    relations: None,
                 }
             })
             .collect();

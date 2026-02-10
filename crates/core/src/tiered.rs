@@ -937,6 +937,7 @@ impl TieredCollection {
                     namespace,
                     expires_at: m.expires_at,
                     vectors: None,
+                    relations: None,
                 };
                 Ok(Some(point))
             }
@@ -1182,6 +1183,7 @@ impl TieredCollection {
                             namespace,
                             expires_at: meta.expires_at,
                             vectors: None,
+                            relations: None,
                         },
                     ));
                 }

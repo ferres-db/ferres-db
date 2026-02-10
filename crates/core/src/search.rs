@@ -906,8 +906,15 @@ impl QuantizedHnswIndex {
     }
 }
 
-/// Calcula distância entre dois vetores f32 para re-ranking.
+/// Calcula distância entre dois vetores f32 para re-ranking (uso interno).
 fn compute_distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
+    distance_between(a, b, metric)
+}
+
+/// Distância entre dois vetores segundo a métrica (público para busca conectada, etc.).
+///
+/// Retorna valor tal que menor = mais similar (Euclidean L2², Cosine 1-cos, DotProduct 1-dot).
+pub fn distance_between(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
     match metric {
         DistanceMetric::Euclidean => euclidean_distance(a, b),
         DistanceMetric::Cosine => {
@@ -984,6 +991,7 @@ impl ANNIndex for QuantizedHnswIndex {
                 namespace: p.namespace.clone(),
                 expires_at: p.expires_at,
                 vectors: None,
+                relations: p.relations.clone(),
             })
             .collect();
 
@@ -1072,6 +1080,7 @@ impl ANNIndex for QuantizedHnswIndex {
             namespace: point.namespace.clone(),
             expires_at: point.expires_at,
             vectors: None,
+            relations: point.relations.clone(),
         };
 
         self.inner.add_point(&dq_point)
@@ -1131,6 +1140,7 @@ mod tests {
             namespace: None,
             expires_at: None,
             vectors: None,
+            relations: None,
         }
     }
 

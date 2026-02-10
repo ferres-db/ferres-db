@@ -818,7 +818,7 @@ Retorna um ponto pelo ID.
 | ----------- | ------ | ---------------------------------------------------------------------- |
 | `namespace` | string | Quando o ponto foi inserido com namespace, informe-o para localização. |
 
-**Resposta:** `200 OK`. Inclui o campo `namespace` quando o ponto tiver namespace.
+**Resposta:** `200 OK`. Inclui o campo `namespace` quando o ponto tiver namespace e `relations` quando o ponto tiver relações (grafo).
 
 **Schema de resposta:**
 
@@ -828,14 +828,117 @@ Retorna um ponto pelo ID.
   "vector": [0.1, 0.2, -0.1],
   "metadata": { "text": "Conteúdo" },
   "created_at": 1707123456,
-  "namespace": "tenant-a"
+  "namespace": "tenant-a",
+  "relations": ["doc-2", "doc-3"]
 }
 ```
+
+| Campo       | Tipo           | Descrição                                                                 |
+| ----------- | -------------- | ------------------------------------------------------------------------- |
+| `relations` | array de string | IDs dos pontos relacionados (grafo não direcionado). Omitido se vazio.   |
 
 **Exemplo curl:**
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections/docs/points/doc-1
+```
+
+---
+
+### POST /api/v1/collections/{name}/points/link
+
+Cria uma relação não direcionada entre dois pontos (persistência de grafos). Atualiza o campo `relations` em ambos os pontos: o ponto `from` passa a incluir `to` na lista e o ponto `to` passa a incluir `from`. A persistência em disco ocorre no próximo snapshot (save).
+
+**Path:** `name` — nome da coleção.
+
+**Request body:**
+
+| Campo  | Tipo   | Obrigatório | Descrição                                                                                    |
+| ------ | ------ | ----------- | ------------------------------------------------------------------------------------------- |
+| `from` | string | sim         | ID do ponto de origem (storage_id; para pontos sem namespace, o id lógico do ponto).        |
+| `to`   | string | sim         | ID do ponto de destino (storage_id).                                                        |
+
+```json
+{
+  "from": "id_A",
+  "to": "id_B"
+}
+```
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "ok": true,
+  "from": "id_A",
+  "to": "id_B"
+}
+```
+
+**Erros:** `404` se a coleção ou um dos pontos não existir; `400` se `from` e `to` forem iguais ou vazios; `403` se não tiver permissão de escrita na coleção.
+
+**Exemplo curl:**
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/collections/docs/points/link \
+  -H "Content-Type: application/json" \
+  -d '{"from":"id_A","to":"id_B"}'
+```
+
+---
+
+### GET /api/v1/collections/{name}/graph/subgraph
+
+Retorna um subgrafo da coleção para visualização (ex.: Graph Explorer no dashboard). Formato de retorno: `{ "nodes": [...], "edges": [...] }`.
+
+**Path:** `name` — nome da coleção.
+
+**Query params:**
+
+| Campo       | Tipo   | Obrigatório | Descrição                                                                                           |
+| ----------- | ------ | ----------- | --------------------------------------------------------------------------------------------------- |
+| `center_id` | string | não         | Centro do subgrafo; usado com `depth` para BFS (tem precedência sobre `seed` quando ambos presentes). |
+| `depth`     | number | não         | Profundidade em saltos para BFS a partir de `center_id` (ex.: 2 = até 2 saltos).                      |
+| `seed`      | string | não         | Se informado (e sem center_id), retorna o nó e seus vizinhos (1-hop).                               |
+| `limit`     | number | não         | Sem center_id/seed: número máximo de nós (default 500, máx. 2000).                                  |
+
+**Resposta:** `200 OK`
+
+**Schema de resposta:**
+
+```json
+{
+  "nodes": [
+    {
+      "id": "id_A",
+      "metadata": {},
+      "namespace": null,
+      "created_at": 1707123456,
+      "relations": ["id_B", "id_C"]
+    }
+  ],
+  "edges": [
+    { "source": "id_A", "target": "id_B" },
+    { "source": "id_A", "target": "id_C" }
+  ]
+}
+```
+
+Cada nó inclui `id` (storage_id), `metadata`, `namespace`, `created_at`, `relations`. O campo `vector` é omitido para reduzir o payload. Use GET `/api/v1/collections/{name}/points/{id}` para detalhes completos do ponto.
+
+**Exemplo curl:**
+
+```bash
+# Subgrafo por BFS (center_id + depth)
+curl -s "http://localhost:8080/api/v1/collections/docs/graph/subgraph?center_id=id_A&depth=2"
+
+# Subgrafo 1-hop (seed)
+curl -s "http://localhost:8080/api/v1/collections/docs/graph/subgraph?seed=id_A"
+
+# Subgrafo completo (pontos com relações, até 500 nós)
+curl -s "http://localhost:8080/api/v1/collections/docs/graph/subgraph"
 ```
 
 ---
@@ -1643,6 +1746,7 @@ curl -s -X PUT http://localhost:8080/api/v1/users/analyst/permissions \
 | POST /collections                        | `create`             |
 | DELETE /collections/{name}               | `delete`             |
 | POST /collections/{name}/points          | `write`              |
+| POST /collections/{name}/points/link     | `write`              |
 | DELETE /collections/{name}/points        | `write`              |
 | POST /collections/{name}/search          | `read`               |
 | POST /collections/{name}/search/hybrid   | `read`               |
@@ -2170,6 +2274,7 @@ service FerresDB {
 | `GET  /api/v1/collections/{name}`                | `GetCollection`                 |
 | `DELETE /api/v1/collections/{name}`              | `DeleteCollection`              |
 | `POST /api/v1/collections/{name}/points`         | `UpsertPoints`                  |
+| `POST /api/v1/collections/{name}/points/link`    | —                               |
 | `DELETE /api/v1/collections/{name}/points`       | `DeletePoints`                  |
 | `GET  /api/v1/collections/{name}/points/{id}`    | `GetPoint`                      |
 | `GET  /api/v1/collections/{name}/points`         | `ListPoints`                    |
