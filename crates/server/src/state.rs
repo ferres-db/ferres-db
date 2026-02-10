@@ -19,6 +19,7 @@ use ferres_db_core::{Collection, FileStorage, ReindexJob, SearchResult, StorageC
 
 use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
+use crate::cloud_settings::CloudSettingsStore;
 use crate::users::UserStore;
 use crate::query_logger::QueryLogger;
 use crate::query_log_analytics::{avg_points_per_second_10m, QueryLogCache};
@@ -177,6 +178,24 @@ pub struct ServerConfig {
     /// Gravar snapshots em formato binário (points.bin) em vez de JSONL. Reduz tamanho e tempo de carga. Default: false.
     #[serde(default)]
     pub binary_snapshot: bool,
+    /// Isolamento físico por namespace: pontos de cada namespace em `data/collections/<name>/namespaces/<ns>/points.bin`. Default: false.
+    #[serde(default)]
+    pub namespace_physical_isolation: bool,
+    /// Se definido, este nó inicia como réplica de leitura do endereço indicado (ex: "127.0.0.1:50051"). Experimental.
+    #[serde(skip_serializing)]
+    pub replica_of: Option<String>,
+    /// Região AWS para backup S3 (ex: "us-east-1"). Env: FERRESDB_S3_REGION ou AWS_REGION.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3_region: Option<String>,
+    /// Nome do bucket S3 para upload de backups. Env: FERRESDB_S3_BUCKET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3_bucket: Option<String>,
+    /// Access Key ID para S3 (opcional; pode usar AWS_ACCESS_KEY_ID). Env: FERRESDB_S3_ACCESS_KEY_ID.
+    #[serde(skip_serializing)]
+    pub s3_access_key_id: Option<String>,
+    /// Secret Access Key para S3 (opcional; pode usar AWS_SECRET_ACCESS_KEY). Env: FERRESDB_S3_SECRET_ACCESS_KEY.
+    #[serde(skip_serializing)]
+    pub s3_secret_access_key: Option<String>,
 }
 
 fn default_host() -> String {
@@ -250,6 +269,43 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("FERRESDB_BINARY_SNAPSHOT") {
             config.binary_snapshot = v.eq_ignore_ascii_case("true") || v == "1";
         }
+        if let Ok(v) = std::env::var("FERRESDB_NAMESPACE_PHYSICAL_ISOLATION") {
+            config.namespace_physical_isolation = v.eq_ignore_ascii_case("true") || v == "1";
+        }
+        if let Ok(addr) = std::env::var("FERRESDB_REPLICA_OF") {
+            if !addr.trim().is_empty() {
+                config.replica_of = Some(addr.trim().to_string());
+            }
+        }
+        // S3 backup (Region, Bucket, Credentials)
+        if let Ok(v) = std::env::var("FERRESDB_S3_REGION").or_else(|_| std::env::var("AWS_REGION")) {
+            if !v.trim().is_empty() {
+                config.s3_region = Some(v.trim().to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("FERRESDB_S3_BUCKET") {
+            if !v.trim().is_empty() {
+                config.s3_bucket = Some(v.trim().to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("FERRESDB_S3_ACCESS_KEY_ID").or_else(|_| std::env::var("AWS_ACCESS_KEY_ID")) {
+            if !v.trim().is_empty() {
+                config.s3_access_key_id = Some(v.trim().to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("FERRESDB_S3_SECRET_ACCESS_KEY").or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY")) {
+            if !v.trim().is_empty() {
+                config.s3_secret_access_key = Some(v.trim().to_string());
+            }
+        }
+
+        // --replica-of <ADDR> (override env)
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(i) = args.iter().position(|a| a == "--replica-of") {
+            if let Some(addr) = args.get(i + 1) {
+                config.replica_of = Some(addr.clone());
+            }
+        }
 
         info!(
             host = %config.host,
@@ -273,6 +329,12 @@ impl Default for ServerConfig {
             api_keys: None,
             wal_compression: false,
             binary_snapshot: false,
+            namespace_physical_isolation: false,
+            replica_of: None,
+            s3_region: None,
+            s3_bucket: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
         }
     }
 }
@@ -388,6 +450,8 @@ pub struct AppState {
     pub api_key_store: Option<Arc<ApiKeyStore>>,
     /// Store de usuários do dashboard (SQLite). Usado para login.
     pub user_store: Option<Arc<UserStore>>,
+    /// Cloud (S3) backup settings from dashboard (SQLite). Overrides config when set.
+    pub cloud_settings_store: Option<Arc<CloudSettingsStore>>,
     /// Logger de auditoria (append-only JSONL, rotação diária).
     pub audit_logger: Arc<AuditLogger>,
     /// Broadcast channels para eventos de collection (streaming subscribers).
@@ -414,6 +478,7 @@ impl AppState {
         config: ServerConfig,
         api_key_store: Option<Arc<ApiKeyStore>>,
         user_store: Option<Arc<UserStore>>,
+        cloud_settings_store: Option<Arc<CloudSettingsStore>>,
     ) -> Result<Self, ferres_db_core::FerresError> {
         info!(
             storage_path = %config.storage_path.display(),
@@ -532,6 +597,7 @@ impl AppState {
             started_at: Arc::new(Instant::now()),
             api_key_store,
             user_store,
+            cloud_settings_store,
             audit_logger,
             event_channels,
             ws_connections_active: Arc::new(AtomicU64::new(0)),
@@ -701,8 +767,9 @@ impl AppState {
             if collection.is_dirty() {
                 let collection_dir = collections_dir.join(name);
                 let binary = self.config.binary_snapshot;
+                let ns_isolation = self.config.namespace_physical_isolation;
                 self.storage_circuit_breaker.call(|| {
-                    FileStorage::save_collection(&collection, &collection_dir, binary)
+                    FileStorage::save_collection(&collection, &collection_dir, binary, ns_isolation)
                 })?;
                 collection.mark_clean();
                 saved_count += 1;
@@ -735,8 +802,9 @@ impl AppState {
                 ))
             })?;
             let binary = self.config.binary_snapshot;
+            let ns_isolation = self.config.namespace_physical_isolation;
             self.storage_circuit_breaker.call(|| {
-                FileStorage::save_collection(&collection, &collection_dir, binary)
+                FileStorage::save_collection(&collection, &collection_dir, binary, ns_isolation)
             })?;
             collection.mark_clean();
             saved_count += 1;

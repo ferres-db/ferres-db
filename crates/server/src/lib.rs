@@ -5,6 +5,7 @@
 pub mod api_keys;
 pub mod audit;
 pub mod auth;
+pub mod cloud_settings;
 pub mod users;
 pub mod error;
 pub mod handlers;
@@ -23,6 +24,8 @@ pub mod tracing_otel;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
+#[cfg(feature = "grpc")]
+pub mod replication;
+
 #[cfg(feature = "mcp")]
 pub mod mcp;
-

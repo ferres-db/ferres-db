@@ -254,6 +254,20 @@ impl Wal {
         Ok(())
     }
 
+    /// Lê entradas do WAL a partir de uma posição (índice 0-based) para replicação incremental.
+    ///
+    /// Retorna apenas as entradas com índice >= `position`. Útil para réplicas que consomem
+    /// o WAL do líder a partir de um offset conhecido.
+    /// Detecta automaticamente formato comprimido (magic `WALz`) ou JSONL.
+    pub fn stream_from(collection_dir: &Path, position: u64) -> Result<Vec<WalEntry>, FerresError> {
+        let all = Self::read_entries(collection_dir)?;
+        let from = position as usize;
+        if from >= all.len() {
+            return Ok(Vec::new());
+        }
+        Ok(all[from..].to_vec())
+    }
+
     /// Lê todas as entradas do WAL para replay.
     ///
     /// Detecta automaticamente formato comprimido (magic `WALz`) ou JSONL.
@@ -787,7 +801,7 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Escreve WAL com 1 upsert adicional
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -811,7 +825,7 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Cria wal.log vazio
         fs::write(dir.join("wal.log"), "").unwrap();
@@ -829,7 +843,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Garante que não há wal.log
         let wal_path = dir.join("wal.log");
@@ -861,7 +875,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert A(v2)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -883,7 +897,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com delete(A)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -903,7 +917,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com delete(X) — X não existe
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -927,7 +941,7 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert(C) válido + linha truncada (simula crash)
         let p = make_point("c", vec![0.0, 0.0, 1.0]);
@@ -959,7 +973,7 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL tem upsert(C) — mas a coleção em memória NÃO foi mutada
         // (simula crash entre WAL append e collection.insert)
@@ -983,7 +997,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert(B)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -992,7 +1006,7 @@ mod tests {
 
         // Novo snapshot com {A, B} — mas NÃO trunca WAL (simula crash)
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
         // WAL ainda tem upsert(B)
 
         // Recovery: snapshot {A,B} + replay upsert(B) = idempotente
@@ -1013,7 +1027,7 @@ mod tests {
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
         col.insert(make_point("c", vec![0.0, 0.0, 1.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL: delete(B), upsert(D), upsert(A com novo vetor)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -1041,7 +1055,7 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert(C)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -1084,7 +1098,7 @@ mod tests {
         // Snapshot inicial vazio
         let config = test_config("test_col");
         let col = Collection::new(config);
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Simula batch de 50 operações, crash após 30
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -1114,7 +1128,7 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com operações
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -1149,7 +1163,7 @@ mod tests {
         // Snapshot inicial
         let config = test_config("test_col");
         let col = Collection::new(config);
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com exatamente 1000 operações (threshold)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -1176,7 +1190,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert(B)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -1185,7 +1199,7 @@ mod tests {
 
         // Novo snapshot com {A, B}
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Simula crash durante truncate: WAL ainda existe mas deveria ter sido truncado
         // (não chamamos truncate_after_snapshot)
@@ -1205,7 +1219,7 @@ mod tests {
         // Snapshot inicial
         let config = test_config("test_col");
         let col = Collection::new(config);
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Escreve WAL manualmente com entradas válidas + parcialmente escrita
         let wal_path = dir.join("wal.log");
@@ -1254,7 +1268,7 @@ mod tests {
         // Insere pontos com vetores distintos para busca
         col.insert(make_point("near_origin", vec![0.1, 0.1, 0.1])).unwrap();
         col.insert(make_point("far_away", vec![10.0, 10.0, 10.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL adiciona mais pontos
         let mut wal = Wal::open(&dir, 1000, false).unwrap();

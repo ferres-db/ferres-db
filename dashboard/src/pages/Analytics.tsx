@@ -10,6 +10,8 @@ import {
   Line,
   AreaChart,
   Area,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -81,6 +83,23 @@ export const Analytics = () => {
     time: format(new Date(e.timestamp * 1000), 'HH:mm:ss'),
     timestamp: e.timestamp,
     took_ms: e.took_ms,
+  }));
+
+  // Histograma de latência (P95): buckets para distribuição das últimas consultas (10 min)
+  const latencyBuckets = [
+    { range: '0-5ms', min: 0, max: 5 },
+    { range: '5-10ms', min: 5, max: 10 },
+    { range: '10-25ms', min: 10, max: 25 },
+    { range: '25-50ms', min: 25, max: 50 },
+    { range: '50-100ms', min: 50, max: 100 },
+    { range: '100ms+', min: 100, max: Infinity },
+  ];
+  const latencyHistogramData = latencyBuckets.map(({ range, min, max }) => ({
+    range,
+    count: recentLatencies.filter((e) => {
+      const ms = e.took_ms;
+      return ms >= min && ms < max;
+    }).length,
   }));
 
   const circuitVariant =
@@ -201,13 +220,13 @@ export const Analytics = () => {
         </CardContent>
       </Card>
 
-      {/* Real-time: Throughput (Line) + Latency (Area) */}
+      {/* Real-time: Ingestão (pontos/min) + Latência (área + histograma P95) */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <TrendingUp className="h-5 w-5 text-orange-500" />
-              Ingestão (Throughput) — últimos 10 min
+              Ingestão — Pontos por minuto (últimos 10 min)
             </CardTitle>
             <p className="text-sm text-gray-400">
               Média: {typeof avgPointsPerSecond === 'number' ? avgPointsPerSecond.toFixed(2) : 0} pts/s
@@ -249,7 +268,7 @@ export const Analytics = () => {
 
         <Card>
           <CardHeader>
-            <CardTitle>Latência de Busca (ms) — últimas consultas</CardTitle>
+            <CardTitle>Latência de Busca — últimas consultas</CardTitle>
             <p className="text-sm text-gray-400">
               P95 (10 min): {timeSeries10m?.p95_latency_ms != null ? Number(timeSeries10m.p95_latency_ms).toFixed(2) : '—'} ms
             </p>
@@ -294,6 +313,40 @@ export const Analytics = () => {
           </CardContent>
         </Card>
       </div>
+
+      {/* Histograma P95: distribuição de latências (10 min) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Latência — Histograma P95 (últimos 10 min)</CardTitle>
+          <p className="text-sm text-gray-400">
+            Distribuição das consultas por faixa de latência; P95 (10 min): {timeSeries10m?.p95_latency_ms != null ? Number(timeSeries10m.p95_latency_ms).toFixed(2) : '—'} ms
+          </p>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <Skeleton className="h-[220px] w-full rounded" />
+          ) : latencyHistogramData.some((d) => d.count > 0) ? (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={latencyHistogramData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#3f3f3f" />
+                <XAxis dataKey="range" stroke="#9ca3af" />
+                <YAxis stroke="#9ca3af" allowDecimals={false} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#2d2d2d',
+                    border: '1px solid #3f3f3f',
+                    borderRadius: '8px',
+                  }}
+                  labelStyle={{ color: '#f9fafb' }}
+                />
+                <Bar dataKey="count" fill="#f97316" name="Consultas" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="py-12 text-center text-sm text-gray-400">Sem dados de latência nos últimos 10 min</p>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Pie: tier distribution */}

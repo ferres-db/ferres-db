@@ -46,6 +46,10 @@ pub struct GlobalStatsResponse {
     pub queries_per_minute: Vec<QueriesPerMinuteBucket>,
     /// Whether SIMD (AVX2/SSE4.1) acceleration is active at runtime for distance kernels.
     pub simd_enabled: bool,
+    /// Replication role: "leader" or "replica" (experimental).
+    pub role: String,
+    /// Whether namespace physical isolation is enabled (points per namespace in separate dirs).
+    pub namespace_physical_isolation: bool,
 }
 
 // ─── Queries list (GET /api/v1/stats/queries) ─────────────────────────────
@@ -254,6 +258,12 @@ pub async fn get_global_stats(
         .map(|(timestamp, count)| QueriesPerMinuteBucket { timestamp, count })
         .collect();
 
+    let role = if app_state.config.replica_of.is_some() {
+        "replica"
+    } else {
+        "leader"
+    };
+
     Ok(Json(GlobalStatsResponse {
         total_collections,
         total_points,
@@ -261,6 +271,8 @@ pub async fn get_global_stats(
         avg_latency_ms,
         queries_per_minute,
         simd_enabled: simd_enabled(),
+        role: role.to_string(),
+        namespace_physical_isolation: app_state.config.namespace_physical_isolation,
     }))
 }
 
@@ -355,12 +367,14 @@ pub async fn get_analytics(
     };
     let failure_count = cb.failure_count();
 
-    // Séries temporais (10 min): throughput e P95 latência
+    // Séries temporais (10 min): throughput e P95 latência (leitura fresca do log para analytics)
     let (avg_points_per_second, throughput_raw) = app_state.time_series_ingest_10m();
-    let p95_latency_10m = cache.p95_latency_10m();
-    let entries_10m = cache.entries_10m();
+    let p95_latency_10m = cache.p95_latency_10m_fresh();
+    let entries_10m = cache.entries_10m_fresh();
     let start = entries_10m.len().saturating_sub(100);
-    let recent_latencies: Vec<RecentLatencyEntry> = entries_10m[start..]
+    let recent_latencies: Vec<RecentLatencyEntry> = entries_10m
+        .get(start..)
+        .unwrap_or_default()
         .iter()
         .map(|e| RecentLatencyEntry {
             timestamp: e.timestamp_secs,

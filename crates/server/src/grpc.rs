@@ -15,7 +15,7 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use ferres_db_core::{
-    Collection, CollectionConfig, FileStorage, MetadataFilter, Point,
+    Collection, CollectionConfig, FileStorage, MetadataFilter, Point, Wal, WalEntry, WalOperation,
     build_search_explanation,
 };
 
@@ -28,6 +28,30 @@ pub mod pb {
 
 use pb::ferres_db_server::{FerresDb, FerresDbServer};
 use pb::*;
+
+// ─── Helper: WAL entry to proto (replication) ───────────────────────────
+
+fn wal_entry_to_proto(entry: WalEntry) -> WalEntryMessage {
+    use pb::wal_entry_message::Operation;
+    let operation = match entry.operation {
+        WalOperation::Upsert { point } => {
+            let metadata_json = serde_json::to_string(&point.metadata)
+                .unwrap_or_else(|_| "null".to_string());
+            Operation::Upsert(WalUpsert {
+                id: point.id,
+                vector: point.vector,
+                metadata_json,
+                created_at: point.created_at,
+                namespace: point.namespace,
+            })
+        }
+        WalOperation::Delete { id } => Operation::Delete(WalDelete { id }),
+    };
+    WalEntryMessage {
+        timestamp: entry.timestamp,
+        operation: Some(operation),
+    }
+}
 
 // ─── Helper: converter DistanceMetric proto ↔ core ──────────────────────
 
@@ -148,7 +172,8 @@ impl FerresDb for FerresGrpcService {
                 .read()
                 .map_err(|e| Status::internal(format!("lock error: {e}")))?;
             let binary = self.state.config.binary_snapshot;
-            FileStorage::save_collection(&coll, &collection_dir, binary)
+            let ns_isolation = self.state.config.namespace_physical_isolation;
+            FileStorage::save_collection(&coll, &collection_dir, binary, ns_isolation)
                 .map_err(|e| Status::internal(e.to_string()))?;
             coll.mark_clean();
         }
@@ -847,6 +872,31 @@ impl FerresDb for FerresGrpcService {
         };
 
         Ok(Response::new(Box::pin(output)))
+    }
+
+    // ── Replication: StreamWal ─────────────────────────────────────────
+
+    type StreamWalStream = GrpcStream<StreamWalResponse>;
+
+    async fn stream_wal(
+        &self,
+        request: Request<StreamWalRequest>,
+    ) -> Result<Response<Self::StreamWalStream>, Status> {
+        let req = request.into_inner();
+        if req.collection_name.is_empty() {
+            return Err(Status::invalid_argument("collection_name cannot be empty"));
+        }
+        let collection_dir = self
+            .state
+            .config
+            .storage_path
+            .join("collections")
+            .join(&req.collection_name);
+        let entries = Wal::stream_from(&collection_dir, req.from_position)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let messages: Vec<WalEntryMessage> = entries.into_iter().map(wal_entry_to_proto).collect();
+        let stream = tokio_stream::iter([Ok(StreamWalResponse { entries: messages })]);
+        Ok(Response::new(Box::pin(stream)))
     }
 }
 

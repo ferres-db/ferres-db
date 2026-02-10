@@ -4,6 +4,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod backup;
 pub mod collections;
 pub mod users;
 pub mod debug;
@@ -13,6 +14,7 @@ pub mod metrics;
 pub mod points;
 pub mod reindex;
 pub mod save;
+pub mod settings;
 pub mod stats;
 pub mod streaming;
 

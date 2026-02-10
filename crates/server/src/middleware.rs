@@ -6,9 +6,10 @@
 //! [crate::request_validation] e aplicada nos handlers de points antes do processamento.
 
 use axum::{
-    extract::Request,
+    extract::{Request, State},
+    http::Method,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use std::sync::Arc;
@@ -22,7 +23,43 @@ use tower_governor::{
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::error::ApiError;
 use crate::metrics::{HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_MS, normalize_endpoint};
+use crate::state::AppState;
+
+/// Bloqueia operações de escrita (POST/PUT/DELETE) quando o servidor está em modo réplica.
+/// Retorna 405 Method Not Allowed para rotas de escrita; permite GET e POST em search/auth.
+pub async fn replica_write_guard(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if state.config.replica_of.is_none() {
+        return next.run(req).await;
+    }
+    let method = req.method().clone();
+    let path = req.uri().path();
+    if method == Method::GET {
+        return next.run(req).await;
+    }
+    if method == Method::POST {
+        if path.ends_with("/search")
+            || path.ends_with("/search/hybrid")
+            || path.ends_with("/search/explain")
+            || path.ends_with("/search/estimate")
+            || path == "/api/v1/auth/login"
+        {
+            return next.run(req).await;
+        }
+    }
+    if method == Method::POST || method == Method::PUT || method == Method::DELETE {
+        return ApiError::method_not_allowed(
+            "Write operations are not allowed on a read replica",
+        )
+        .into_response();
+    }
+    next.run(req).await
+}
 
 /// Middleware de logging estruturado e raiz do distributed tracing para cada requisição.
 ///

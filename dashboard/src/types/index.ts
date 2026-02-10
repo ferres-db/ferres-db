@@ -54,6 +54,10 @@ export interface GlobalStats {
   avg_latency_ms: number;
   queries_per_minute: QueriesPerMinuteBucket[];
   simd_enabled: boolean;
+  /** Replication role: "leader" or "replica" (experimental). */
+  role?: string;
+  /** Namespace physical isolation (multitenancy storage). */
+  namespace_physical_isolation?: boolean;
 }
 
 export interface QueryEntry {

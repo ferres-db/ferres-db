@@ -8,6 +8,7 @@ use tower_http::cors::CorsLayer;
 use std::sync::Arc;
 use ferres_db_server::api_keys::ApiKeyStore;
 use ferres_db_server::auth;
+use ferres_db_server::cloud_settings::CloudSettingsStore;
 use ferres_db_server::state::{AppState, ServerConfig};
 use ferres_db_server::users::UserStore;
 use ferres_db_server::handlers::reindex::{run_auto_reindex_cycle, run_auto_vacuum_cycle};
@@ -156,6 +157,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_store = Some(Arc::new(user_store));
     info!("User store initialized (default user root)");
 
+    // Cloud (S3) settings from dashboard (SQLite)
+    let cloud_settings_path = config.storage_path.join("cloud_settings.db");
+    let cloud_settings_store = CloudSettingsStore::new(&cloud_settings_path).map_err(|e| {
+        eprintln!("Failed to open cloud settings store at {}: {}", cloud_settings_path.display(), e);
+        e
+    })?;
+    let cloud_settings_store = Some(Arc::new(cloud_settings_store));
+    info!("Cloud settings store initialized");
+
     // JWT para sessão do dashboard (FERRESDB_JWT_SECRET ou valor padrão em dev)
     let jwt_secret = std::env::var("FERRESDB_JWT_SECRET")
         .unwrap_or_else(|_| "ferresdb-dashboard-secret-change-in-production".to_string());
@@ -165,8 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // As métricas são registradas automaticamente via lazy_static no módulo metrics
     info!("Prometheus metrics initialized");
 
-    // Inicializa AppState (com store de API keys e de usuários)
-    let app_state = AppState::new(config.clone(), api_key_store, user_store)
+    // Inicializa AppState (com store de API keys, usuários e cloud settings)
+    let app_state = AppState::new(config.clone(), api_key_store, user_store, cloud_settings_store)
         .map_err(|e| {
             error!(error = %e, "failed to initialize collections");
             e
@@ -174,6 +184,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Atualiza gauge de coleções ativas
     metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
+
+    // Log do status de aceleração SIMD no startup
+    let simd = ferres_db_core::simd_enabled();
+    if simd {
+        info!("SIMD acceleration: active (AVX2 or SSE4.1)");
+    } else {
+        info!("SIMD acceleration: scalar fallback (no AVX2/SSE4.1 detected)");
+    }
 
     // Inicia servidor MCP via STDIO quando --mcp ou FERRESDB_ENABLE_MCP=true (requer build com --features mcp)
     #[cfg(feature = "mcp")]
@@ -228,6 +246,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+
+    // Inicia worker de replicação quando --replica-of <ADDR> (requer feature grpc)
+    #[cfg(feature = "grpc")]
+    if app_state.config.replica_of.is_some() {
+        let state_for_replication = app_state.clone();
+        tokio::spawn(async move {
+            ferres_db_server::replication::run_replication_worker(state_for_replication).await;
+        });
+        info!("replication worker started (replica-of)");
+    }
 
     // Inicia background task para vacuum de pontos expirados (TTL) a cada 60 segundos
     const AUTO_VACUUM_INTERVAL_SECS: u64 = 60;
@@ -305,6 +333,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Cria o router com todas as rotas da API
     let app = routes::create_router()
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::replica_write_guard,
+        ))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .layer(axum::middleware::from_fn(middleware::request_logger))
         .layer(tower_http::trace::TraceLayer::new_for_http())
