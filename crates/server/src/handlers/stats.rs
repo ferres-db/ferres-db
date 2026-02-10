@@ -170,6 +170,14 @@ pub struct TimeSeries10m {
     pub recent_latencies: Vec<RecentLatencyEntry>,
 }
 
+/// Um namespace com contagem de pontos e estimativa de armazenamento (para Top Namespaces by Storage).
+#[derive(Debug, Serialize)]
+pub struct TopNamespaceByStorage {
+    pub namespace: String,
+    pub point_count: usize,
+    pub storage_bytes_estimate: usize,
+}
+
 /// Resposta de GET /api/v1/stats/analytics.
 #[derive(Debug, Serialize)]
 pub struct AnalyticsResponse {
@@ -181,6 +189,8 @@ pub struct AnalyticsResponse {
     pub time_series_10m: TimeSeries10m,
     /// Cache hit rate % (search_cache do core, agregado em todas as coleções). None se nenhuma busca.
     pub cache_hit_rate_pct: Option<f64>,
+    /// Top namespaces por armazenamento (pontos + bytes estimados), para identificar tenants que mais consomem recursos.
+    pub top_namespaces_by_storage: Vec<TopNamespaceByStorage>,
 }
 
 /// Handler para GET /api/v1/collections/{name}/stats
@@ -401,6 +411,43 @@ pub async fn get_analytics(
         total => Some((total_hits as f64 / total as f64) * 100.0),
     };
 
+    // Top namespaces by storage: aggregate point count and storage estimate per namespace across all collections
+    let mut namespace_point_count: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut namespace_storage_bytes: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for entry in app_state.collections.iter() {
+        let (points, dimension) = match entry.value().read() {
+            Ok(c) => (c.points_owned(), c.config().dimension),
+            Err(_) => continue,
+        };
+        let bytes_per_point = dimension * 4 + 200; // vector (f32) + metadata estimate
+        for point in points {
+            let ns = point
+                .namespace
+                .as_deref()
+                .unwrap_or("(default)")
+                .to_string();
+            *namespace_point_count.entry(ns.clone()).or_insert(0) += 1;
+            *namespace_storage_bytes
+                .entry(ns)
+                .or_insert(0) += bytes_per_point;
+        }
+    }
+    let mut top_namespaces_by_storage: Vec<TopNamespaceByStorage> = namespace_point_count
+        .into_iter()
+        .map(|(namespace, point_count)| {
+            let storage_bytes_estimate = namespace_storage_bytes.get(&namespace).copied().unwrap_or(0);
+            TopNamespaceByStorage {
+                namespace,
+                point_count,
+                storage_bytes_estimate,
+            }
+        })
+        .collect();
+    top_namespaces_by_storage.sort_by(|a, b| b.storage_bytes_estimate.cmp(&a.storage_bytes_estimate));
+    top_namespaces_by_storage.truncate(30);
+
     Ok(Json(AnalyticsResponse {
         tier_distribution: AnalyticsTierDistribution {
             hot,
@@ -433,6 +480,7 @@ pub async fn get_analytics(
             recent_latencies,
         },
         cache_hit_rate_pct,
+        top_namespaces_by_storage,
     }))
 }
 

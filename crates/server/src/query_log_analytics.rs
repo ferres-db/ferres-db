@@ -26,6 +26,9 @@ struct LogLine {
     #[serde(default)]
     results_count: Option<usize>,
     took_ms: u64,
+    /// Vetor completo (opcional); presente quando o log foi escrito com suporte a warmup.
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
 }
 
 /// Entrada parseada para uso nos endpoints (últimas 24h por padrão).
@@ -39,6 +42,8 @@ pub struct ParsedQueryEntry {
     pub took_ms: u64,
     pub results_count: usize,
     pub query_id: String,
+    /// Vetor completo (opcional); usado pelo warmup para replay.
+    pub vector: Option<Vec<f32>>,
 }
 
 /// Cache em memória do log parseado com TTL de 1h.
@@ -109,6 +114,7 @@ impl QueryLogCache {
                 query_id: log
                     .query_id
                     .unwrap_or_else(|| format!("legacy-{}", out.len())),
+                vector: log.vector,
             });
         }
         out
@@ -266,6 +272,17 @@ impl QueryLogCache {
         entries.retain(|e| e.took_ms >= threshold_ms);
         entries.sort_by(|a, b| b.took_ms.cmp(&a.took_ms));
         entries.into_iter().take(limit).collect()
+    }
+
+    /// Últimas N entradas do log que possuem vetor (para warmup no startup).
+    /// Lê o arquivo diretamente (sem cache). Retorna no ordem cronológica (mais antigas primeiro).
+    pub fn last_n_entries_for_warmup(&self, n: usize) -> Vec<ParsedQueryEntry> {
+        let all = Self::load_log(&self.log_path);
+        let last_n: Vec<ParsedQueryEntry> = all.into_iter().rev().take(n).rev().collect();
+        last_n
+            .into_iter()
+            .filter(|e| e.vector.as_ref().map_or(false, |v| !v.is_empty()))
+            .collect()
     }
 }
 

@@ -107,8 +107,13 @@ apiClient.interceptors.response.use(
 
 // Collections API
 export const collectionsApi = {
-  list: async (): Promise<Collection[]> => {
-    const response = await apiClient.get("/api/v1/collections");
+  list: async (options?: { namespace?: string }): Promise<Collection[]> => {
+    const params = new URLSearchParams();
+    if (options?.namespace != null && options.namespace !== "")
+      params.append("namespace", options.namespace);
+    const queryString = params.toString();
+    const url = `/api/v1/collections${queryString ? `?${queryString}` : ""}`;
+    const response = await apiClient.get(url);
     // A API retorna { collections: [...] }
     const collections = response.data.collections || [];
     // Mapeia para o formato esperado pelo frontend
@@ -477,6 +482,7 @@ export const auditApi = {
 export interface CloudSettings {
   region?: string | null;
   bucket?: string | null;
+  endpoint?: string | null;
   access_key_id?: string | null;
 }
 
@@ -489,10 +495,18 @@ export const settingsApi = {
   putCloud: async (body: {
     region?: string | null;
     bucket?: string | null;
+    endpoint?: string | null;
     access_key_id?: string | null;
     secret_access_key?: string | null;
   }): Promise<{ ok: boolean }> => {
     const response = await apiClient.put<{ ok: boolean }>("/api/v1/admin/settings/cloud", body);
+    return response.data;
+  },
+
+  testS3: async (): Promise<{ ok: boolean; message?: string }> => {
+    const response = await apiClient.post<{ ok: boolean; message?: string }>(
+      "/api/v1/admin/settings/test-s3"
+    );
     return response.data;
   },
 };

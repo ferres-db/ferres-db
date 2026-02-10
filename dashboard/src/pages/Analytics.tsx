@@ -2,6 +2,7 @@ import { useAnalytics } from '@/hooks/useStats';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table';
 import {
   PieChart,
   Pie,
@@ -19,7 +20,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
-import { Activity, Gauge, ShieldAlert, BarChart3, TrendingUp, Database } from 'lucide-react';
+import { Activity, Gauge, ShieldAlert, BarChart3, TrendingUp, Database, Layers } from 'lucide-react';
 import { format } from 'date-fns';
 
 const TIER_COLORS = ['#f97316', '#eab308', '#3b82f6']; // Hot, Warm, Cold
@@ -102,6 +103,7 @@ export const Analytics = () => {
     }).length,
   }));
 
+  const topNamespacesByStorage = data?.top_namespaces_by_storage ?? [];
   const circuitVariant =
     circuitState === 'closed' ? 'success' : circuitState === 'open' ? 'danger' : 'warning';
   const circuitLabel =
@@ -198,6 +200,89 @@ export const Analytics = () => {
           </CardContent>
         </Card>
       </div>
+
+      {/* Top Namespaces by Storage */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Layers className="h-5 w-5 text-orange-500" />
+            Top Namespaces by Storage
+          </CardTitle>
+          <p className="text-sm text-gray-400">
+            Tenants/namespaces que mais consomem recursos (pontos e armazenamento estimado).
+          </p>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <Skeleton className="h-[220px] w-full rounded" />
+          ) : topNamespacesByStorage.length > 0 ? (
+            <>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Namespace</TableHead>
+                      <TableHead className="text-right">Points</TableHead>
+                      <TableHead className="text-right">Storage (est.)</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {topNamespacesByStorage.map((row) => (
+                      <TableRow key={row.namespace}>
+                        <TableCell className="font-medium">
+                          <Badge variant="default" className="font-mono">
+                            {row.namespace}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.point_count.toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-gray-400">
+                          {(row.storage_bytes_estimate / 1024).toFixed(1)} KB
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="mt-4 h-[200px]">
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart
+                    data={topNamespacesByStorage.slice(0, 15).map((r) => ({
+                      name: r.namespace.length > 12 ? r.namespace.slice(0, 12) + '…' : r.namespace,
+                      points: r.point_count,
+                      storage_kb: Math.round(r.storage_bytes_estimate / 1024),
+                    }))}
+                    layout="vertical"
+                    margin={{ top: 4, right: 24, left: 0, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#3f3f3f" />
+                    <XAxis type="number" stroke="#9ca3af" />
+                    <YAxis type="category" dataKey="name" width={80} stroke="#9ca3af" />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#2d2d2d',
+                        border: '1px solid #3f3f3f',
+                        borderRadius: '8px',
+                      }}
+                      formatter={(value: number, _name: string, props: { payload?: { storage_kb?: number } }) =>
+                        typeof value === 'number' && props?.payload?.storage_kb != null
+                          ? [`${value.toLocaleString()} pts · ${props.payload.storage_kb} KB`, 'Storage']
+                          : [value, 'Points']
+                      }
+                    />
+                    <Bar dataKey="points" fill="#f97316" name="Points" radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </>
+          ) : (
+            <p className="py-12 text-center text-sm text-gray-400">
+              No namespace data yet. Add points with a <code className="text-gray-300">namespace</code> field to see tenant usage.
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Circuit breaker */}
       <Card>

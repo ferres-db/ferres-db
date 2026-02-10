@@ -21,6 +21,8 @@ pub enum CloudSettingsError {
 pub struct CloudSettings {
     pub region: Option<String>,
     pub bucket: Option<String>,
+    /// Optional custom S3 endpoint (e.g. MinIO: http://localhost:9000).
+    pub endpoint: Option<String>,
     pub access_key_id: Option<String>,
     /// Secret is never returned by GET; only accepted on PUT.
     #[serde(skip_serializing)]
@@ -45,14 +47,17 @@ impl CloudSettingsStore {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 region TEXT,
                 bucket TEXT,
+                endpoint TEXT,
                 access_key_id TEXT,
                 secret_access_key TEXT
             );
-            INSERT OR IGNORE INTO cloud_settings (id, region, bucket, access_key_id, secret_access_key)
-            VALUES (1, NULL, NULL, NULL, NULL);
+            INSERT OR IGNORE INTO cloud_settings (id, region, bucket, endpoint, access_key_id, secret_access_key)
+            VALUES (1, NULL, NULL, NULL, NULL, NULL);
             "#,
             [],
         )?;
+        // Migration: add endpoint column if missing (existing DBs)
+        let _ = conn.execute("ALTER TABLE cloud_settings ADD COLUMN endpoint TEXT", []);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -62,13 +67,14 @@ impl CloudSettingsStore {
     pub fn get(&self) -> Result<CloudSettings, CloudSettingsError> {
         let conn = self.conn.lock().map_err(|_| CloudSettingsError::LockPoisoned)?;
         let mut stmt = conn.prepare(
-            "SELECT region, bucket, access_key_id FROM cloud_settings WHERE id = 1",
+            "SELECT region, bucket, COALESCE(endpoint, ''), access_key_id FROM cloud_settings WHERE id = 1",
         )?;
         let row = stmt.query_row([], |r| {
             Ok(CloudSettings {
                 region: r.get::<_, Option<String>>(0)?,
                 bucket: r.get::<_, Option<String>>(1)?,
-                access_key_id: r.get::<_, Option<String>>(2)?,
+                endpoint: r.get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+                access_key_id: r.get::<_, Option<String>>(3)?,
                 secret_access_key: None,
             })
         });
@@ -84,18 +90,19 @@ impl CloudSettingsStore {
         let conn = self.conn.lock().map_err(|_| CloudSettingsError::LockPoisoned)?;
         let region = settings.region.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
         let bucket = settings.bucket.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let endpoint = settings.endpoint.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
         let access_key_id = settings.access_key_id.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
         let secret = settings.secret_access_key.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
 
         if let Some(secret) = secret {
             conn.execute(
-                "UPDATE cloud_settings SET region = ?1, bucket = ?2, access_key_id = ?3, secret_access_key = ?4 WHERE id = 1",
-                rusqlite::params![region, bucket, access_key_id, secret],
+                "UPDATE cloud_settings SET region = ?1, bucket = ?2, endpoint = ?3, access_key_id = ?4, secret_access_key = ?5 WHERE id = 1",
+                rusqlite::params![region, bucket, endpoint, access_key_id, secret],
             )?;
         } else {
             conn.execute(
-                "UPDATE cloud_settings SET region = ?1, bucket = ?2, access_key_id = ?3 WHERE id = 1",
-                rusqlite::params![region, bucket, access_key_id],
+                "UPDATE cloud_settings SET region = ?1, bucket = ?2, endpoint = ?3, access_key_id = ?4 WHERE id = 1",
+                rusqlite::params![region, bucket, endpoint, access_key_id],
             )?;
         }
         Ok(())
@@ -105,14 +112,15 @@ impl CloudSettingsStore {
     pub fn get_with_secret(&self) -> Result<CloudSettings, CloudSettingsError> {
         let conn = self.conn.lock().map_err(|_| CloudSettingsError::LockPoisoned)?;
         let mut stmt = conn.prepare(
-            "SELECT region, bucket, access_key_id, secret_access_key FROM cloud_settings WHERE id = 1",
+            "SELECT region, bucket, endpoint, access_key_id, secret_access_key FROM cloud_settings WHERE id = 1",
         )?;
         let row = stmt.query_row([], |r| {
             Ok(CloudSettings {
                 region: r.get::<_, Option<String>>(0)?,
                 bucket: r.get::<_, Option<String>>(1)?,
-                access_key_id: r.get::<_, Option<String>>(2)?,
-                secret_access_key: r.get::<_, Option<String>>(3)?,
+                endpoint: r.get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+                access_key_id: r.get::<_, Option<String>>(3)?,
+                secret_access_key: r.get::<_, Option<String>>(4)?,
             })
         });
         match row {
