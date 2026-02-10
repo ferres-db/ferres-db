@@ -165,7 +165,8 @@ impl Default for StorageCircuitBreaker {
 
 /// Opções de armazenamento para otimização em disco.
 ///
-/// Permite ativar compressão Zstd no WAL e snapshots em formato binário (bincode).
+/// Permite ativar compressão Zstd no WAL, snapshots em formato binário (bincode)
+/// e isolamento físico por namespace (multitenancy).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageOptions {
     /// Comprimir entradas do WAL com Zstd (menor uso de disco no `wal.log`).
@@ -174,6 +175,11 @@ pub struct StorageOptions {
     /// Gravar snapshots de pontos em `points.bin` (bincode) em vez de `points.jsonl`.
     #[serde(default)]
     pub binary_snapshot: bool,
+    /// Isolamento físico por namespace: pontos de cada namespace são gravados em
+    /// `data/collections/<name>/namespaces/<namespace>/points.bin`, permitindo
+    /// snapshot e limpeza por tenant sem afetar outros.
+    #[serde(default)]
+    pub namespace_physical_isolation: bool,
 }
 
 impl Default for StorageOptions {
@@ -181,6 +187,7 @@ impl Default for StorageOptions {
         Self {
             wal_compression: false,
             binary_snapshot: false,
+            namespace_physical_isolation: false,
         }
     }
 }
@@ -417,6 +424,11 @@ impl PointBin {
 /// | `index.bin`      | Metadados do índice em bincode                   |
 /// | `checksum.md5`   | Hash MD5 (hex) do ficheiro de pontos             |
 ///
+/// Com **isolamento físico por namespace** (`namespace_physical_isolation`):
+/// pontos com `namespace = Some(ns)` são gravados em `path/namespaces/<ns>/points.bin`
+/// (e opcionalmente `index.bin`). Pontos sem namespace ficam em `path/points.bin`.
+/// O carregamento detecta a presença de `path/namespaces/` e carrega índices por namespace.
+///
 /// Todas as escritas usam o padrão temp-file + rename para atomicidade.
 pub struct FileStorage;
 
@@ -426,10 +438,13 @@ impl FileStorage {
     /// Cria o diretório se não existir. Sobrescreve arquivos existentes.
     /// Se `binary_snapshot` for true, os pontos são gravados em `points.bin` (bincode),
     /// reduzindo tamanho e tempo de carregamento; caso contrário usa `points.jsonl`.
+    /// Se `namespace_physical_isolation` for true, pontos com namespace são gravados em
+    /// `path/namespaces/<namespace>/points.bin` (e opcionalmente `index.bin`).
     pub fn save_collection(
         collection: &Collection,
         path: &Path,
         binary_snapshot: bool,
+        namespace_physical_isolation: bool,
     ) -> Result<(), FerresError> {
         fs::create_dir_all(path).map_err(|e| {
             FerresError::Storage(format!(
@@ -445,7 +460,79 @@ impl FileStorage {
 
         let points = collection.points_owned();
 
-        // 2. points — JSONL ou binário (bincode via PointBin para evitar Value::deserialize_any)
+        if namespace_physical_isolation {
+            // Partition by namespace: None -> root, Some(ns) -> namespaces/ns/
+            let mut root_points = Vec::new();
+            let mut by_namespace: std::collections::HashMap<String, Vec<Point>> =
+                std::collections::HashMap::new();
+            for point in points {
+                match &point.namespace {
+                    None => root_points.push(point),
+                    Some(ns) => by_namespace
+                        .entry(ns.clone())
+                        .or_default()
+                        .push(point),
+                }
+            }
+
+            // Save root points (no namespace)
+            Self::write_points_and_index(
+                path,
+                &root_points,
+                collection.config(),
+                binary_snapshot,
+                true,
+            )?;
+
+            // Save each namespace to path/namespaces/<ns>/points.bin (and index.bin)
+            let namespaces_dir = path.join("namespaces");
+            for (ns, ns_points) in &by_namespace {
+                let ns_path = namespaces_dir.join(ns);
+                fs::create_dir_all(&ns_path).map_err(|e| {
+                    FerresError::Storage(format!(
+                        "failed to create namespace directory {}: {e}",
+                        ns_path.display()
+                    ))
+                })?;
+                Self::write_points_and_index(
+                    &ns_path,
+                    ns_points,
+                    collection.config(),
+                    binary_snapshot,
+                    true,
+                )?;
+            }
+
+            debug!(
+                name = %collection.name(),
+                root_points = root_points.len(),
+                namespaces = by_namespace.len(),
+                binary = binary_snapshot,
+                path = %path.display(),
+                "collection saved via FileStorage (namespace isolation)"
+            );
+        } else {
+            // Legacy: single points file at root
+            Self::write_points_and_index(path, &points, collection.config(), binary_snapshot, true)?;
+            debug!(
+                name = %collection.name(),
+                points = points.len(),
+                binary = binary_snapshot,
+                path = %path.display(),
+                "collection saved via FileStorage"
+            );
+        }
+        Ok(())
+    }
+
+    /// Grava pontos e opcionalmente index.bin num diretório (root ou namespace).
+    fn write_points_and_index(
+        path: &Path,
+        points: &[Point],
+        config: &crate::collection::CollectionConfig,
+        binary_snapshot: bool,
+        write_index: bool,
+    ) -> Result<(), FerresError> {
         let (points_bytes, points_file) = if binary_snapshot {
             let bin_points: Vec<PointBin> = points.iter().map(PointBin::from_point).collect();
             let encoded = bincode::serialize(&bin_points)
@@ -453,7 +540,7 @@ impl FileStorage {
             (encoded, path.join("points.bin"))
         } else {
             let mut lines = String::new();
-            for point in &points {
+            for point in points {
                 let line = serde_json::to_string(point).map_err(|e| {
                     FerresError::Storage(format!("failed to serialize point {}: {e}", point.id))
                 })?;
@@ -464,30 +551,22 @@ impl FileStorage {
         };
         Self::atomic_write(&points_file, &points_bytes)?;
 
-        // 3. checksum.md5 (do ficheiro de pontos)
         let digest = md5::compute(&points_bytes);
         let checksum = format!("{digest:x}");
         Self::atomic_write(&path.join("checksum.md5"), checksum.as_bytes())?;
 
-        // 4. index.bin — snapshot binário de metadados do índice
-        let snapshot = IndexSnapshot {
-            version: 1,
-            point_count: points.len(),
-            dimension: collection.config().dimension,
-            distance: collection.config().distance,
-            point_ids: points.iter().map(|p| p.id.clone()).collect(),
-        };
-        let encoded = bincode::serialize(&snapshot)
-            .map_err(|e| FerresError::Storage(format!("failed to serialize index: {e}")))?;
-        Self::atomic_write(&path.join("index.bin"), &encoded)?;
-
-        debug!(
-            name = %collection.name(),
-            points = points.len(),
-            binary = binary_snapshot,
-            path = %path.display(),
-            "collection saved via FileStorage"
-        );
+        if write_index {
+            let snapshot = IndexSnapshot {
+                version: 1,
+                point_count: points.len(),
+                dimension: config.dimension,
+                distance: config.distance,
+                point_ids: points.iter().map(|p| p.storage_id().to_string()).collect(),
+            };
+            let encoded = bincode::serialize(&snapshot)
+                .map_err(|e| FerresError::Storage(format!("failed to serialize index: {e}")))?;
+            Self::atomic_write(&path.join("index.bin"), &encoded)?;
+        }
         Ok(())
     }
 
@@ -525,7 +604,9 @@ impl FileStorage {
     /// Carrega uma coleção do diretório `path`.
     ///
     /// Valida o checksum MD5 de `points.jsonl` quando `checksum.md5`
-    /// está presente. Reconstrói o índice HNSW a partir dos pontos.
+    /// está presente. Se existir `path/namespaces/`, carrega pontos de cada
+    /// subdiretório `namespaces/<name>/points.bin` (ou `.jsonl`) e une aos do root,
+    /// permitindo isolamento físico por namespace. Reconstrói o índice HNSW a partir dos pontos.
     pub fn load_collection(path: &Path) -> Result<Collection, FerresError> {
         if !path.exists() {
             return Err(FerresError::CollectionNotFound(
@@ -548,83 +629,35 @@ impl FileStorage {
             ))
         })?;
 
-        // 2. points — auto-detect: points.bin (bincode) ou points.jsonl
-        let points_bin_path = path.join("points.bin");
-        let points_jsonl_path = path.join("points.jsonl");
-        let points = if points_bin_path.exists() {
-            let points_bytes = fs::read(&points_bin_path).map_err(|e| {
+        // 2. points — root + optional namespaces/* (physical isolation)
+        let mut points = Self::load_points_from_dir(path)?;
+
+        let namespaces_dir = path.join("namespaces");
+        if namespaces_dir.is_dir() {
+            let entries = fs::read_dir(&namespaces_dir).map_err(|e| {
                 FerresError::Storage(format!(
-                    "failed to read points at {}: {e}",
-                    points_bin_path.display()
+                    "failed to read namespaces dir {}: {e}",
+                    namespaces_dir.display()
                 ))
             })?;
-            let checksum_path = path.join("checksum.md5");
-            if checksum_path.exists() {
-                let stored = fs::read_to_string(&checksum_path)
-                    .map_err(|e| FerresError::Storage(format!("failed to read checksum: {e}")))?;
-                let computed = format!("{:x}", md5::compute(&points_bytes));
-                if stored.trim() != computed {
-                    return Err(FerresError::Storage(format!(
-                        "integrity check failed for {}: expected MD5 {}, got {computed}",
-                        points_bin_path.display(),
-                        stored.trim(),
-                    )));
-                }
-            }
-            let bin_points: Vec<PointBin> = bincode::deserialize(&points_bytes).map_err(|e| {
-                FerresError::Storage(format!(
-                    "failed to deserialize points from {}: {e}",
-                    points_bin_path.display(),
-                ))
-            })?;
-            bin_points
-                .into_iter()
-                .map(PointBin::into_point)
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            let points_content = if points_jsonl_path.exists() {
-                fs::read_to_string(&points_jsonl_path).map_err(|e| {
-                    FerresError::Storage(format!(
-                        "failed to read points at {}: {e}",
-                        points_jsonl_path.display()
-                    ))
-                })?
-            } else {
-                String::new()
-            };
-
-            let checksum_path = path.join("checksum.md5");
-            if checksum_path.exists() {
-                let stored = fs::read_to_string(&checksum_path)
-                    .map_err(|e| FerresError::Storage(format!("failed to read checksum: {e}")))?;
-                let computed = format!("{:x}", md5::compute(points_content.as_bytes()));
-                if stored.trim() != computed {
-                    return Err(FerresError::Storage(format!(
-                        "integrity check failed for {}: expected MD5 {}, got {computed}",
-                        points_jsonl_path.display(),
-                        stored.trim(),
-                    )));
-                }
-            }
-
-            let mut pts = Vec::new();
-            for (line_num, line) in points_content.lines().enumerate() {
-                if line.is_empty() {
-                    continue;
-                }
-                let point: Point = serde_json::from_str(line).map_err(|e| {
-                    FerresError::Storage(format!(
-                        "corrupted point at line {} in {}: {e}",
-                        line_num + 1,
-                        points_jsonl_path.display(),
-                    ))
+            for entry in entries {
+                let entry = entry.map_err(|e| {
+                    FerresError::Storage(format!("failed to read directory entry: {e}"))
                 })?;
-                pts.push(point);
+                let ns_path = entry.path();
+                if ns_path.is_dir() {
+                    let ns_points = Self::load_points_from_dir(&ns_path)?;
+                    debug!(
+                        namespace = %entry.file_name().to_string_lossy(),
+                        points = ns_points.len(),
+                        "loaded namespace points from disk"
+                    );
+                    points.extend(ns_points);
+                }
             }
-            pts
-        };
+        }
 
-        // 4. index.bin — validação opcional de metadados
+        // 3. index.bin — validação opcional (root; namespace dirs validated inside load_points_from_dir if needed)
         let index_path = path.join("index.bin");
         if index_path.exists() {
             match fs::read(&index_path) {
@@ -667,6 +700,84 @@ impl FileStorage {
             "collection loaded via FileStorage"
         );
         Ok(collection)
+    }
+
+    /// Carrega pontos de um diretório (root ou namespace): `points.bin` ou `points.jsonl`.
+    /// Retorna lista vazia se nenhum ficheiro de pontos existir.
+    fn load_points_from_dir(path: &Path) -> Result<Vec<Point>, FerresError> {
+        let points_bin_path = path.join("points.bin");
+        let points_jsonl_path = path.join("points.jsonl");
+
+        if points_bin_path.exists() {
+            let points_bytes = fs::read(&points_bin_path).map_err(|e| {
+                FerresError::Storage(format!(
+                    "failed to read points at {}: {e}",
+                    points_bin_path.display()
+                ))
+            })?;
+            let checksum_path = path.join("checksum.md5");
+            if checksum_path.exists() {
+                let stored = fs::read_to_string(&checksum_path)
+                    .map_err(|e| FerresError::Storage(format!("failed to read checksum: {e}")))?;
+                let computed = format!("{:x}", md5::compute(&points_bytes));
+                if stored.trim() != computed {
+                    return Err(FerresError::Storage(format!(
+                        "integrity check failed for {}: expected MD5 {}, got {computed}",
+                        points_bin_path.display(),
+                        stored.trim(),
+                    )));
+                }
+            }
+            let bin_points: Vec<PointBin> = bincode::deserialize(&points_bytes).map_err(|e| {
+                FerresError::Storage(format!(
+                    "failed to deserialize points from {}: {e}",
+                    points_bin_path.display(),
+                ))
+            })?;
+            return bin_points
+                .into_iter()
+                .map(PointBin::into_point)
+                .collect::<Result<Vec<_>, _>>();
+        }
+
+        if points_jsonl_path.exists() {
+            let points_content = fs::read_to_string(&points_jsonl_path).map_err(|e| {
+                FerresError::Storage(format!(
+                    "failed to read points at {}: {e}",
+                    points_jsonl_path.display()
+                ))
+            })?;
+            let checksum_path = path.join("checksum.md5");
+            if checksum_path.exists() {
+                let stored = fs::read_to_string(&checksum_path)
+                    .map_err(|e| FerresError::Storage(format!("failed to read checksum: {e}")))?;
+                let computed = format!("{:x}", md5::compute(points_content.as_bytes()));
+                if stored.trim() != computed {
+                    return Err(FerresError::Storage(format!(
+                        "integrity check failed for {}: expected MD5 {}, got {computed}",
+                        points_jsonl_path.display(),
+                        stored.trim(),
+                    )));
+                }
+            }
+            let mut pts = Vec::new();
+            for (line_num, line) in points_content.lines().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+                let point: Point = serde_json::from_str(line).map_err(|e| {
+                    FerresError::Storage(format!(
+                        "corrupted point at line {} in {}: {e}",
+                        line_num + 1,
+                        points_jsonl_path.display(),
+                    ))
+                })?;
+                pts.push(point);
+            }
+            return Ok(pts);
+        }
+
+        Ok(Vec::new())
     }
 
     /// Escrita atômica: grava em `.tmp` e depois faz rename.
@@ -753,7 +864,7 @@ mod tests {
         }
 
         // Save (JSONL for test compatibility)
-        FileStorage::save_collection(&collection, &tmp, false).unwrap();
+        FileStorage::save_collection(&collection, &tmp, false, false).unwrap();
 
         // Verify all 4 files exist
         assert!(tmp.join("config.json").exists());
@@ -814,7 +925,7 @@ mod tests {
             .insert(Point::new("b", vec![0.0, 1.0, 0.0, 0.0], serde_json::json!({"x":1})).unwrap())
             .unwrap();
 
-        FileStorage::save_collection(&collection, &tmp, true).unwrap();
+        FileStorage::save_collection(&collection, &tmp, true, false).unwrap();
         assert!(tmp.join("points.bin").exists());
         assert!(!tmp.join("points.jsonl").exists());
 
@@ -848,7 +959,7 @@ mod tests {
             .insert(Point::new("p1", vec![1.0, 2.0], serde_json::Value::Null).unwrap())
             .unwrap();
 
-        FileStorage::save_collection(&collection, &tmp, false).unwrap();
+        FileStorage::save_collection(&collection, &tmp, false, false).unwrap();
 
         // Corrupt the points file — checksum will no longer match
         fs::write(tmp.join("points.jsonl"), b"this is not valid json\n").unwrap();
@@ -894,6 +1005,50 @@ mod tests {
             err.contains("not found") || err.contains("collection not found"),
             "expected not found error, got: {err}"
         );
+    }
+
+    #[test]
+    fn file_storage_namespace_physical_isolation_roundtrip() {
+        let tmp = std::env::temp_dir().join("ferres_test_ns_isolation");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let config = CollectionConfig {
+            name: "ns_isolation_test".to_string(),
+            dimension: 4,
+            distance: DistanceMetric::Euclidean,
+            hnsw: HnswConfig::default(),
+            search_cache_size: 0,
+            enable_bm25: false,
+            bm25_text_field: "text".to_string(),
+            quantization: Default::default(),
+            tiered_storage: Default::default(),
+        };
+        let mut collection = Collection::new(config);
+
+        let mut p0 = Point::new("a", vec![1.0, 0.0, 0.0, 0.0], serde_json::Value::Null).unwrap();
+        p0.namespace = None;
+        collection.insert(p0).unwrap();
+
+        let mut p1 = Point::new("b", vec![0.0, 1.0, 0.0, 0.0], serde_json::json!({"ns": "tenant1"})).unwrap();
+        p1.namespace = Some("tenant1".into());
+        collection.insert(p1).unwrap();
+
+        let mut p2 = Point::new("c", vec![0.0, 0.0, 1.0, 0.0], serde_json::Value::Null).unwrap();
+        p2.namespace = Some("tenant2".into());
+        collection.insert(p2).unwrap();
+
+        FileStorage::save_collection(&collection, &tmp, true, true).unwrap();
+        assert!(tmp.join("points.bin").exists());
+        assert!(tmp.join("namespaces").join("tenant1").join("points.bin").exists());
+        assert!(tmp.join("namespaces").join("tenant2").join("points.bin").exists());
+
+        let loaded = FileStorage::load_collection(&tmp).unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert!(loaded.get("a").is_some());
+        assert!(loaded.get(&Point::storage_id_from_parts(Some("tenant1"), "b")).is_some());
+        assert!(loaded.get(&Point::storage_id_from_parts(Some("tenant2"), "c")).is_some());
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     // ─── DiskStorage tests ─────────────────────────────────────────

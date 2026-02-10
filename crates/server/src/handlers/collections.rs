@@ -204,6 +204,7 @@ pub async fn create_collection(
             &collection,
             &collection_dir,
             app_state.config.binary_snapshot,
+            app_state.config.namespace_physical_isolation,
         )
         .map_err(ApiError::from)?;
     }

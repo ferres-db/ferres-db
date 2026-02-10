@@ -51,6 +51,12 @@ uuid = { workspace = true }
 sysinfo = "0.31"
 fs4 = "0.6"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# S3 backup upload
+aws-sdk-s3 = "1"
+aws-config = "1"
+aws-credential-types = "1"
+tar = "0.4"
+flate2 = "1.0"
 sha2 = "0.10"
 getrandom = "0.2"
 argon2 = "0.5"
