@@ -104,11 +104,13 @@ impl QueryLogger {
             }
         }
 
-        // Escreve no arquivo (com newline)
+        // Escreve no arquivo (com newline) e faz flush para que o analytics leia dados atualizados
         if let Some(ref mut file) = *writer_guard {
             let line = format!("{json}\n");
             if let Err(e) = file.write_all(line.as_bytes()).await {
                 tracing::warn!(error = %e, "failed to write query log entry");
+            } else if let Err(e) = file.flush().await {
+                tracing::warn!(error = %e, "failed to flush query log file");
             }
         }
     }

@@ -128,6 +128,7 @@ impl QueryLogCache {
     }
 
     /// Entradas das últimas 10 minutos (para séries temporais de monitoramento).
+    /// Usa o cache com TTL de 1h; para dados sempre frescos no analytics use `entries_10m_fresh`.
     pub fn entries_10m(&self) -> Vec<ParsedQueryEntry> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -140,9 +141,35 @@ impl QueryLogCache {
             .collect()
     }
 
-    /// P95 da latência de busca (ms) nas últimas 10 minutos.
+    /// Entradas das últimas 10 minutos lendo o arquivo diretamente (sem cache).
+    /// Garante que o endpoint de analytics veja as queries recém-logadas mesmo antes do cache atualizar.
+    pub fn entries_10m_fresh(&self) -> Vec<ParsedQueryEntry> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cutoff = now_secs.saturating_sub(10 * 60);
+        Self::load_log(&self.log_path)
+            .into_iter()
+            .filter(|e| e.timestamp_secs >= cutoff)
+            .collect()
+    }
+
+    /// P95 da latência de busca (ms) nas últimas 10 minutos (usa cache).
     pub fn p95_latency_10m(&self) -> f64 {
         let entries = self.entries_10m();
+        if entries.is_empty() {
+            return 0.0;
+        }
+        let mut sorted_ms: Vec<u64> = entries.iter().map(|e| e.took_ms).collect();
+        sorted_ms.sort();
+        let len = sorted_ms.len();
+        sorted_ms[(len * 95 / 100).min(len.saturating_sub(1))] as f64
+    }
+
+    /// P95 da latência (ms) nas últimas 10 min com leitura fresca do arquivo (para analytics).
+    pub fn p95_latency_10m_fresh(&self) -> f64 {
+        let entries = self.entries_10m_fresh();
         if entries.is_empty() {
             return 0.0;
         }

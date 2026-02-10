@@ -3,6 +3,11 @@
 //! Mostra como usar o SDK em modo "VectorStore": garantir coleção, inserir
 //! vetores com metadados (ex. texto) e consultar por similaridade.
 //!
+//! A API de pontos também suporta: `namespace` (multitenancy), `vectors` (multi-vector por ponto),
+//! `ttl` (expiração em segundos) e filtros de metadata na busca. Inserção via `upsert_points`
+//! com body `{ "points": [{ "id", "vector", "metadata?", "namespace?", "ttl?", "vectors?" }] }`;
+//! busca via `search_points` com `query_vector`, `limit` e opcionalmente `filter`, `namespace`, `vector_field`.
+//!
 //! Requer servidor FerresDB rodando em `http://localhost:8080`:
 //!
 //! ```bash

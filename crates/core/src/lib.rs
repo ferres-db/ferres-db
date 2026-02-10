@@ -1359,6 +1359,7 @@ impl VectorDB {
                                     &collection,
                                     &path,
                                     self.storage_options.binary_snapshot,
+                                    self.storage_options.namespace_physical_isolation,
                                 )
                             })?;
                             wal_handle.truncate_after_snapshot()?;
@@ -1414,7 +1415,12 @@ impl VectorDB {
 
         let collection_dir = self.storage_path.join("collections").join(name);
         self.storage_circuit_breaker.call(|| {
-            FileStorage::save_collection(col, &collection_dir, self.storage_options.binary_snapshot)
+            FileStorage::save_collection(
+                col,
+                &collection_dir,
+                self.storage_options.binary_snapshot,
+                self.storage_options.namespace_physical_isolation,
+            )
         })?;
 
         Ok(())

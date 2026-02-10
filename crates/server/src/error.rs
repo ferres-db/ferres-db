@@ -77,6 +77,11 @@ pub enum ApiError {
         /// Mensagem de erro.
         message: String,
     },
+    /// Método não permitido (ex.: escrita em nó réplica).
+    MethodNotAllowed {
+        /// Mensagem de erro.
+        message: String,
+    },
 }
 
 impl ApiError {
@@ -144,6 +149,13 @@ impl ApiError {
         }
     }
 
+    /// Cria um erro de método não permitido (405 Method Not Allowed).
+    pub fn method_not_allowed(message: impl Into<String>) -> Self {
+        Self::MethodNotAllowed {
+            message: message.into(),
+        }
+    }
+
     /// Retorna o código de status HTTP correspondente.
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -158,6 +170,7 @@ impl ApiError {
             Self::ApiKeyStoreUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::BudgetExceeded { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Forbidden { .. } => StatusCode::FORBIDDEN,
+            Self::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
         }
     }
 
@@ -173,6 +186,7 @@ impl ApiError {
             Self::ApiKeyStoreUnavailable { .. } => "api_key_store_unavailable",
             Self::BudgetExceeded { .. } => "budget_exceeded",
             Self::Forbidden { .. } => "forbidden",
+            Self::MethodNotAllowed { .. } => "method_not_allowed",
         }
     }
 
@@ -188,6 +202,7 @@ impl ApiError {
             Self::ApiKeyStoreUnavailable { message } => message,
             Self::BudgetExceeded { message, .. } => message,
             Self::Forbidden { message } => message,
+            Self::MethodNotAllowed { message } => message,
         }
     }
 }

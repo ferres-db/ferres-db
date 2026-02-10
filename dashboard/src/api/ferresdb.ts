@@ -473,6 +473,50 @@ export const auditApi = {
   },
 };
 
+// Cloud settings (Admin only — S3 backup configuration stored in SQLite)
+export interface CloudSettings {
+  region?: string | null;
+  bucket?: string | null;
+  access_key_id?: string | null;
+}
+
+export const settingsApi = {
+  getCloud: async (): Promise<CloudSettings> => {
+    const response = await apiClient.get<CloudSettings>("/api/v1/admin/settings/cloud");
+    return response.data;
+  },
+
+  putCloud: async (body: {
+    region?: string | null;
+    bucket?: string | null;
+    access_key_id?: string | null;
+    secret_access_key?: string | null;
+  }): Promise<{ ok: boolean }> => {
+    const response = await apiClient.put<{ ok: boolean }>("/api/v1/admin/settings/cloud", body);
+    return response.data;
+  },
+};
+
+// Backup API (Admin only — export snapshot to S3)
+export const backupApi = {
+  exportToCloud: async (): Promise<{
+    ok: boolean;
+    key: string;
+    bucket: string;
+    size_bytes: number;
+    region?: string;
+  }> => {
+    const response = await apiClient.post<{
+      ok: boolean;
+      key: string;
+      bucket: string;
+      size_bytes: number;
+      region?: string;
+    }>("/api/v1/admin/backup");
+    return response.data;
+  },
+};
+
 // WebSocket URL helper
 export function getWsUrl(token?: string): string {
   const base = API_BASE_URL || window.location.origin;

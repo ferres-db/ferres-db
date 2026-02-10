@@ -25,11 +25,11 @@ Para melhor throughput em buscas vetoriais, o servidor utiliza kernels SIMD quan
 }
 ```
 
-| Campo     | Tipo   | Descrição                                                                                                                                      |
-| --------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `error`   | string | Tipo: `collection_not_found`, `collection_already_exists`, `invalid_payload`, `invalid_dimension`, `internal_error`, `query_profile_not_found` |
-| `message` | string | Mensagem legível                                                                                                                               |
-| `code`    | number | Código HTTP (400, 404, 409, 500)                                                                                                               |
+| Campo     | Tipo   | Descrição                                                                                                                                                                      |
+| --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `error`   | string | Tipo: `collection_not_found`, `collection_already_exists`, `invalid_payload`, `invalid_dimension`, `internal_error`, `query_profile_not_found`, `method_not_allowed` (réplica) |
+| `message` | string | Mensagem legível                                                                                                                                                               |
+| `code`    | number | Código HTTP (400, 404, 409, 500)                                                                                                                                               |
 
 ---
 
@@ -101,10 +101,20 @@ curl -s -X POST http://localhost:8080/api/v1/save
 
 O servidor e o core suportam opções para reduzir uso de disco e tempo de carregamento:
 
-| Parâmetro         | Tipo    | Default | Descrição                                                                                                                                                                                                                                  |
-| ----------------- | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `wal_compression` | boolean | false   | Comprime o Write-Ahead Log (wal.log) com Zstd. Reduz o tamanho do WAL em disco. Ativo quando o servidor usa VectorDB com WAL.                                                                                                              |
-| `binary_snapshot` | boolean | false   | Grava snapshots de pontos em formato binário (points.bin com bincode) em vez de JSONL (points.jsonl). Reduz tamanho dos ficheiros e acelera o carregamento. O carregamento detecta automaticamente o formato (points.bin ou points.jsonl). |
+| Parâmetro                      | Tipo    | Default | Descrição                                                                                                                                                                                                                                  |
+| ------------------------------ | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `wal_compression`              | boolean | false   | Comprime o Write-Ahead Log (wal.log) com Zstd. Reduz o tamanho do WAL em disco. Ativo quando o servidor usa VectorDB com WAL.                                                                                                              |
+| `binary_snapshot`              | boolean | false   | Grava snapshots de pontos em formato binário (points.bin com bincode) em vez de JSONL (points.jsonl). Reduz tamanho dos ficheiros e acelera o carregamento. O carregamento detecta automaticamente o formato (points.bin ou points.jsonl). |
+| `namespace_physical_isolation` | boolean | false   | Isolamento físico por namespace: pontos com `namespace` são gravados em `data/collections/<name>/namespaces/<namespace>/points.bin`. Permite snapshot e limpeza por tenant sem afetar outros.                                                |
+
+**Layout de diretórios com isolamento físico por namespace**
+
+Quando `namespace_physical_isolation` está ativo:
+
+- Pontos **sem** namespace: `data/collections/<collection_name>/points.bin` (ou `points.jsonl`) e `index.bin`.
+- Pontos **com** namespace: `data/collections/<collection_name>/namespaces/<namespace_name>/points.bin` (e opcionalmente `index.bin`, `checksum.md5`).
+
+O carregamento detecta a existência de `namespaces/` e carrega pontos de cada subdiretório, reconstruindo o índice a partir do conjunto unificado. Isto permite operações de snapshot por namespace (copiar/eliminar apenas `data/collections/<name>/namespaces/<tenant_id>/`) e limpeza física de um tenant sem afetar outros.
 
 **Configuração no servidor**
 
@@ -113,15 +123,72 @@ O servidor e o core suportam opções para reduzir uso de disco e tempo de carre
 ```toml
 wal_compression = false
 binary_snapshot = true
+namespace_physical_isolation = false
 ```
 
 - **Variáveis de ambiente** (sobrescrevem o TOML):
   - `FERRESDB_WAL_COMPRESSION` — `true` ou `1` para ativar compressão WAL.
   - `FERRESDB_BINARY_SNAPSHOT` — `true` ou `1` para ativar snapshots binários.
+  - `FERRESDB_NAMESPACE_PHYSICAL_ISOLATION` — `true` ou `1` para ativar isolamento físico por namespace (multitenancy).
 
 **Uso no core (VectorDB)**
 
-Use `VectorDB::with_storage_options(path, options)` com `StorageOptions { wal_compression: true, binary_snapshot: true }` para ativar ambas as opções ao usar o core diretamente.
+Use `VectorDB::with_storage_options(path, options)` com `StorageOptions { wal_compression: true, binary_snapshot: true, namespace_physical_isolation: true }` conforme necessário ao usar o core diretamente.
+
+### POST /api/v1/admin/backup
+
+Gera um snapshot binário (tar.gz) de todo o diretório de storage (coleções, API keys, usuários; exclui `logs`) e envia para o bucket S3 configurado. Requer autenticação e **role Admin**.
+
+**Request:** Sem body (ou `{}`).
+
+**Resposta:** `200 OK` em sucesso.
+
+**Schema de resposta:**
+
+```json
+{
+  "ok": true,
+  "key": "backups/ferresdb-2026-02-09T12-00-00Z.tar.gz",
+  "bucket": "my-backups",
+  "size_bytes": 1048576,
+  "region": "us-east-1"
+}
+```
+
+| Campo        | Tipo    | Descrição                    |
+| ------------ | ------- | ---------------------------- |
+| `ok`         | boolean | Sempre `true` em sucesso.    |
+| `key`        | string  | Chave do objeto no S3.       |
+| `bucket`     | string  | Nome do bucket.              |
+| `size_bytes` | number  | Tamanho do archive em bytes. |
+| `region`     | string  | Região AWS usada (opcional). |
+
+**Erros:** `503` se S3 não estiver configurado (`s3_region`/`s3_bucket`); `502` se o upload para S3 falhar; `500` se a criação do archive ou o save das coleções falhar.
+
+**Exemplo curl:**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer YOUR_JWT_OR_API_KEY" http://localhost:8080/api/v1/admin/backup
+```
+
+### Configuração S3 (backup para a cloud)
+
+| Parâmetro              | Tipo   | Default | Descrição                                                                                                   |
+| ---------------------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `s3_region`            | string | —       | Região AWS (ex: `us-east-1`). Env: `FERRESDB_S3_REGION` ou `AWS_REGION`.                                    |
+| `s3_bucket`            | string | —       | Nome do bucket S3. Env: `FERRESDB_S3_BUCKET`.                                                               |
+| `s3_access_key_id`     | string | —       | Access Key ID (opcional; pode usar variáveis AWS). Env: `FERRESDB_S3_ACCESS_KEY_ID` ou `AWS_ACCESS_KEY_ID`. |
+| `s3_secret_access_key` | string | —       | Secret Access Key (opcional). Env: `FERRESDB_S3_SECRET_ACCESS_KEY` ou `AWS_SECRET_ACCESS_KEY`.              |
+
+**config.toml (opcional):**
+
+```toml
+s3_region = "us-east-1"
+s3_bucket = "ferres-backups"
+# Credenciais: preferir variáveis de ambiente (FERRESDB_S3_ACCESS_KEY_ID, FERRESDB_S3_SECRET_ACCESS_KEY ou AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+```
+
+As credenciais podem ser omitidas no ficheiro (recomendado) e definidas apenas por variáveis de ambiente ou pelo perfil AWS configurado no sistema.
 
 ---
 
@@ -1011,7 +1078,8 @@ Retorna estatísticas globais: totais do servidor (coleções, pontos) e agregad
   "total_queries_24h": 420,
   "avg_latency_ms": 3.5,
   "queries_per_minute": [{ "timestamp": 1738742400, "count": 12 }],
-  "simd_enabled": true
+  "simd_enabled": true,
+  "role": "leader"
 }
 ```
 
@@ -1023,6 +1091,29 @@ Retorna estatísticas globais: totais do servidor (coleções, pontos) e agregad
 | `avg_latency_ms`     | number  | Latência média (ms) nas últimas 24h                                                  |
 | `queries_per_minute` | array   | Buckets por minuto: `timestamp` (Unix do minuto), `count`                            |
 | `simd_enabled`       | boolean | Se as instruções SIMD (AVX2/SSE4.1) estão ativas em runtime nos kernels de distância |
+| `role`               | string  | Replication role: `"leader"` ou `"replica"` (experimental)                           |
+
+---
+
+## Replication (Experimental)
+
+Read Replicas permitem escalar leituras (busca, listagem) mantendo um único nó líder para escritas. O recurso é **experimental**.
+
+### Modo réplica
+
+- **Inicialização:** Inicie o servidor com `--replica-of <ADDR>` ou defina a variável de ambiente `FERRESDB_REPLICA_OF` (ex.: `127.0.0.1:50051` para o gRPC do líder).
+- **Comportamento:** O nó inicia como **réplica**: aceita apenas operações de leitura (GET, e POST em `/search`, `/search/hybrid`, `/search/explain`, `/search/estimate`, `/auth/login`). Qualquer outra escrita (POST/PUT/DELETE em coleções, pontos, save, reindex, etc.) retorna **405 Method Not Allowed** com corpo `{ "error": "method_not_allowed", "message": "Write operations are not allowed on a read replica", "code": 405 }`.
+- **Worker de replicação:** Com a feature `grpc` ativa, um worker em background conecta ao líder via gRPC, lista as coleções, e para cada uma consome o WAL via RPC `StreamWal(collection_name, from_position)`, aplicando upserts e deletes no VectorDB local. O líder expõe `StreamWal` no serviço FerresDB (proto `ferresdb.v1`).
+- **API e Dashboard:** `GET /api/v1/stats/global` inclui o campo `role` (`"leader"` ou `"replica"`). O dashboard (Overview) exibe um indicador visual "Role: Leader" ou "Role: Replica".
+
+### WAL incremental (core)
+
+No core, o método `Wal::stream_from(collection_dir, position)` retorna as entradas do WAL a partir do índice `position` (0-based), permitindo que o líder sirva apenas as entradas novas em chamadas subsequentes de `StreamWal`.
+
+### Requisitos
+
+- Líder e réplica devem usar a build do servidor com **feature `grpc`** para o worker de replicação e o RPC `StreamWal`.
+- O endereço em `--replica-of` deve ser o host:porta do **servidor gRPC** do líder (por padrão a porta 50051, configurável com `GRPC_PORT`).
 
 ---
 
@@ -1034,16 +1125,18 @@ Retorna JSON consolidado para o dashboard: distribuição por tier, latência (a
 
 **Campos de agregação de séries temporais (últimos 10 min):**
 
-| Campo | Tipo | Descrição |
-| ----- | ---- | --------- |
-| `time_series_10m` | object | Agregados da janela de 10 minutos para monitoramento em tempo real |
-| `time_series_10m.avg_points_per_second` | number | Média de pontos inseridos por segundo (ingestão) nos últimos 10 min |
-| `time_series_10m.p95_latency_ms` | number | P95 da latência de busca (ms) nas últimas 10 min (queries.log) |
-| `time_series_10m.throughput_per_minute` | array | Buckets por minuto para gráfico de throughput: `{ "timestamp": number, "points": number }` |
-| `time_series_10m.recent_latencies` | array | Últimas consultas para gráfico de latência: `{ "timestamp": number, "took_ms": number }` (até 100 entradas) |
-| `cache_hit_rate_pct` | number \| null | Percentual de hits do search_cache (core) agregado em todas as coleções; `null` se ainda não houve buscas |
+| Campo                                   | Tipo           | Descrição                                                                                                   |
+| --------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
+| `time_series_10m`                       | object         | Agregados da janela de 10 minutos para monitoramento em tempo real                                          |
+| `time_series_10m.avg_points_per_second` | number         | Média de pontos inseridos por segundo (ingestão) nos últimos 10 min                                         |
+| `time_series_10m.p95_latency_ms`        | number         | P95 da latência de busca (ms) nas últimas 10 min (queries.log)                                              |
+| `time_series_10m.throughput_per_minute` | array          | Buckets por minuto para gráfico de throughput: `{ "timestamp": number, "points": number }`                  |
+| `time_series_10m.recent_latencies`      | array          | Últimas consultas para gráfico de latência: `{ "timestamp": number, "took_ms": number }` (até 100 entradas) |
+| `cache_hit_rate_pct`                    | number \| null | Percentual de hits do search_cache (core) agregado em todas as coleções; `null` se ainda não houve buscas   |
 
-O buffer de ingestão é alimentado a cada upsert (REST, gRPC e WebSocket); o P95 e as latências recentes vêm do `queries.log` (cache 1h). O Cache Hit Rate é calculado a partir dos contadores `search_cache_hits` e `search_cache_misses` de cada coleção (quando `search_cache_size` > 0).
+O buffer de ingestão é alimentado a cada upsert (REST, gRPC e WebSocket). Para a janela de **10 minutos**, o endpoint de analytics usa leitura fresca do `queries.log` (sem depender do cache de 1h), de modo que `time_series_10m.throughput_per_minute`, `time_series_10m.recent_latencies` e `time_series_10m.p95_latency_ms` reflitam os dados mais recentes. O Cache Hit Rate é calculado a partir dos contadores `search_cache_hits` e `search_cache_misses` de cada coleção (quando `search_cache_size` > 0).
+
+**Flag SIMD:** O campo `simd_enabled` não está no corpo de `GET /api/v1/stats/analytics`; use `GET /api/v1/stats/global`, que retorna `simd_enabled: boolean` indicando se as instruções AVX2/SSE4.1 estão ativas nos kernels de distância.
 
 ---
 
@@ -1948,14 +2041,14 @@ Três ferramentas estão disponíveis quando o servidor MCP está ativo.
 
 Busca por similaridade vetorial em uma coleção. Utiliza o **pre-filtering nativo** do core: quando `filter` ou `namespace` é informado, o filtro é aplicado durante a exploração do grafo HNSW (não apenas pós-busca).
 
-| Argumento        | Tipo   | Obrigatório | Descrição                                                                 |
-| ---------------- | ------ | ----------- | ------------------------------------------------------------------------- |
-| `collection`     | string | sim         | Nome da coleção.                                                          |
-| `vector`         | array  | sim         | Vetor de consulta (array de números).                                     |
-| `limit`         | number | sim         | Número máximo de resultados (1 a 10000).                                  |
-| `filter`        | object | não         | Filtro de metadata (JSON). Ex.: `{"category": "tech"}`.                   |
-| `namespace`      | string | não         | Restringe a um namespace lógico (multitenancy).                           |
-| `vector_field`   | string | não         | Campo vetorial (omitido ou `"default"` = vetor principal; outro = nomeado).|
+| Argumento      | Tipo   | Obrigatório | Descrição                                                                   |
+| -------------- | ------ | ----------- | --------------------------------------------------------------------------- |
+| `collection`   | string | sim         | Nome da coleção.                                                            |
+| `vector`       | array  | sim         | Vetor de consulta (array de números).                                       |
+| `limit`        | number | sim         | Número máximo de resultados (1 a 10000).                                    |
+| `filter`       | object | não         | Filtro de metadata (JSON). Ex.: `{"category": "tech"}`.                     |
+| `namespace`    | string | não         | Restringe a um namespace lógico (multitenancy).                             |
+| `vector_field` | string | não         | Campo vetorial (omitido ou `"default"` = vetor principal; outro = nomeado). |
 
 **Resposta (sucesso):** objeto com chave `results`, array de objetos `{ "id", "score", "metadata", "namespace" }`.
 
@@ -1975,20 +2068,20 @@ Busca por similaridade vetorial em uma coleção. Utiliza o **pre-filtering nati
 
 Insere ou atualiza pontos em uma coleção. No canal MCP não há autenticação (canal confiável). Reutiliza a mesma validação e lógica de inserção da API REST (dimensão, batch, `Point::new`, `insert_batch`).
 
-| Argumento    | Tipo  | Obrigatório | Descrição                                      |
-| ------------ | ----- | ----------- | ---------------------------------------------- |
-| `collection` | string| sim         | Nome da coleção.                               |
-| `points`     | array | sim         | Array de pontos.                               |
+| Argumento    | Tipo   | Obrigatório | Descrição        |
+| ------------ | ------ | ----------- | ---------------- |
+| `collection` | string | sim         | Nome da coleção. |
+| `points`     | array  | sim         | Array de pontos. |
 
 Cada elemento de `points` deve ter:
 
-| Campo      | Tipo   | Obrigatório | Descrição                |
-| ---------- | ------ | ----------- | ------------------------ |
-| `id`       | string | sim         | Identificador do ponto.  |
-| `vector`   | array  | sim         | Vetor (array de números).|
-| `metadata` | object | não         | Metadados JSON.          |
-| `namespace`| string | não         | Namespace lógico.        |
-| `ttl`      | number | não         | TTL em segundos.         |
+| Campo       | Tipo   | Obrigatório | Descrição                 |
+| ----------- | ------ | ----------- | ------------------------- |
+| `id`        | string | sim         | Identificador do ponto.   |
+| `vector`    | array  | sim         | Vetor (array de números). |
+| `metadata`  | object | não         | Metadados JSON.           |
+| `namespace` | string | não         | Namespace lógico.         |
+| `ttl`       | number | não         | TTL em segundos.          |
 
 **Resposta (sucesso):** objeto `{ "upserted": number, "failed": array }`, onde `failed` contém itens com `id` e `reason` em caso de erro por ponto.
 
@@ -1996,8 +2089,8 @@ Cada elemento de `points` deve ter:
 
 Retorna estatísticas globais ou por coleção.
 
-| Argumento    | Tipo   | Obrigatório | Descrição                                                                 |
-| ------------ | ------ | ----------- | ------------------------------------------------------------------------- |
+| Argumento    | Tipo   | Obrigatório | Descrição                                                                |
+| ------------ | ------ | ----------- | ------------------------------------------------------------------------ |
 | `collection` | string | não         | Se omitido: estatísticas globais. Se informado: estatísticas da coleção. |
 
 **Resposta (global):** `total_collections`, `total_points`, `total_queries_24h`, `avg_latency_ms`, `queries_per_minute`, `simd_enabled`.

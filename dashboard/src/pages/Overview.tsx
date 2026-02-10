@@ -14,6 +14,7 @@ import {
   Layers,
   Zap,
   Cpu,
+  Shield,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { formatDistanceToNow } from 'date-fns';
@@ -45,16 +46,26 @@ export const Overview = () => {
             Monitor collections, metrics, and recent activity for your FerresDB instance.
           </p>
           {!statsLoading && (
-            <div className="mt-4 flex items-center gap-2">
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <Badge
+                variant={stats?.role === 'replica' ? 'secondary' : 'default'}
+                className="inline-flex items-center gap-1.5"
+              >
+                {stats?.role === 'replica' ? 'Role: Replica' : 'Role: Leader'}
+              </Badge>
               <Badge
                 variant={stats?.simd_enabled ? 'success' : 'warning'}
                 className="inline-flex items-center gap-1.5"
               >
                 <Cpu className="h-3.5 w-3.5" />
-                {stats?.simd_enabled
-                  ? 'SIMD Acceleration: Active'
-                  : 'SIMD: Scalar Fallback'}
+                {stats?.simd_enabled ? 'SIMD: Active' : 'SIMD: Scalar'}
               </Badge>
+              {stats?.namespace_physical_isolation && (
+                <Badge variant="secondary" className="inline-flex items-center gap-1.5">
+                  <Shield className="h-3.5 w-3.5" />
+                  Namespace isolation: On
+                </Badge>
+              )}
             </div>
           )}
           <div className="mt-6 flex flex-wrap gap-3">

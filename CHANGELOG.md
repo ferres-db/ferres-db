@@ -6,6 +6,34 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 
 ### Added
 
+- **Physical storage isolation for improved multitenancy security** — Com opção `namespace_physical_isolation` (core: `StorageOptions`, servidor: `namespace_physical_isolation` no config.toml ou `FERRESDB_NAMESPACE_PHYSICAL_ISOLATION`), os pontos de cada namespace passam a ser gravados em `data/collections/<name>/namespaces/<namespace>/points.bin` (e opcionalmente `index.bin`). O VectorDB carrega índices de forma independente por namespace quando esses diretórios existem, permitindo snapshot por namespace e limpeza física de dados de um tenant sem afetar outros. Documentação em `docs/api.md`.
+
+- **Backup S3** — Integração com AWS S3 para backups: novo endpoint `POST /api/v1/admin/backup` (apenas Admin) gera um snapshot binário (tar.gz) do diretório de storage e faz upload para um bucket S3 configurável. Configuração via `config.toml` ou variáveis de ambiente: **Region** (`s3_region` / `FERRESDB_S3_REGION` ou `AWS_REGION`), **Bucket** (`s3_bucket` / `FERRESDB_S3_BUCKET`), **Credentials** (`s3_access_key_id` / `s3_secret_access_key` ou `FERRESDB_S3_ACCESS_KEY_ID` / `FERRESDB_S3_SECRET_ACCESS_KEY`, ou `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`). Dependências no servidor: `aws-sdk-s3`, `aws-config`, `tar`, `flate2`. Dashboard: nova página **Definições** com botão "Export to Cloud" (visível apenas para Admin). Documentação em `docs/api.md`.
+
+- **Replication (Experimental)** — Base para Read Replicas: no core, `Wal::stream_from(collection_dir, position)` para leitura incremental do WAL; servidor com `--replica-of <ADDR>` ou `FERRESDB_REPLICA_OF` inicia como réplica; endpoints de escrita (POST/PUT/DELETE em coleções, pontos, save, reindex, etc.) retornam **405 Method Not Allowed** em réplicas; worker (feature `grpc`) consome WAL do líder via gRPC `StreamWal` e aplica no VectorDB local; dashboard exibe "Role: Leader" ou "Role: Replica" no Overview; `GET /api/v1/stats/global` inclui campo `role`. Documentação em `docs/api.md` (seção Replication).
+
+## [0.1.0-STABLE] - 09/02/2026
+
+Primeira versão estável do FerresDB, com polimento final de performance, analytics e documentação.
+
+### Added
+
+- **Performance: SIMD (AVX2/SSE4.1)** — Kernels de distância em `crates/core/src/search.rs` com a crate `pulp`: `euclidean_distance` e `dot_product` com despacho em runtime (AVX2 8× f32, SSE4.1 4× f32) e fallback escalar. Distância assimétrica SQ8 (f32×u8) em `quantization.rs` processa múltiplos bytes em paralelo. Servidor registra no startup via `tracing`: "SIMD acceleration: active" ou "scalar fallback". Dashboard (Overview): Badge "SIMD: Active" (verde) ou "SIMD: Scalar" (amarelo) a partir de `GET /api/v1/stats/global` (`simd_enabled`).
+
+- **Analytics: correção e visibilidade** — O endpoint `GET /api/v1/stats/analytics` passa a preencher `time_series_10m` com dados reais: leitura fresca do `queries.log` (sem depender do cache de 1h) para `throughput_per_minute`, `recent_latencies` e `p95_latency_ms`. Query logger faz `flush` após cada escrita para que o analytics leia dados imediatamente. Dashboard: gráfico de ingestão (pontos/min), área de latência e histograma P95 (distribuição por faixas de ms); card "Cache Hit Rate %" nos KPIs.
+
+- **Documentação** — `docs/api.md`: especificação dos campos de série temporal (`time_series_10m`) e da flag `simd_enabled` (stats/global). CHANGELOG e exemplos do SDK alinhados à estrutura final de inserção e busca.
+
+### Fixed
+
+- **Analytics: dados de queries no Dashboard** — O buffer de logs não era lido de forma atualizada pelo endpoint de analytics (cache 1h). Passou a usar `entries_10m_fresh()` e `p95_latency_10m_fresh()` para leitura direta do arquivo na construção de `time_series_10m`, garantindo que os gráficos do Dashboard exibam latência e throughput reais.
+
+---
+
+## [Released] - 09/02/2026
+
+### Added
+
 - **Feature: Embedded Model Context Protocol (MCP) support via STDIO.** — Servidor MCP embutido no binário do FerresDB; ativação com a flag `--mcp` ou a variável de ambiente `FERRESDB_ENABLE_MCP=true`. Ferramentas expostas: `search_points` (busca vetorial com pre-filtering nativo), `upsert_points` e `get_stats`. O protocolo usa stdin/stdout; os logs do servidor são redirecionados para stderr quando o modo MCP está ativo. Requer build com a feature `mcp` (`cargo build -p ferres-db-server --features mcp`). Documentação em `docs/api.md` (seção Model Context Protocol) e `README.md` (conexão com Claude Desktop).
 
 - **Dashboard: Added real-time ingestion throughput and latency charts.** — Página Analytics passa a exibir gráfico de linha (Recharts) para ingestão (throughput, pontos/min nos últimos 10 min) e gráfico de área para latência de busca (ms) nas últimas consultas; KPIs incluem "Cache Hit Rate %" baseado no `search_cache` do core. Backend: `query_log_analytics` com `entries_10m()`, `p95_latency_10m()` e `avg_points_per_second_10m()`; buffer de ingestão em `AppState` para séries temporais; endpoint `GET /api/v1/stats/analytics` estendido com `time_series_10m` e `cache_hit_rate_pct`. Documentação em `docs/api.md`.
