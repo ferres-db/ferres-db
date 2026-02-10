@@ -164,8 +164,9 @@ function QueryTesterContent() {
   const [hybridLoading, setHybridLoading] = useState(false);
   const [hybridError, setHybridError] = useState<string | null>(null);
 
-  // Explain
+  // Explain (with client-side total time for visual)
   const [explainResult, setExplainResult] = useState<SearchExplainResponse | null>(null);
+  const [explainTookMs, setExplainTookMs] = useState<number | null>(null);
   const [explainLoading, setExplainLoading] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
 
@@ -299,7 +300,9 @@ function QueryTesterContent() {
     setExplainLoading(true);
     setExplainError(null);
     setExplainResult(null);
+    setExplainTookMs(null);
     setMainTab('explain');
+    const start = performance.now();
     try {
       const embedding = await getEmbedding();
       const res = await pointsApi.explain(selectedCollection, {
@@ -308,6 +311,7 @@ function QueryTesterContent() {
         namespace: searchNamespace.trim() || undefined,
         vector_field: searchVectorField.trim() || undefined,
       });
+      setExplainTookMs(Math.round(performance.now() - start));
       setExplainResult(res);
     } catch (err) {
       setExplainError(err instanceof Error ? err.message : 'Explain failed');
@@ -815,7 +819,62 @@ function QueryTesterContent() {
 
                   {explainResult && (
                     <div className="space-y-4">
-                      {/* Step Trace — caminho da busca */}
+                      {/* Visual pipeline: HNSW → Distance → Pre-filter → Results + total time */}
+                      <div className="rounded-lg border border-bg-tertiary bg-bg-secondary/50 overflow-hidden">
+                        <h4 className="text-sm font-semibold text-gray-50 px-3 py-2 border-b border-bg-tertiary bg-bg-tertiary/50">
+                          Visual Explainer — Search pipeline
+                        </h4>
+                        <div className="p-4 space-y-4">
+                          {/* Pipeline stages (horizontal on larger screens) */}
+                          <div className="flex flex-wrap items-stretch gap-2 sm:gap-0 sm:flex-nowrap">
+                            <div className="flex-1 min-w-[100px] rounded-lg bg-orange-500/10 border border-orange-500/30 px-3 py-3 text-center">
+                              <p className="text-[10px] uppercase tracking-wider text-orange-400/90 font-medium">Query</p>
+                              <p className="text-xs text-gray-300 mt-0.5">L2 norm {explainResult.query_vector_norm.toFixed(3)}</p>
+                              <p className="text-[10px] text-gray-500">{explainResult.distance_metric}</p>
+                            </div>
+                            {explainResult.explain_meta != null && (
+                              <>
+                                <div className="hidden sm:block self-center text-gray-500">→</div>
+                                <div className="flex-1 min-w-[100px] rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-3 text-center">
+                                  <p className="text-[10px] uppercase tracking-wider text-amber-400/90 font-medium">HNSW layers</p>
+                                  <p className="text-lg font-semibold text-amber-300">{explainResult.explain_meta.layers_traversed}</p>
+                                  <p className="text-[10px] text-gray-500">layers traversed</p>
+                                </div>
+                                <div className="hidden sm:block self-center text-gray-500">→</div>
+                                <div className="flex-1 min-w-[100px] rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-3 text-center">
+                                  <p className="text-[10px] uppercase tracking-wider text-amber-400/90 font-medium">Distance</p>
+                                  <p className="text-lg font-semibold text-amber-300">{explainResult.explain_meta.candidates_visited}</p>
+                                  <p className="text-[10px] text-gray-500">comparisons</p>
+                                </div>
+                                <div className="hidden sm:block self-center text-gray-500">→</div>
+                              </>
+                            )}
+                            <div className="flex-1 min-w-[100px] rounded-lg bg-blue-500/10 border border-blue-500/30 px-3 py-3 text-center">
+                              <p className="text-[10px] uppercase tracking-wider text-blue-400/90 font-medium">Pre-filter</p>
+                              <p className="text-lg font-semibold text-blue-300">{explainResult.candidates_scanned - explainResult.candidates_after_filter}</p>
+                              <p className="text-[10px] text-gray-500">filtered out</p>
+                              <p className="text-[10px] text-gray-400 mt-0.5">{explainResult.candidates_after_filter} passed</p>
+                            </div>
+                            <div className="hidden sm:block self-center text-gray-500">→</div>
+                            <div className="flex-1 min-w-[100px] rounded-lg bg-green-500/10 border border-green-500/30 px-3 py-3 text-center">
+                              <p className="text-[10px] uppercase tracking-wider text-green-400/90 font-medium">Results</p>
+                              <p className="text-lg font-semibold text-green-300">{explainResult.results.length}</p>
+                              <p className="text-[10px] text-gray-500">returned</p>
+                            </div>
+                          </div>
+                          {/* Total time (client-side request duration) */}
+                          {explainTookMs != null && (
+                            <div className="flex items-center gap-2 pt-2 border-t border-bg-tertiary">
+                              <Clock className="h-4 w-4 text-gray-400" />
+                              <span className="text-sm text-gray-400">Total time (request):</span>
+                              <span className="text-sm font-semibold text-orange-400">{explainTookMs} ms</span>
+                              <span className="text-[10px] text-gray-500">(embedding + explain API)</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Step Trace — caminho da busca (compact list) */}
                       <div className="rounded-lg border border-bg-tertiary bg-bg-secondary/50 overflow-hidden">
                         <h4 className="text-sm font-semibold text-gray-50 px-3 py-2 border-b border-bg-tertiary bg-bg-tertiary/50">
                           Search path (Step Trace)
