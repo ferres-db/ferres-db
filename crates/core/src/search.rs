@@ -24,6 +24,7 @@
 //!   tombstones.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hnsw_rs::prelude::*;
 use rayon::prelude::*;
@@ -132,6 +133,12 @@ pub trait ANNIndex: Send + Sync {
     fn tombstone_memory_waste(&self) -> usize {
         0
     }
+
+    /// Current ef_search used at search time (for HNSW: runtime value, may be auto-tuned).
+    fn current_ef_search(&self) -> usize;
+
+    /// Set ef_search at runtime (for HNSW auto-tuning). No-op for backends that do not support it.
+    fn set_ef_search(&self, v: usize);
 
     /// Busca os `k` vizinhos mais próximos com metadados de explicação.
     ///
@@ -435,6 +442,8 @@ pub struct HnswIndex {
     tombstones: HashSet<String>,
     distance: DistanceMetric,
     config: HnswConfig,
+    /// ef_search usado na busca; pode ser ajustado em runtime (auto-tune).
+    ef_search_runtime: AtomicUsize,
 }
 
 impl HnswIndex {
@@ -459,6 +468,7 @@ impl HnswIndex {
         );
 
         let inner = Self::create_variant(distance, &config);
+        let ef_search = config.ef_search;
 
         Self {
             inner,
@@ -467,6 +477,7 @@ impl HnswIndex {
             tombstones: HashSet::new(),
             distance,
             config,
+            ef_search_runtime: AtomicUsize::new(ef_search),
         }
     }
 
@@ -530,6 +541,14 @@ impl Drop for HnswIndex {
 impl ANNIndex for HnswIndex {
     fn tombstone_count(&self) -> usize {
         self.tombstones.len()
+    }
+
+    fn current_ef_search(&self) -> usize {
+        self.ef_search_runtime.load(Ordering::Relaxed)
+    }
+
+    fn set_ef_search(&self, v: usize) {
+        self.ef_search_runtime.store(v, Ordering::Relaxed);
     }
 
     fn build(&mut self, points: &[Point]) -> Result<(), FerresError> {
@@ -599,9 +618,8 @@ impl ANNIndex for HnswIndex {
                 tombstones: &self.tombstones,
                 predicate: pred,
             };
-            let mut ef = self
-                .config
-                .ef_search
+            let ef_search = self.ef_search_runtime.load(Ordering::Relaxed);
+            let mut ef = ef_search
                 .max(k.saturating_mul(5))
                 .min(max_points);
             const MAX_ITER: usize = 20;
@@ -652,7 +670,7 @@ impl ANNIndex for HnswIndex {
 
         // Sem predicado: busca normal; pedimos mais para compensar tombstones.
         let extra = k.saturating_add(self.tombstones.len()).min(max_points);
-        let ef = self.config.ef_search.max(extra);
+        let ef = self.ef_search_runtime.load(Ordering::Relaxed).max(extra);
         let _search_span = tracing::info_span!(
             "hnsw.search",
             candidates = max_points,
@@ -910,6 +928,14 @@ fn compute_distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
 impl ANNIndex for QuantizedHnswIndex {
     fn tombstone_count(&self) -> usize {
         self.inner.tombstone_count()
+    }
+
+    fn current_ef_search(&self) -> usize {
+        self.inner.current_ef_search()
+    }
+
+    fn set_ef_search(&self, v: usize) {
+        self.inner.set_ef_search(v);
     }
 
     fn build(&mut self, points: &[Point]) -> Result<(), FerresError> {

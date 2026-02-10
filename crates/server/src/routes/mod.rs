@@ -7,6 +7,7 @@ mod audit;
 mod auth;
 mod backup;
 mod collections;
+mod restore;
 mod debug;
 mod health;
 mod keys;
@@ -42,6 +43,7 @@ pub fn create_router() -> Router<AppState> {
         .merge(collections::create_base_collection_routes())
         .merge(health::create_save_routes())
         .merge(backup::create_backup_routes())
+        .merge(restore::create_restore_routes())
         .merge(settings::create_settings_routes())
         .merge(keys::create_keys_routes())
         .merge(users::create_users_routes())

@@ -679,6 +679,76 @@ impl Collection {
         }
     }
 
+    /// Busca com re-ranking opcional via Cross-Encoder (ex.: BGE-Reranker).
+    ///
+    /// Quando `reranker` é `Some`, recupera `limit * 5` candidatos via HNSW, re-pontua cada um
+    /// com o modelo Cross-Encoder (query + vetor do documento) e retorna os top `limit` ordenados
+    /// pelo score do reranker (maior = mais relevante). Quando `reranker` é `None`, equivale a
+    /// [`search`](Self::search).
+    pub fn search_with_rerank(
+        &self,
+        query: &[f32],
+        k: usize,
+        predicate: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+        vector_field: Option<&str>,
+        reranker: Option<&dyn crate::rerank::Reranker>,
+    ) -> Result<Vec<(String, f32)>, FerresError> {
+        self.validate_dimension(query)?;
+        let r = match reranker {
+            Some(r) => r,
+            None => return self.search(query, k, predicate, vector_field),
+        };
+        if r.dimension() != self.config.dimension {
+            return Err(FerresError::InvalidVector {
+                reason: format!(
+                    "reranker dimension {} does not match collection dimension {}",
+                    r.dimension(),
+                    self.config.dimension
+                ),
+            });
+        }
+        let index_to_use = match vector_field {
+            None | Some("default") => None,
+            Some(f) => {
+                if !self.vector_indices.contains_key(f) {
+                    return Err(FerresError::UnknownVectorField(f.to_string()));
+                }
+                Some(f)
+            }
+        };
+        let k_candidates = (k * 5).min(self.points.len().max(1));
+        let candidates = match index_to_use {
+            None => self.index.search(query, k_candidates, predicate)?,
+            Some(f) => self.vector_indices.get(f).unwrap().search(query, k_candidates, predicate)?,
+        };
+        if candidates.is_empty() {
+            return Ok(candidates);
+        }
+        let mut scored: Vec<(String, f32)> = Vec::with_capacity(candidates.len());
+        for (storage_id, _) in candidates {
+            let doc_vec = match index_to_use {
+                None => self.points.get(&storage_id).map(|p| p.vector.as_slice()),
+                Some(f) => self
+                    .points
+                    .get(&storage_id)
+                    .and_then(|p| p.vectors.as_ref())
+                    .and_then(|m| m.get(f))
+                    .map(|v| v.as_slice()),
+            };
+            let doc_vec = match doc_vec {
+                Some(v) => v,
+                None => continue,
+            };
+            match r.score(query, doc_vec) {
+                Ok(score) => scored.push((storage_id, score)),
+                Err(_) => continue,
+            }
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        Ok(scored)
+    }
+
     /// Busca os `k` vizinhos mais próximos com metadados de explicação.
     ///
     /// Semelhante a [`search`], mas retorna [`ExplainMeta`] adicional para
@@ -871,6 +941,57 @@ impl Collection {
     /// Configuração da coleção.
     pub fn config(&self) -> &CollectionConfig {
         &self.config
+    }
+
+    /// Valor atual de ef_search usado nas buscas (pode estar auto-ajustado).
+    pub fn current_hnsw_ef_search(&self) -> usize {
+        self.index.current_ef_search()
+    }
+
+    /// Define ef_search em runtime (para auto-tune). Aplica ao índice principal e aos índices de vetores nomeados.
+    pub fn set_hnsw_ef_search(&self, v: usize) {
+        self.index.set_ef_search(v);
+        for idx in self.vector_indices.values() {
+            idx.set_ef_search(v);
+        }
+    }
+
+    /// Ajusta ef_search dinamicamente com base na latência P95 observada (Auto-Tune FerresEngine).
+    ///
+    /// - Latência muito baixa e recall prioridade → aumenta ef_search (melhor recall).
+    /// - Latência alta (proxy para CPU sob estresse) → diminui ef_search (menor carga).
+    pub fn apply_hnsw_auto_tune(&self, p95_latency_ms: f64, recall_priority: bool) {
+        const EF_MIN: usize = 10;
+        const EF_MAX: usize = 200;
+        const STEP: usize = 10;
+        const P95_LOW_MS: f64 = 10.0;
+        const P95_HIGH_MS: f64 = 50.0;
+
+        let current = self.index.current_ef_search();
+        let base = self.config.hnsw.ef_search;
+        let (min_ef, max_ef) = (
+            (base / 2).max(EF_MIN),
+            (base * 2).min(EF_MAX),
+        );
+
+        let new_ef = if p95_latency_ms < P95_LOW_MS && recall_priority && current < max_ef {
+            (current + STEP).min(max_ef)
+        } else if p95_latency_ms > P95_HIGH_MS && current > min_ef {
+            current.saturating_sub(STEP).max(min_ef)
+        } else {
+            current
+        };
+
+        if new_ef != current {
+            self.set_hnsw_ef_search(new_ef);
+            tracing::debug!(
+                collection = %self.config.name,
+                p95_ms = p95_latency_ms,
+                previous_ef = current,
+                new_ef,
+                "hnsw auto-tune applied"
+            );
+        }
     }
 
     /// Número de pontos na coleção.

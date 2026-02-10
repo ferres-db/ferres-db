@@ -458,6 +458,16 @@ impl FileStorage {
             .map_err(|e| FerresError::Storage(format!("failed to serialize config: {e}")))?;
         Self::atomic_write(&path.join("config.json"), config_json.as_bytes())?;
 
+        // 1b. last_snapshot_timestamp (for PITR: restore to a point in time)
+        let snapshot_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_secs();
+        Self::atomic_write(
+            &path.join("last_snapshot_timestamp"),
+            snapshot_ts.to_string().as_bytes(),
+        )?;
+
         let points = collection.points_owned();
 
         if namespace_physical_isolation {

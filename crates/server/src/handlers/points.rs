@@ -12,7 +12,7 @@ use validator::Validate;
 use ferres_db_core::{MetadataFilter, Point, QueryCostEstimate, build_search_explanation};
 
 use crate::api_err;
-use crate::auth::{AuthenticatedUser, check_user_permission};
+use crate::auth::{AuthenticatedUser, check_namespace_access, check_user_permission};
 use crate::audit::{self, AuditResult};
 use crate::error::{ApiError, ApiResult};
 use crate::permissions::{Action, PermissionResult, merge_restriction_filter};
@@ -91,6 +91,10 @@ pub struct SearchPointsRequest {
     /// com a estimativa detalhada no body (sem executar a busca).
     #[serde(default)]
     pub budget_ms: Option<u64>,
+    /// Quando true, re-pontua candidatos com Cross-Encoder (ONNX) e retorna top limit reordenados.
+    /// Requer que o servidor tenha sido iniciado com modelo de re-ranking configurado.
+    #[serde(default)]
+    pub rerank: Option<bool>,
 }
 
 /// Payload para busca híbrida (vetorial + keyword).
@@ -125,6 +129,9 @@ pub struct SearchPointsResponse {
     /// ID da query (para debug: GET /api/v1/debug/query-profile/{query_id}).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_id: Option<String>,
+    /// Tempo gasto em re-ranking (ms). Presente apenas quando rerank=true e o servidor aplicou re-ranking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_ms: Option<u64>,
 }
 
 /// Resultado de uma busca.
@@ -205,6 +212,14 @@ pub async fn upsert_points(
         return Err(ApiError::forbidden(format!(
             "permission denied: write on collection '{name}'"
         )));
+    }
+
+    // Namespace allowance (RBAC multitenancy): cada namespace no batch deve ser permitido pela chave
+    for point in &payload.points {
+        if let Some(ref ns) = point.namespace {
+            check_namespace_access(&user, Some(ns.as_str()))
+                .map_err(|_| ApiError::forbidden("API key does not have access to this namespace"))?;
+        }
     }
 
     // Validação centralizada (limites de batch e dimensão — previne DoS/OOM)
@@ -376,6 +391,9 @@ pub async fn delete_points(
         )));
     }
 
+    check_namespace_access(&user, payload.namespace.as_deref())
+        .map_err(|_| ApiError::forbidden("API key does not have access to this namespace"))?;
+
     request_validation::validate_delete_batch_size(payload.ids.len())?;
 
     let ids_count = payload.ids.len();
@@ -462,6 +480,9 @@ pub async fn search_points(
         )));
     }
 
+    check_namespace_access(&user, payload.namespace.as_deref())
+        .map_err(|_| ApiError::forbidden("API key does not have access to this namespace"))?;
+
     // Se a permissão vem com MetadataRestriction, injeta automaticamente no filtro
     if let PermissionResult::AllowedWithRestriction(ref restriction) = perm_result {
         let merged = merge_restriction_filter(payload.filter.as_ref(), restriction);
@@ -546,8 +567,6 @@ pub async fn search_points(
     let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let search_start = Instant::now();
 
-    // Fase: busca (HNSW), com pre-filtering nativo quando filtro ou namespace está presente
-    let _span = tracing::info_span!("hnsw_search").entered();
     let mut filter = match &payload.filter {
         Some(fv) => MetadataFilter::from_json(fv.clone()).map_err(|e| ApiError::invalid_payload(e.to_string()))?,
         None => MetadataFilter::empty(),
@@ -556,20 +575,56 @@ pub async fn search_points(
         filter.namespace = Some(ns.clone());
     }
     let vector_field = payload.vector_field.as_deref();
-    let results = if filter.is_empty() {
-        collection.search(&payload.vector, payload.limit, None, vector_field).map_err(ApiError::from)?
-    } else {
-        let predicate = |id: &str| {
-            collection
-                .get(id)
-                .map(|p| filter.matches_point(&p))
-                .unwrap_or(false)
+    let use_rerank = payload.rerank == Some(true)
+        && app_state.reranker.as_ref().map_or(false, |r| r.dimension() == collection.config().dimension);
+
+    let (results, rerank_ms) = if use_rerank {
+        let _span = tracing::info_span!("search_with_rerank").entered();
+        let rerank_start = Instant::now();
+        let res = if filter.is_empty() {
+            collection.search_with_rerank(
+                &payload.vector,
+                payload.limit,
+                None,
+                vector_field,
+                app_state.reranker.as_deref(),
+            )
+        } else {
+            let predicate = |id: &str| {
+                collection
+                    .get(id)
+                    .map(|p| filter.matches_point(&p))
+                    .unwrap_or(false)
+            };
+            collection.search_with_rerank(
+                &payload.vector,
+                payload.limit,
+                Some(&predicate),
+                vector_field,
+                app_state.reranker.as_deref(),
+            )
         };
-        collection
-            .search(&payload.vector, payload.limit, Some(&predicate), vector_field)
-            .map_err(ApiError::from)?
+        let res = res.map_err(ApiError::from)?;
+        let rerank_ms = rerank_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        (res, Some(rerank_ms))
+    } else {
+        // Fase: busca (HNSW), com pre-filtering nativo quando filtro ou namespace está presente
+        let _span = tracing::info_span!("hnsw_search").entered();
+        let results = if filter.is_empty() {
+            collection.search(&payload.vector, payload.limit, None, vector_field).map_err(ApiError::from)?
+        } else {
+            let predicate = |id: &str| {
+                collection
+                    .get(id)
+                    .map(|p| filter.matches_point(&p))
+                    .unwrap_or(false)
+            };
+            collection
+                .search(&payload.vector, payload.limit, Some(&predicate), vector_field)
+                .map_err(ApiError::from)?
+        };
+        (results, None)
     };
-    drop(_span);
 
     let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     tracing::Span::current().record("db.duration.search_ms", search_ms);
@@ -620,7 +675,7 @@ pub async fn search_points(
 
     // Monta perfil por fases (percentual sobre total)
     let total = took_ms as f64;
-    let phases = vec![
+    let mut phases = vec![
         QueryPhase {
             name: "validation".to_string(),
             duration_ms: validation_ms,
@@ -637,6 +692,13 @@ pub async fn search_points(
             percentage: if total > 0.0 { (hydrate_ms as f64 / total) * 100.0 } else { 0.0 },
         },
     ];
+    if let Some(ms) = rerank_ms {
+        phases.push(QueryPhase {
+            name: "rerank".to_string(),
+            duration_ms: ms,
+            percentage: if total > 0.0 { (ms as f64 / total) * 100.0 } else { 0.0 },
+        });
+    }
     let profile = QueryProfile {
         query_id: query_id.clone(),
         total_ms: took_ms,
@@ -702,6 +764,7 @@ pub async fn search_points(
         results,
         took_ms,
         query_id: Some(query_id),
+        rerank_ms,
     }))
 }
 
@@ -746,6 +809,9 @@ pub async fn search_hybrid(
             "permission denied: read on collection '{name}'"
         )));
     }
+
+    check_namespace_access(&user, payload.namespace.as_deref())
+        .map_err(|_| ApiError::forbidden("API key does not have access to this namespace"))?;
 
     request_validation::validate_search_limit(payload.limit)?;
     request_validation::validate_vector_dimension(&payload.query_vector)?;
@@ -932,6 +998,7 @@ pub async fn search_hybrid(
         results,
         took_ms,
         query_id: Some(query_id),
+        rerank_ms: None,
     }))
 }
 
@@ -1093,6 +1160,9 @@ pub async fn estimate_search(
         )));
     }
 
+    check_namespace_access(&user, payload.namespace.as_deref())
+        .map_err(|_| ApiError::forbidden("API key does not have access to this namespace"))?;
+
     request_validation::validate_search_limit(payload.limit)?;
 
     // Obtém a coleção para extrair stats
@@ -1205,6 +1275,9 @@ pub async fn explain_search(
             "permission denied: read on collection '{name}'"
         )));
     }
+
+    check_namespace_access(&user, payload.namespace.as_deref())
+        .map_err(|_| ApiError::forbidden("API key does not have access to this namespace"))?;
 
     request_validation::validate_search_limit(payload.limit)?;
     request_validation::validate_vector_dimension(&payload.vector)?;

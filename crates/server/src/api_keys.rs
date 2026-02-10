@@ -2,17 +2,34 @@
 //!
 //! As chaves são armazenadas em hash (SHA-256). Ao criar uma chave, o valor bruto
 //! é retornado uma única vez. A validação usa um conjunto em memória (sincronizado com o SQLite).
+//! Chaves podem ter restrição por namespace (allowed_namespaces); quando definida, a chave
+//! só acessa os namespaces listados.
 
+use lazy_static::lazy_static;
 use rusqlite::Connection;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
-use lazy_static::lazy_static;
 
 lazy_static! {
     static ref KEY_HASHES: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+}
+
+/// Store global (definido em main) para o middleware de auth obter meta da chave (namespace allowance).
+static GLOBAL_STORE: OnceLock<Arc<ApiKeyStore>> = OnceLock::new();
+
+/// Define o store global. Chamado em main após criar o ApiKeyStore.
+pub fn set_global_store(store: Option<Arc<ApiKeyStore>>) {
+    if let Some(s) = store {
+        let _ = GLOBAL_STORE.set(s);
+    }
+}
+
+/// Retorna metadados da chave (allowed_namespaces) se a chave for válida e o store global estiver definido.
+pub fn get_meta_global(key: &str) -> Option<ApiKeyMeta> {
+    GLOBAL_STORE.get().and_then(|store| store.get_meta(key))
 }
 
 const KEY_PREFIX: &str = "ferres_sk_";
@@ -41,6 +58,13 @@ pub enum ApiKeyError {
     DuplicateName,
 }
 
+/// Metadados de uma API key (para validação de namespace no middleware).
+#[derive(Debug, Clone)]
+pub struct ApiKeyMeta {
+    /// Quando None ou lista vazia = acesso a todos os namespaces. Quando Some(non-empty) = só esses.
+    pub allowed_namespaces: Option<Vec<String>>,
+}
+
 /// Informação de uma API key (sem o valor bruto).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ApiKeyInfo {
@@ -48,6 +72,9 @@ pub struct ApiKeyInfo {
     pub name: String,
     pub key_prefix: String,
     pub created_at: i64,
+    /// Namespaces permitidos para esta chave. Null/empty = todos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_namespaces: Option<Vec<String>>,
 }
 
 /// Armazena e valida API keys em SQLite, mantendo um cache em memória.
@@ -57,6 +84,7 @@ pub struct ApiKeyStore {
 
 impl ApiKeyStore {
     /// Abre ou cria o banco em `path` e cria a tabela se não existir.
+    /// Adiciona a coluna `allowed_namespaces` se não existir (migração).
     pub fn new(path: &Path) -> Result<Self, ApiKeyError> {
         std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();
         let conn = Connection::open(path)?;
@@ -72,6 +100,15 @@ impl ApiKeyStore {
             "#,
             [],
         )?;
+        // Migração: adicionar coluna allowed_namespaces se não existir
+        let has_col: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name = 'allowed_namespaces'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_col {
+            conn.execute("ALTER TABLE api_keys ADD COLUMN allowed_namespaces TEXT", [])?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -94,9 +131,16 @@ impl ApiKeyStore {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs() as i64;
+                let allowed_json = None::<Vec<String>>;
                 let _ = conn.execute(
-                    "INSERT OR IGNORE INTO api_keys (name, key_hash, key_prefix, created_at) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![format!("bootstrap-{}", key_hash.chars().take(8).collect::<String>()), key_hash, key_prefix, created_at],
+                    "INSERT OR IGNORE INTO api_keys (name, key_hash, key_prefix, created_at, allowed_namespaces) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        format!("bootstrap-{}", key_hash.chars().take(8).collect::<String>()),
+                        key_hash,
+                        key_prefix,
+                        created_at,
+                        allowed_json.and_then(|v| serde_json::to_string(&v).ok()),
+                    ],
                 );
             }
         }
@@ -127,8 +171,33 @@ impl ApiKeyStore {
         KEY_HASHES.lock().map(|set| set.contains(&hash)).unwrap_or(false)
     }
 
+    /// Retorna metadados da chave (allowed_namespaces) se a chave for válida.
+    pub fn get_meta(&self, key: &str) -> Option<ApiKeyMeta> {
+        let hash = hash_key(key);
+        let conn = self.conn.lock().ok()?;
+        let json_opt: Option<String> = conn
+            .query_row(
+                "SELECT allowed_namespaces FROM api_keys WHERE key_hash = ?1",
+                rusqlite::params![hash],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
+        let list: Option<Vec<String>> = json_opt
+            .as_deref()
+            .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() })
+            .filter(|v: &Vec<String>| !v.is_empty());
+        Some(ApiKeyMeta {
+            allowed_namespaces: list,
+        })
+    }
+
     /// Cria uma nova API key com o nome dado. Retorna (valor bruto, id, key_prefix, created_at).
-    pub fn create_key(&self, name: &str) -> Result<(String, i64, String, i64), ApiKeyError> {
+    pub fn create_key(
+        &self,
+        name: &str,
+        allowed_namespaces: Option<Vec<String>>,
+    ) -> Result<(String, i64, String, i64), ApiKeyError> {
         let raw_key = generate_raw_key();
         let key_hash = hash_key(&raw_key);
         let key_prefix: String = raw_key.chars().take(KEY_PREFIX.len() + 8).collect();
@@ -137,11 +206,16 @@ impl ApiKeyStore {
             .unwrap()
             .as_secs() as i64;
 
+        let allowed_json = allowed_namespaces
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .and_then(|v| serde_json::to_string(v).ok());
+
         let conn = self.conn.lock().map_err(|_| ApiKeyError::LockPoisoned)?;
 
         conn.execute(
-            "INSERT INTO api_keys (name, key_hash, key_prefix, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![name, key_hash, key_prefix, created_at],
+            "INSERT INTO api_keys (name, key_hash, key_prefix, created_at, allowed_namespaces) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![name, key_hash, key_prefix, created_at, allowed_json],
         )?;
 
         let id = conn.last_insert_rowid();
@@ -156,14 +230,21 @@ impl ApiKeyStore {
     pub fn list_keys(&self) -> Result<Vec<ApiKeyInfo>, ApiKeyError> {
         let conn = self.conn.lock().map_err(|_| ApiKeyError::LockPoisoned)?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, key_prefix, created_at FROM api_keys ORDER BY created_at DESC",
+            "SELECT id, name, key_prefix, created_at, allowed_namespaces FROM api_keys ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
+            let allowed_raw: Option<String> = row.get(4)?;
+            let allowed_namespaces = allowed_raw
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .filter(|v: &Vec<String>| !v.is_empty());
             Ok(ApiKeyInfo {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 key_prefix: row.get(2)?,
                 created_at: row.get(3)?,
+                allowed_namespaces,
             })
         })?;
         let mut out = Vec::new();
@@ -189,6 +270,24 @@ impl ApiKeyStore {
 
         KEY_HASHES.lock().map_err(|_| ApiKeyError::LockPoisoned)?.remove(&key_hash);
 
+        Ok(())
+    }
+
+    /// Atualiza os namespaces permitidos para uma chave (por id).
+    pub fn update_key_namespaces(
+        &self,
+        id: i64,
+        allowed_namespaces: Option<Vec<String>>,
+    ) -> Result<(), ApiKeyError> {
+        let allowed_json = allowed_namespaces
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .and_then(|v| serde_json::to_string(v).ok());
+        let conn = self.conn.lock().map_err(|_| ApiKeyError::LockPoisoned)?;
+        conn.execute(
+            "UPDATE api_keys SET allowed_namespaces = ?1 WHERE id = ?2",
+            rusqlite::params![allowed_json, id],
+        )?;
         Ok(())
     }
 }

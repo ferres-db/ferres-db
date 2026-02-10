@@ -139,6 +139,7 @@ function QueryTesterContent() {
   const [limit, setLimit] = useState(5);
   const [searchNamespace, setSearchNamespace] = useState('');
   const [searchVectorField, setSearchVectorField] = useState('');
+  const [useRerank, setUseRerank] = useState(false);
 
   // RAG state
   const [isLoading, setIsLoading] = useState(false);
@@ -151,6 +152,7 @@ function QueryTesterContent() {
     searchMs: number;
     llmMs: number;
     totalMs: number;
+    rerankMs?: number;
   } | null>(null);
 
   // Hybrid search
@@ -208,7 +210,7 @@ function QueryTesterContent() {
       const embeddingMs = Math.round(performance.now() - embeddingStart);
 
       const searchStart = performance.now();
-      const searchResults = await pointsApi.search(
+      const searchResponse = await pointsApi.search(
         selectedCollection,
         embedding,
         limit,
@@ -216,12 +218,13 @@ function QueryTesterContent() {
         {
           namespace: searchNamespace.trim() || undefined,
           vector_field: searchVectorField.trim() || undefined,
+          rerank: useRerank,
         },
       );
       const searchMs = Math.round(performance.now() - searchStart);
-      setResults(searchResults);
+      setResults(searchResponse.results);
 
-      const ragPrompt = buildRAGPrompt(query, searchResults);
+      const ragPrompt = buildRAGPrompt(query, searchResponse.results);
 
       const llmStart = performance.now();
       let response: string;
@@ -240,7 +243,13 @@ function QueryTesterContent() {
       const totalMs = Math.round(performance.now() - totalStart);
 
       setAiResponse(response);
-      setTimings({ embeddingMs, searchMs, llmMs, totalMs });
+      setTimings({
+        embeddingMs,
+        searchMs,
+        llmMs,
+        totalMs,
+        ...(searchResponse.rerank_ms != null && { rerankMs: searchResponse.rerank_ms }),
+      });
       setSuccess(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -514,6 +523,20 @@ function QueryTesterContent() {
                 className="bg-bg-secondary border-bg-tertiary text-gray-50"
               />
             </div>
+
+            {/* Re-ranking (Cross-Encoder, when server has rerank enabled) */}
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="use-rerank"
+                checked={useRerank}
+                onChange={(e) => setUseRerank(e.target.checked)}
+                className="h-4 w-4 rounded border-bg-tertiary bg-bg-secondary text-orange-500 focus:ring-orange-500"
+              />
+              <label htmlFor="use-rerank" className="text-sm text-gray-400">
+                Use re-ranking (Cross-Encoder)
+              </label>
+            </div>
           </CardContent>
         </Card>
 
@@ -597,6 +620,14 @@ function QueryTesterContent() {
                             {timings.totalMs} ms
                           </p>
                         </div>
+                        {timings.rerankMs != null && (
+                          <div className="bg-bg-tertiary rounded-lg px-3 py-2 border border-amber-500/30 sm:col-span-2">
+                            <p className="text-xs text-gray-400">Re-ranking</p>
+                            <p className="text-sm font-semibold text-amber-400">
+                              {timings.rerankMs} ms
+                            </p>
+                          </div>
+                        )}
                       </div>
                     </>
                   )}
