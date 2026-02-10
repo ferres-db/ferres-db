@@ -30,3 +30,5 @@ pub mod replication;
 
 #[cfg(feature = "mcp")]
 pub mod mcp;
+
+pub mod raft;

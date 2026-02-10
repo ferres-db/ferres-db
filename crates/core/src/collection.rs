@@ -71,6 +71,10 @@ pub struct CollectionConfig {
     /// Hot (RAM), Warm (mmap) e Cold (disco) baseado na frequência de acesso.
     #[serde(default)]
     pub tiered_storage: TieredStorageConfig,
+    /// Período de retenção em dias para snapshots e WAL. None = manter indefinidamente.
+    /// O worker de retenção remove entradas do WAL mais antigas que este período.
+    #[serde(default)]
+    pub retention_days: Option<u32>,
 }
 
 fn default_cache_size() -> usize {
@@ -943,6 +947,12 @@ impl Collection {
         &self.config
     }
 
+    /// Define o período de retenção em dias (None = manter indefinidamente).
+    /// Persistência: chamar `FileStorage::save_collection` após alterar para gravar config.json.
+    pub fn set_retention_days(&mut self, days: Option<u32>) {
+        self.config.retention_days = days;
+    }
+
     /// Valor atual de ef_search usado nas buscas (pode estar auto-ajustado).
     pub fn current_hnsw_ef_search(&self) -> usize {
         self.index.current_ef_search()
@@ -1113,6 +1123,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         }
     }
 
@@ -1237,6 +1248,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         };
         let mut col = Collection::new(config);
 
@@ -1364,6 +1376,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         };
         let mut col = Collection::new(config);
         col.insert(
@@ -1430,6 +1443,7 @@ mod tests {
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
                 tiered_storage: TieredStorageConfig::default(),
+                retention_days: None,
             };
 
             let mut col = Collection::new(config);
@@ -1483,6 +1497,7 @@ mod tests {
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
                 tiered_storage: TieredStorageConfig::default(),
+                retention_days: None,
             };
 
             let mut col = Collection::new(config);
@@ -1537,6 +1552,7 @@ mod tests {
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
                 tiered_storage: TieredStorageConfig::default(),
+                retention_days: None,
             };
 
             let mut col = Collection::new(config);
@@ -1601,6 +1617,7 @@ mod tests {
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
                 tiered_storage: TieredStorageConfig::default(),
+                retention_days: None,
             };
 
             let mut col = Collection::new(config);

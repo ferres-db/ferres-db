@@ -1523,6 +1523,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         }
     }
 
@@ -1934,6 +1935,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         };
         let collection = Collection::new(config);
         let tiered_cfg = TieredStorageConfig {
@@ -2243,6 +2245,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         };
 
         let mut collection = Collection::new(config);

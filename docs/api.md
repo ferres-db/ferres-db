@@ -310,6 +310,7 @@ Cria uma nova coleção.
 | `enable_bm25`     | boolean | não         | Habilita índice BM25 para busca híbrida (default: false)         |
 | `bm25_text_field` | string  | não         | Chave em metadata usada como texto para BM25 (default: `"text"`) |
 | `tiered_storage`  | object  | não         | Configuração de tiered storage (ver seção Tiered Storage)        |
+| `retention_days`  | number  | não         | Retenção em dias (WAL e histórico); omitido ou null = sem limite |
 
 **Schema de request:**
 
@@ -367,11 +368,14 @@ Lista todas as coleções. Opcionalmente restringe a coleções que possuem pelo
       "name": "docs",
       "dimension": 384,
       "num_points": 42,
-      "created_at": 1707123456
+      "created_at": 1707123456,
+      "retention_days": 30
     }
   ]
 }
 ```
+
+O campo `retention_days` só aparece quando definido (número de dias) ou pode ser omitido quando não há limite.
 
 **Exemplo curl:**
 
@@ -400,14 +404,44 @@ Retorna detalhes de uma coleção.
   "last_updated": 1707123456,
   "stats": {
     "index_size_bytes": 64512
-  }
+  },
+  "retention_days": 30
 }
 ```
+
+O campo `retention_days` é opcional (presente quando configurado; null ou omitido = sem limite).
 
 **Exemplo curl:**
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections/docs
+```
+
+---
+
+### PATCH /api/v1/collections/{name}
+
+Atualiza a configuração de retenção da coleção. Requer autenticação e permissão **Admin**.
+
+**Path:** `name` — nome da coleção.
+
+**Request body:**
+
+| Campo            | Tipo          | Descrição                                                |
+| ---------------- | ------------- | ------------------------------------------------------- |
+| `retention_days` | number ou null | Retenção em dias; null ou omitido = manter indefinidamente. |
+
+**Resposta:** `204 No Content` (sem body)
+
+O worker de retenção compacta o WAL da coleção a cada hora, removendo entradas mais antigas que `retention_days` dias. A alteração é persistida em `config.json` no disco.
+
+**Exemplo curl:**
+
+```bash
+curl -s -X PATCH http://localhost:8080/api/v1/collections/docs \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"retention_days": 30}'
 ```
 
 ---
@@ -1047,22 +1081,31 @@ Busca vetorial com explicação detalhada de cada resultado. Retorna **por que**
     "hnsw_layers": 16,
     "ef_search_used": 50,
     "tombstones_skipped": 0
+  },
+  "explain_meta": {
+    "candidates_visited": 30,
+    "layers_traversed": 16,
+    "tombstones_skipped": 0
   }
 }
 ```
 
-| Campo                          | Tipo   | Descrição                                                       |
-| ------------------------------ | ------ | --------------------------------------------------------------- |
-| `query_vector_norm`            | number | Norma L2 do vetor de consulta                                   |
-| `distance_metric`              | string | Métrica: `Cosine`, `Euclidean`, `DotProduct`                    |
-| `candidates_scanned`           | number | Total de candidatos escaneados pelo índice                      |
-| `candidates_after_filter`      | number | Candidatos que passaram no filtro                               |
-| `results`                      | array  | Resultados explicados individualmente                           |
-| `results[].score_breakdown`    | object | Componentes do score (`vector_score`, etc.)                     |
-| `results[].filter_evaluation`  | object | Avaliação detalhada do filtro (presente se filtro foi aplicado) |
-| `results[].rank_before_filter` | number | Posição no ranking antes de filtros (1-indexed)                 |
-| `results[].rank_after_filter`  | number | Posição após filtros (1-indexed, 0 se não passou)               |
-| `index_stats`                  | object | Estatísticas do índice HNSW no momento da busca                 |
+| Campo                          | Tipo   | Descrição                                                                 |
+| ------------------------------ | ------ | ------------------------------------------------------------------------- |
+| `query_vector_norm`            | number | Norma L2 do vetor de consulta                                             |
+| `distance_metric`              | string | Métrica: `Cosine`, `Euclidean`, `DotProduct`                               |
+| `candidates_scanned`           | number | Total de candidatos escaneados pelo índice                                |
+| `candidates_after_filter`      | number | Candidatos que passaram no filtro de metadata (impacto do pre-filtering)   |
+| `results`                      | array  | Resultados explicados individualmente                                     |
+| `results[].score_breakdown`    | object | Componentes do score (`vector_score`, etc.)                               |
+| `results[].filter_evaluation`  | object | Avaliação detalhada do filtro (presente se filtro foi aplicado)           |
+| `results[].rank_before_filter` | number | Posição no ranking antes de filtros (1-indexed)                           |
+| `results[].rank_after_filter`  | number | Posição após filtros (1-indexed, 0 se não passou)                         |
+| `index_stats`                  | object | Estatísticas do índice HNSW no momento da busca                           |
+| `explain_meta`                 | object | *Opcional.* Metadados do percurso da busca (HNSW). Ausente se o índice não fornecer. |
+| `explain_meta.candidates_visited` | number | Número de comparações de distância realizadas durante a busca             |
+| `explain_meta.layers_traversed`  | number | Número de camadas do grafo HNSW percorridas                               |
+| `explain_meta.tombstones_skipped`| number | Tombstones (pontos removidos) ignorados durante a busca                   |
 
 **Exemplo curl:**
 
@@ -1182,6 +1225,8 @@ Retorna a página HTML do dashboard (single-file com Alpine.js, Tailwind CDN e C
 Os endpoints de analytics leem o arquivo `queries.log` (JSONL) e mantêm cache em memória por 1h.
 
 **Auto-reindex em background:** Um worker interno percorre todas as coleções a cada 30 minutos e, quando o rácio de tombstones (`tombstone_count / total_indexed`) excede 20%, dispara um reindex automático (mesma lógica de swap de índice dos endpoints de reindex). O estado do worker não é exposto em nenhum endpoint de stats; a observabilidade é feita via logs estruturados (`tracing`): início e fim de cada ciclo do worker e início e fim de cada compactação.
+
+**Retention policy (retenção de dados):** Um worker em background a cada 1 hora percorre as coleções que têm `retention_days` configurado e compacta o ficheiro `wal.log`, removendo entradas com timestamp anterior a `(now - retention_days dias)`. Isto reduz o tamanho do WAL e limita o histórico disponível para PITR ao período configurado. A retenção pode ser definida na criação da coleção (`POST /api/v1/collections` com `retention_days`), alterada via `PATCH /api/v1/collections/{name}` (body: `{ "retention_days": number | null }`) e configurada na página **Settings** do Dashboard (secção "Data retention").
 
 ### GET /api/v1/stats/global
 

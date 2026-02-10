@@ -23,6 +23,8 @@ otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry
 grpc = ["dep:tonic", "dep:prost", "dep:tonic-build"]
 # Embedded MCP server via STDIO (--mcp or FERRESDB_ENABLE_MCP=true).
 mcp = ["dep:rmcp"]
+# Raft-based distributed consensus: WAL replicated to majority before commit; cluster API and dashboard.
+raft = ["dep:openraft"]
 
 [dependencies]
 ferres-db-core = { workspace = true }
@@ -79,6 +81,9 @@ async-stream = "0.3"
 
 # Optional: MCP server (feature "mcp"); build with --features mcp
 rmcp = { version = "0.14", features = ["server", "macros"], optional = true }
+
+# Optional: Raft-based distributed consensus (feature "raft"); WAL replicated to majority before commit
+openraft = { version = "0.9", optional = true }
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

@@ -76,7 +76,8 @@ pub use tiered::{
     TierMetadata, TieredCollection, TieredStorageConfig, WarmStorage,
 };
 pub use wal::{
-    recover_collection, recover_collection_to_timestamp, list_restore_points, read_last_snapshot_timestamp,
+    compact_wal_entries_older_than, recover_collection, recover_collection_to_timestamp,
+    list_restore_points, read_last_snapshot_timestamp,
     RestorePoints, Wal, WalEntry, WalOperation,
 };
 pub use cost::{CostBreakdown, CostEstimateParams, QueryCostEstimate, estimate_search_cost};
@@ -1463,6 +1464,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         };
         db.create_collection(config).unwrap();
     }

@@ -19,6 +19,8 @@ export interface Collection {
   enable_bm25?: boolean;
   bm25_text_field?: string;
   tiered_storage?: TieredStorageConfig;
+  /** Retenção em dias (WAL e dados antigos). Opcional. */
+  retention_days?: number | null;
 }
 
 export interface Point {
@@ -71,6 +73,21 @@ export interface GlobalStats {
   hnsw_auto_tune_enabled?: boolean;
   /** Dashboard label: e.g. "Optimized by FerresEngine". */
   index_optimization_label?: string;
+}
+
+/** Cluster node (Raft foundation). */
+export interface ClusterNodeInfo {
+  id: string;
+  addr: string;
+  role: string;
+  replication_lag?: number;
+}
+
+/** Cluster status from GET /api/v1/cluster (nodes, leader, replication). */
+export interface ClusterStatus {
+  raft_enabled: boolean;
+  leader_id?: string;
+  nodes: ClusterNodeInfo[];
 }
 
 export interface QueryEntry {
@@ -349,6 +366,16 @@ export interface ExplainedResult {
   metadata?: Record<string, unknown>;
 }
 
+/** Metadados do percurso da busca (HNSW): camadas percorridas e comparações de distância. */
+export interface ExplainMeta {
+  /** Número de candidatos visitados (comparações de distância realizadas). */
+  candidates_visited: number;
+  /** Número de camadas do grafo HNSW percorridas. */
+  layers_traversed: number;
+  /** Número de tombstones (pontos removidos) ignorados durante a busca. */
+  tombstones_skipped: number;
+}
+
 export interface SearchExplainResponse {
   query_vector_norm: number;
   distance_metric: string;
@@ -361,6 +388,8 @@ export interface SearchExplainResponse {
     ef_search_used: number;
     tombstones_skipped: number;
   };
+  /** Metadados do percurso da busca (camadas, comparações). Presente quando o índice retorna (ex.: HNSW). */
+  explain_meta?: ExplainMeta;
 }
 
 // ─── Search Estimate ──────────────────────────────────────────────────

@@ -11,7 +11,7 @@ use ferres_db_server::auth;
 use ferres_db_server::cloud_settings::CloudSettingsStore;
 use ferres_db_server::state::{AppState, ServerConfig};
 use ferres_db_server::users::UserStore;
-use ferres_db_server::handlers::reindex::{run_auto_reindex_cycle, run_auto_vacuum_cycle};
+use ferres_db_server::handlers::reindex::{run_auto_reindex_cycle, run_auto_vacuum_cycle, run_retention_cycle};
 use ferres_db_server::handlers::stats::run_hnsw_auto_tune_cycle;
 use ferres_db_server::routes;
 use ferres_db_server::middleware;
@@ -305,6 +305,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Inicia background task para retenção (compactação WAL por retention_days) a cada hora
+    const RETENTION_INTERVAL_SECS: u64 = 3600;
+    let app_state_retention = app_state.clone();
+    let shutdown_notify_retention = app_state.shutdown_notify();
+    let is_shutting_down_retention = app_state.is_shutting_down.clone();
+    let retention_task_handle = tokio::spawn(async move {
+        let mut retention_interval = interval(Duration::from_secs(RETENTION_INTERVAL_SECS));
+        loop {
+            tokio::select! {
+                _ = retention_interval.tick() => {
+                    if !is_shutting_down_retention.load(std::sync::atomic::Ordering::Acquire) {
+                        run_retention_cycle(&app_state_retention);
+                    }
+                }
+                _ = shutdown_notify_retention.notified() => {
+                    info!("retention worker task shutting down");
+                    break;
+                }
+            }
+        }
+    });
+
     // HNSW auto-tune: ajusta ef_search dinamicamente com base na latência P95 (FerresEngine).
     const HNSW_AUTO_TUNE_INTERVAL_SECS: u64 = 60;
     let app_state_auto_tune = app_state.clone();
@@ -485,6 +507,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Err(e)) => error!(error = %e, "auto-vacuum worker task panicked"),
         Err(_) => warn!(
             "auto-vacuum worker task did not exit within {:?}, proceeding with shutdown",
+            SHUTDOWN_TASK_TIMEOUT
+        ),
+    }
+    match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, retention_task_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!(error = %e, "retention worker task panicked"),
+        Err(_) => warn!(
+            "retention worker task did not exit within {:?}, proceeding with shutdown",
             SHUTDOWN_TASK_TIMEOUT
         ),
     }

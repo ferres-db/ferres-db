@@ -270,6 +270,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         }
     }
 

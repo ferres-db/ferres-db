@@ -10,6 +10,7 @@ use ferres_db_core::simd_enabled;
 
 use crate::api_err;
 use crate::error::{ApiError, ApiResult};
+use crate::raft;
 use crate::state::AppState;
 
 /// Resposta de estatísticas de uma coleção.
@@ -256,6 +257,25 @@ pub async fn get_collection_stats(
         ef_search_current,
         hnsw_auto_tune_enabled,
     }))
+}
+
+/// Handler para GET /api/v1/cluster
+///
+/// Retorna nós ativos, leader e status da replicação (fundação para Raft).
+pub async fn get_cluster(
+    State(app_state): State<AppState>,
+) -> ApiResult<Json<raft::ClusterStatus>> {
+    let this_addr = format!("{}:{}", app_state.config.host, app_state.config.port);
+    let is_replica = app_state.config.replica_of.is_some();
+    #[cfg(feature = "raft")]
+    let status = app_state
+        .raft_handle
+        .as_ref()
+        .map(|h| h.current_status(&this_addr))
+        .unwrap_or_else(|| raft::cluster_status_standalone(&this_addr, is_replica));
+    #[cfg(not(feature = "raft"))]
+    let status = raft::cluster_status_standalone(&this_addr, is_replica);
+    Ok(Json(status))
 }
 
 /// Handler para GET /api/v1/stats/global

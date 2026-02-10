@@ -11,7 +11,7 @@ use validator::{Validate, ValidationError};
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage, QuantizationConfig, TieredStorageConfig};
+use ferres_db_core::{Collection, CollectionConfig, FileStorage, DistanceMetric, QuantizationConfig, TieredStorageConfig};
 
 use crate::api_err;
 use crate::auth::{AuthenticatedUser, check_user_permission};
@@ -58,6 +58,9 @@ pub struct CreateCollectionRequest {
     /// Use `{"Scalar": {"dtype": "Int8"}}` para ativar SQ8.
     #[serde(default)]
     pub quantization: QuantizationConfig,
+    /// Período de retenção em dias (WAL e dados antigos). None = manter indefinidamente.
+    #[serde(default)]
+    pub retention_days: Option<u32>,
 }
 
 fn default_bm25_text_field() -> String {
@@ -87,6 +90,9 @@ pub struct CollectionListItem {
     pub num_points: usize,
     pub created_at: u64,
     pub distance: DistanceMetric,
+    /// Retenção em dias (None = indefinido).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
 }
 
 /// Query params para GET /api/v1/collections.
@@ -113,12 +119,22 @@ pub struct GetCollectionResponse {
     pub bm25_text_field: String,
     /// Configuração de tiered storage (Hot/Warm/Cold).
     pub tiered_storage: TieredStorageConfig,
+    /// Retenção em dias (None = indefinido).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
 }
 
 /// Estatísticas da coleção na resposta.
 #[derive(Debug, Serialize)]
 pub struct CollectionStatsResponse {
     pub index_size_bytes: usize,
+}
+
+/// Body para PATCH /api/v1/collections/{name} (atualizar retenção).
+#[derive(Debug, Deserialize)]
+pub struct PatchCollectionRetentionBody {
+    /// Retenção em dias; null ou omitido = manter indefinidamente.
+    pub retention_days: Option<u32>,
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────
@@ -172,6 +188,7 @@ pub async fn create_collection(
         bm25_text_field: payload.bm25_text_field.clone(),
         quantization: payload.quantization.clone(),
         tiered_storage: Default::default(),
+        retention_days: payload.retention_days,
     };
 
     // Cria a coleção
@@ -291,6 +308,7 @@ pub async fn list_collections(
             num_points,
             created_at,
             distance: config.distance,
+            retention_days: config.retention_days,
         });
     }
 
@@ -340,6 +358,7 @@ pub async fn get_collection(
         enable_bm25: config.enable_bm25,
         bm25_text_field: config.bm25_text_field.clone(),
         tiered_storage: config.tiered_storage.clone(),
+        retention_days: config.retention_days,
     }))
 }
 
@@ -396,6 +415,63 @@ pub async fn delete_collection(
         );
         app_state.audit_logger.log(&entry);
     }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Handler para PATCH /api/v1/collections/{name}
+///
+/// Atualiza apenas a retenção (retention_days) da coleção. Persiste config.json no disco.
+pub async fn patch_collection_retention(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(app_state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<PatchCollectionRetentionBody>,
+) -> ApiResult<StatusCode> {
+    let perm_result = check_user_permission(&user, &name, &Action::Admin);
+    if !perm_result.is_allowed() {
+        let entry = audit::audit_entry(
+            &user.username, "patch_collection_retention", &format!("collection:{name}"),
+            serde_json::json!({"denied": true}),
+            AuditResult::Denied, None, None,
+        );
+        app_state.audit_logger.log(&entry);
+        return Err(ApiError::forbidden(format!(
+            "permission denied: update collection '{name}'"
+        )));
+    }
+
+    let collection_arc = app_state.collections.get(&name)
+        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+
+    {
+        let mut coll = api_err!(collection_arc.write(), "failed to acquire write lock")?;
+        coll.set_retention_days(body.retention_days);
+    }
+
+    let collection_dir = app_state.config.storage_path.join("collections").join(&name);
+    {
+        let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+        app_state.storage_circuit_breaker.call(|| {
+            FileStorage::save_collection(
+                &collection,
+                &collection_dir,
+                app_state.config.binary_snapshot,
+                app_state.config.namespace_physical_isolation,
+            )
+        }).map_err(ApiError::from)?;
+    }
+    {
+        let coll = api_err!(collection_arc.write(), "failed to acquire write lock")?;
+        coll.mark_clean();
+    }
+
+    let entry = audit::audit_entry(
+        &user.username, "patch_collection_retention", &format!("collection:{name}"),
+        serde_json::json!({ "retention_days": body.retention_days }),
+        AuditResult::Success, None, None,
+    );
+    app_state.audit_logger.log(&entry);
 
     Ok(StatusCode::NO_CONTENT)
 }
