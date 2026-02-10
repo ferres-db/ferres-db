@@ -13,6 +13,7 @@ use axum::{
     response::Json,
 };
 use serde::Serialize;
+use serde_json::json;
 use tracing::{debug, info, warn, error};
 use uuid::Uuid;
 
@@ -25,6 +26,8 @@ use ferres_db_core::{
 use dashmap::DashMap;
 
 use crate::api_err;
+use crate::audit::{self, AuditResult};
+use crate::auth::AuthenticatedUser;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -145,6 +148,7 @@ fn cleanup_old_reindex_jobs(
 /// and one for the new index being built from the snapshot.
 /// For a 1M × 384 collection (~1.5 GB), expect ~3 GB peak usage.
 pub async fn start_reindex(
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<(StatusCode, Json<StartReindexResponse>)> {
@@ -202,6 +206,20 @@ pub async fn start_reindex(
 
     // Evict old completed/failed jobs to prevent unbounded memory growth
     cleanup_old_reindex_jobs(&app_state.reindex_jobs, MAX_COMPLETED_REINDEX_JOBS);
+
+    // Audit: record reindex started (e.g. from Dashboard)
+    {
+        let entry = audit::audit_entry(
+            &user.username,
+            "reindex",
+            &format!("collection:{name}"),
+            json!({ "job_id": job_id, "collection": name, "points": snapshot_points.len(), "tombstones_cleaned": tombstone_count_before }),
+            AuditResult::Success,
+            None,
+            None,
+        );
+        app_state.audit_logger.log(&entry);
+    }
 
     info!(
         job_id = %job_id,

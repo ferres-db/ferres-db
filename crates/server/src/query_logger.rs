@@ -11,12 +11,16 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 /// Estrutura de log de uma query.
+/// O campo `vector` é opcional; quando presente, permite warmup ao reiniciar (replay das últimas queries).
 #[derive(Debug, Serialize)]
 struct QueryLogEntry {
     query_id: String,
     timestamp: String,
     collection: String,
     vector_preview: String,
+    /// Vetor completo (opcional); usado pelo warmup para reexecutar a query e popular search_cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vector: Option<Vec<f32>>,
     limit: usize,
     filter: Option<serde_json::Value>,
     results_count: usize,
@@ -45,6 +49,7 @@ impl QueryLogger {
 
     /// Loga uma query de busca.
     /// Se `query_id` for `Some`, usa esse id; caso contrário gera um novo UUID.
+    /// O vetor completo é gravado opcionalmente para permitir warmup no próximo startup.
     #[allow(clippy::too_many_arguments)]
     pub async fn log_query(
         &self,
@@ -70,6 +75,7 @@ impl QueryLogger {
             timestamp: Utc::now().to_rfc3339(),
             collection: collection.to_string(),
             vector_preview,
+            vector: Some(vector.to_vec()),
             limit,
             filter: filter.cloned(),
             results_count,

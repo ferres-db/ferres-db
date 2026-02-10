@@ -185,6 +185,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Atualiza gauge de coleções ativas
     metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
 
+    // Warmup: reexecuta últimas 50 queries do log em background para carregar HNSW e search_cache
+    ferres_db_server::warmup::spawn_warmup_task(app_state.clone());
+
     // Log do status de aceleração SIMD no startup
     let simd = ferres_db_core::simd_enabled();
     if simd {

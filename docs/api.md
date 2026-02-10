@@ -246,7 +246,13 @@ curl -s -X POST http://localhost:8080/api/v1/collections \
 
 ### GET /api/v1/collections
 
-Lista todas as coleções.
+Lista todas as coleções. Opcionalmente restringe a coleções que possuem pelo menos um ponto no namespace indicado.
+
+**Query params:**
+
+| Param       | Tipo   | Descrição                                                                 |
+| ----------- | ------ | ------------------------------------------------------------------------- |
+| `namespace` | string | Quando definido, retorna apenas coleções que têm pelo menos um ponto neste namespace (multitenancy). |
 
 **Resposta:** `200 OK`
 
@@ -269,6 +275,7 @@ Lista todas as coleções.
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections
+curl -s "http://localhost:8080/api/v1/collections?namespace=tenant-a"
 ```
 
 ---
@@ -1133,6 +1140,7 @@ Retorna JSON consolidado para o dashboard: distribuição por tier, latência (a
 | `time_series_10m.throughput_per_minute` | array          | Buckets por minuto para gráfico de throughput: `{ "timestamp": number, "points": number }`                  |
 | `time_series_10m.recent_latencies`      | array          | Últimas consultas para gráfico de latência: `{ "timestamp": number, "took_ms": number }` (até 100 entradas) |
 | `cache_hit_rate_pct`                    | number \| null | Percentual de hits do search_cache (core) agregado em todas as coleções; `null` se ainda não houve buscas   |
+| `top_namespaces_by_storage`             | array          | Top namespaces por armazenamento (até 30): `{ "namespace": string, "point_count": number, "storage_bytes_estimate": number }`. Identifica tenants que mais consomem recursos. Pontos sem namespace aparecem como `"(default)"`. |
 
 O buffer de ingestão é alimentado a cada upsert (REST, gRPC e WebSocket). Para a janela de **10 minutos**, o endpoint de analytics usa leitura fresca do `queries.log` (sem depender do cache de 1h), de modo que `time_series_10m.throughput_per_minute`, `time_series_10m.recent_latencies` e `time_series_10m.p95_latency_ms` reflitam os dados mais recentes. O Cache Hit Rate é calculado a partir dos contadores `search_cache_hits` e `search_cache_misses` de cada coleção (quando `search_cache_size` > 0).
 

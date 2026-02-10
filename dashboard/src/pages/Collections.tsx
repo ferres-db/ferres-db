@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getStoredRole } from '@/api/ferresdb';
 import { useCollections, useCreateCollection, useDeleteCollection } from '@/hooks/useCollections';
+import { useAnalytics } from '@/hooks/useStats';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -9,14 +10,19 @@ import { Modal } from '@/components/ui/Modal';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table';
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { Plus, Trash2 } from 'lucide-react';
+import { Plus, Trash2, Filter } from 'lucide-react';
 import type { QuantizationConfig, TieredStorageConfig } from '@/types';
 
 export const Collections = () => {
   const navigate = useNavigate();
   const role = getStoredRole();
   const canEdit = role === 'admin' || role === 'editor';
-  const { data: collections, isLoading } = useCollections();
+  const [namespaceFilter, setNamespaceFilter] = useState<string>('');
+  const { data: analytics } = useAnalytics();
+  const { data: collections, isLoading } = useCollections({
+    namespace: namespaceFilter.trim() || undefined,
+  });
+  const namespaceOptions = analytics?.top_namespaces_by_storage ?? [];
   const createCollection = useCreateCollection();
   const deleteCollection = useDeleteCollection();
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -108,7 +114,26 @@ export const Collections = () => {
 
       <Card>
         <CardHeader>
-          <CardTitle>All Collections</CardTitle>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <CardTitle>All Collections</CardTitle>
+            <div className="flex items-center gap-2">
+              <Filter className="h-4 w-4 text-gray-400" />
+              <label className="text-sm text-gray-400 whitespace-nowrap">Namespace:</label>
+              <select
+                className="flex h-9 min-w-[180px] rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-sm text-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/60 [&>option]:bg-bg-secondary [&>option]:text-gray-50"
+                value={namespaceFilter}
+                onChange={(e) => setNamespaceFilter(e.target.value)}
+              >
+                <option value="">All namespaces</option>
+                <option value="(default)">(default)</option>
+                {namespaceOptions.map((ns) => (
+                  <option key={ns.namespace} value={ns.namespace}>
+                    {ns.namespace} ({ns.point_count.toLocaleString()} pts)
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           {isLoading ? (

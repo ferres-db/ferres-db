@@ -23,6 +23,8 @@ export const Settings = () => {
   const [cloudLoading, setCloudLoading] = useState(true);
   const [cloudSaving, setCloudSaving] = useState(false);
   const [cloudSaveMessage, setCloudSaveMessage] = useState<string | null>(null);
+  const [cloudTestLoading, setCloudTestLoading] = useState(false);
+  const [cloudTestMessage, setCloudTestMessage] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
     if (role !== 'admin') navigate('/', { replace: true });
@@ -38,12 +40,13 @@ export const Settings = () => {
           setCloud({
             region: data.region ?? '',
             bucket: data.bucket ?? '',
+            endpoint: data.endpoint ?? '',
             access_key_id: data.access_key_id ?? '',
             secret_access_key: '', // never returned by API
           });
         }
       } catch {
-        if (!cancelled) setCloud({ region: '', bucket: '', access_key_id: '', secret_access_key: '' });
+        if (!cancelled) setCloud({ region: '', bucket: '', endpoint: '', access_key_id: '', secret_access_key: '' });
       } finally {
         if (!cancelled) setCloudLoading(false);
       }
@@ -53,11 +56,13 @@ export const Settings = () => {
 
   const handleSaveCloud = async () => {
     setCloudSaveMessage(null);
+    setCloudTestMessage(null);
     setCloudSaving(true);
     try {
       await settingsApi.putCloud({
         region: cloud.region || null,
         bucket: cloud.bucket || null,
+        endpoint: cloud.endpoint || null,
         access_key_id: cloud.access_key_id || null,
         secret_access_key: cloud.secret_access_key || null,
       });
@@ -73,6 +78,25 @@ export const Settings = () => {
       setCloudSaveMessage(String(msg));
     } finally {
       setCloudSaving(false);
+    }
+  };
+
+  const handleTestS3 = async () => {
+    setCloudTestMessage(null);
+    setCloudTestLoading(true);
+    try {
+      const result = await settingsApi.testS3();
+      setCloudTestMessage({ ok: result.ok, message: result.ok ? 'S3 connection successful.' : result.message ?? 'Connection failed.' });
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === 'object' && 'response' in err
+          ? (err as { response?: { data?: { message?: string } } }).response?.data?.message
+          : err instanceof Error
+            ? err.message
+            : 'Test failed';
+      setCloudTestMessage({ ok: false, message: String(msg) });
+    } finally {
+      setCloudTestLoading(false);
     }
   };
 
@@ -116,8 +140,8 @@ export const Settings = () => {
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-gray-400">
-            Configure region, bucket and credentials for S3 backup. Stored in the server database.
-            Leave secret key blank to keep the existing value.
+            Configure region, bucket, optional custom endpoint and credentials for S3 backup. Stored in the server database.
+            Credentials (Secret Key) are hidden by default. Leave secret key blank to keep the existing value.
           </p>
           {cloudLoading ? (
             <p className="text-sm text-gray-500">Loading…</p>
@@ -127,6 +151,7 @@ export const Settings = () => {
                 <div>
                   <label className="block text-sm font-medium text-gray-300 mb-1">Region</label>
                   <Input
+                    type="text"
                     value={cloud.region ?? ''}
                     onChange={(e) => setCloud((c) => ({ ...c, region: e.target.value }))}
                     placeholder="e.g. us-east-1"
@@ -135,14 +160,25 @@ export const Settings = () => {
                 <div>
                   <label className="block text-sm font-medium text-gray-300 mb-1">Bucket</label>
                   <Input
+                    type="text"
                     value={cloud.bucket ?? ''}
                     onChange={(e) => setCloud((c) => ({ ...c, bucket: e.target.value }))}
                     placeholder="bucket name"
                   />
                 </div>
                 <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">Endpoint (optional)</label>
+                  <Input
+                    type="text"
+                    value={cloud.endpoint ?? ''}
+                    onChange={(e) => setCloud((c) => ({ ...c, endpoint: e.target.value }))}
+                    placeholder="e.g. https://s3.amazonaws.com or http://localhost:9000"
+                  />
+                </div>
+                <div>
                   <label className="block text-sm font-medium text-gray-300 mb-1">Access Key ID</label>
                   <Input
+                    type="text"
                     value={cloud.access_key_id ?? ''}
                     onChange={(e) => setCloud((c) => ({ ...c, access_key_id: e.target.value }))}
                     placeholder="AWS access key ID"
@@ -159,9 +195,19 @@ export const Settings = () => {
                   />
                 </div>
               </div>
-              <Button onClick={handleSaveCloud} disabled={cloudSaving} variant="secondary">
-                {cloudSaving ? 'Saving…' : 'Save cloud settings'}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={handleSaveCloud} disabled={cloudSaving} variant="secondary">
+                  {cloudSaving ? 'Saving…' : 'Save cloud settings'}
+                </Button>
+                <Button onClick={handleTestS3} disabled={cloudTestLoading} variant="outline">
+                  {cloudTestLoading ? 'Testing…' : 'Test S3 connection'}
+                </Button>
+              </div>
+              {cloudTestMessage && (
+                <p className={`text-sm ${cloudTestMessage.ok ? 'text-green-400' : 'text-amber-400'}`}>
+                  {cloudTestMessage.message}
+                </p>
+              )}
               {cloudSaveMessage && (
                 <p className={`text-sm ${cloudSaveMessage.startsWith('Settings saved') ? 'text-green-400' : 'text-red-400'}`}>
                   {cloudSaveMessage}

@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod query_logger;
 pub mod query_log_analytics;
 pub mod routes;
+pub mod warmup;
 pub mod state;
 
 #[cfg(feature = "otel")]
