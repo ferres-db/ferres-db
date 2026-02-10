@@ -11,7 +11,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
 import { DropdownMenu, DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs';
-import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive, RefreshCw, Loader2, Zap } from 'lucide-react';
+import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive, RefreshCw, Loader2, Zap, Network } from 'lucide-react';
 import type { CollectionQuantizationResponse } from '@/types';
 import { format } from 'date-fns';
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -265,6 +265,15 @@ export const CollectionPoints = () => {
             <p className="mt-1 text-sm text-gray-400">Collection details and points</p>
           </div>
         </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => navigate(`/collections/${name}/graph`)}
+          className="gap-2"
+        >
+          <Network className="h-4 w-4" />
+          View Graph
+        </Button>
       </div>
 
       {/* Collection Info */}

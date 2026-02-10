@@ -153,6 +153,9 @@ pub struct GetPointResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     pub created_at: u64,
+    /// IDs dos pontos relacionados (grafo). Presente quando o ponto tem relações.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relations: Option<Vec<String>>,
 }
 
 /// Parâmetros de query para listagem de pontos.
@@ -1029,6 +1032,7 @@ pub async fn list_points(
             metadata: point.metadata.clone(),
             namespace: point.namespace.clone(),
             created_at: point.created_at,
+            relations: point.relations.clone(),
         })
         .collect();
 
@@ -1098,6 +1102,7 @@ pub async fn get_point(
         metadata: point.metadata.clone(),
         namespace: point.namespace.clone(),
         created_at: point.created_at,
+        relations: point.relations.clone(),
     }))
 }
 

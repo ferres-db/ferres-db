@@ -6,6 +6,7 @@ import { Overview } from '@/pages/Overview';
 import { Collections } from '@/pages/Collections';
 import { CollectionDetails } from '@/pages/CollectionDetails';
 import { CollectionPoints } from '@/pages/CollectionPoints';
+import { GraphExplorer } from '@/pages/GraphExplorer';
 import { QueryTester } from '@/pages/QueryTester';
 import { Embeddings } from '@/pages/Embeddings';
 import { Streaming } from '@/pages/Streaming';
@@ -39,6 +40,7 @@ function App() {
               <Route path="/collections" element={<Collections />} />
               <Route path="/collections/:name" element={<CollectionDetails />} />
               <Route path="/collections/:name/points" element={<CollectionPoints />} />
+              <Route path="/collections/:name/graph" element={<GraphExplorer />} />
               <Route path="/embeddings" element={<Embeddings />} />
               <Route path="/streaming" element={<Streaming />} />
               <Route path="/query-tester" element={<QueryTester />} />

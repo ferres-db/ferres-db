@@ -25,6 +25,7 @@ import type {
   SearchEstimateResponse,
   ReindexJob,
   StartReindexResponse,
+  SubgraphResponse,
 } from "@/types";
 
 // Runtime (Docker): window.__RUNTIME_CONFIG__ é preenchido pelo entrypoint.
@@ -481,6 +482,26 @@ export const usersApi = {
         permissions,
       },
     );
+    return response.data;
+  },
+};
+
+// Graph API (subgraph for Graph Explorer)
+export const graphApi = {
+  getSubgraph: async (
+    collection: string,
+    options?: { seed?: string; center_id?: string; depth?: number; limit?: number }
+  ): Promise<SubgraphResponse> => {
+    const params = new URLSearchParams();
+    if (options?.seed != null && options.seed !== "")
+      params.append("seed", options.seed);
+    if (options?.center_id != null && options.center_id !== "")
+      params.append("center_id", options.center_id);
+    if (options?.depth != null) params.append("depth", options.depth.toString());
+    if (options?.limit != null) params.append("limit", options.limit.toString());
+    const queryString = params.toString();
+    const url = `/api/v1/collections/${encodeURIComponent(collection)}/graph/subgraph${queryString ? `?${queryString}` : ""}`;
+    const response = await apiClient.get<SubgraphResponse>(url);
     return response.data;
   },
 };
