@@ -72,7 +72,16 @@ fn create_tar_gz(src_path: &Path) -> Result<Vec<u8>, std::io::Error> {
 }
 
 /// Resolve S3 settings: cloud_settings_store (SQLite) first, then config (env/toml).
-fn resolve_s3_settings(app_state: &AppState) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+/// Returns (region, bucket, endpoint, access_key_id, secret_access_key).
+pub fn resolve_s3_settings(
+    app_state: &AppState,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let store = app_state.cloud_settings_store.as_ref();
     let from_store = store.and_then(|s| s.get_with_secret().ok());
     let config = &app_state.config;
@@ -88,6 +97,11 @@ fn resolve_s3_settings(app_state: &AppState) -> (Option<String>, Option<String>,
         .filter(|s| !s.is_empty())
         .map(String::from)
         .or_else(|| config.s3_bucket.clone());
+    let endpoint = from_store
+        .as_ref()
+        .and_then(|s| s.endpoint.as_deref())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let access_key_id = from_store
         .as_ref()
         .and_then(|s| s.access_key_id.as_deref())
@@ -100,7 +114,36 @@ fn resolve_s3_settings(app_state: &AppState) -> (Option<String>, Option<String>,
         .filter(|s| !s.is_empty())
         .map(String::from)
         .or_else(|| config.s3_secret_access_key.clone());
-    (region, bucket, access_key_id, secret_access_key)
+    (region, bucket, endpoint, access_key_id, secret_access_key)
+}
+
+/// Build S3 client from resolved settings (used by backup and test-s3).
+pub async fn build_s3_client(
+    region: &str,
+    endpoint: Option<&str>,
+    access_key_id: Option<&str>,
+    secret_access_key: Option<&str>,
+) -> Client {
+    let s3_config = aws_config::defaults(BehaviorVersion::latest())
+        .region(aws_config::Region::new(region.to_string()));
+    let s3_config = if let (Some(ak), Some(sk)) = (access_key_id, secret_access_key) {
+        s3_config.credentials_provider(Credentials::new(
+            ak,
+            sk,
+            None,
+            None,
+            "ferresdb-s3",
+        ))
+    } else {
+        s3_config
+    };
+    let shared = s3_config.load().await;
+    let mut builder = aws_sdk_s3::config::Builder::from(&shared);
+    if let Some(ep) = endpoint.filter(|s| !s.is_empty()) {
+        builder = builder.endpoint_url(ep);
+    }
+    let conf = builder.build();
+    Client::from_conf(conf)
 }
 
 /// Handler for POST /api/v1/admin/backup
@@ -112,7 +155,8 @@ pub async fn backup_to_s3(
     AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
 ) -> axum::response::Response {
-    let (region_opt, bucket_opt, access_key_id, secret_access_key) = resolve_s3_settings(&app_state);
+    let (region_opt, bucket_opt, endpoint_opt, access_key_id, secret_access_key) =
+        resolve_s3_settings(&app_state);
     let region = match region_opt.as_deref() {
         Some(r) if !r.is_empty() => r,
         _ => {
@@ -166,21 +210,13 @@ pub async fn backup_to_s3(
     );
     let size_bytes = tar_gz_bytes.len() as u64;
 
-    let s3_config = aws_config::defaults(BehaviorVersion::latest())
-        .region(aws_config::Region::new(region.to_string()));
-    let s3_config = if let (Some(ak), Some(sk)) = (&access_key_id, &secret_access_key) {
-        s3_config.credentials_provider(Credentials::new(
-            ak.as_str(),
-            sk.as_str(),
-            None,
-            None,
-            "ferresdb-backup",
-        ))
-    } else {
-        s3_config
-    };
-    let s3_config = s3_config.load().await;
-    let client = Client::new(&s3_config);
+    let client = build_s3_client(
+        region,
+        endpoint_opt.as_deref(),
+        access_key_id.as_deref(),
+        secret_access_key.as_deref(),
+    )
+    .await;
 
     let body = ByteStream::from(tar_gz_bytes);
     if let Err(e) = client

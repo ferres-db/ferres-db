@@ -1,7 +1,7 @@
 //! # Collection Handlers — handlers para gerenciamento de coleções
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
@@ -87,6 +87,13 @@ pub struct CollectionListItem {
     pub num_points: usize,
     pub created_at: u64,
     pub distance: DistanceMetric,
+}
+
+/// Query params para GET /api/v1/collections.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListCollectionsQuery {
+    /// Quando definido, retorna apenas coleções que têm pelo menos um ponto neste namespace.
+    pub namespace: Option<String>,
 }
 
 /// Resposta de detalhes de coleção.
@@ -238,17 +245,30 @@ pub async fn create_collection(
 
 /// Handler para GET /api/v1/collections
 ///
-/// Lista todas as coleções.
+/// Lista todas as coleções. Se `namespace` for passado, retorna apenas coleções que têm
+/// pelo menos um ponto nesse namespace.
 pub async fn list_collections(
     State(app_state): State<AppState>,
+    Query(params): Query<ListCollectionsQuery>,
 ) -> ApiResult<Json<ListCollectionsResponse>> {
     let mut collections = Vec::new();
+    let filter_namespace = params.namespace.as_deref().filter(|s| !s.is_empty());
 
     for entry in app_state.collections.iter() {
         let name = entry.key();
         let collection_arc = entry.value();
 
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+
+        if let Some(ns) = filter_namespace {
+            let has_namespace = collection
+                .points_owned()
+                .iter()
+                .any(|p| p.namespace.as_deref() == Some(ns));
+            if !has_namespace {
+                continue;
+            }
+        }
 
         let config = collection.config();
         let num_points = collection.len();

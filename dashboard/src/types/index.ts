@@ -146,6 +146,13 @@ export interface TimeSeries10m {
   recent_latencies: RecentLatencyEntry[];
 }
 
+/** Top namespace por armazenamento (tenant que mais consome recursos). */
+export interface TopNamespaceByStorage {
+  namespace: string;
+  point_count: number;
+  storage_bytes_estimate: number;
+}
+
 export interface AnalyticsResponse {
   tier_distribution: AnalyticsTierDistribution;
   latency: AnalyticsLatency;
@@ -153,6 +160,8 @@ export interface AnalyticsResponse {
   circuit_breaker: AnalyticsCircuitBreaker;
   time_series_10m: TimeSeries10m;
   cache_hit_rate_pct: number | null;
+  /** Top namespaces por armazenamento (identificar tenants que mais consomem). */
+  top_namespaces_by_storage?: TopNamespaceByStorage[];
 }
 
 export interface ApiKeyInfo {
