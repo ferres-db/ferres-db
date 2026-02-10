@@ -6,6 +6,7 @@ import type {
   SearchPointsResponse,
   GlobalStats,
   QueryEntry,
+  ClusterStatus,
   CollectionStats,
   AnalyticsResponse,
   ApiKeyInfo,
@@ -123,6 +124,7 @@ export const collectionsApi = {
       vector_size: c.dimension,
       point_count: c.num_points,
       distance_metric: c.distance || c.distance_metric, // Backend retorna "distance"
+      retention_days: c.retention_days ?? undefined,
     }));
   },
 
@@ -142,7 +144,16 @@ export const collectionsApi = {
       enable_bm25: data.enable_bm25,
       bm25_text_field: data.bm25_text_field,
       tiered_storage: data.tiered_storage,
+      retention_days: data.retention_days ?? undefined,
     };
+  },
+
+  /** Atualiza apenas retention_days da coleção (PATCH). */
+  patchRetention: async (
+    name: string,
+    retention_days: number | null,
+  ): Promise<void> => {
+    await apiClient.patch(`/api/v1/collections/${name}`, { retention_days });
   },
 
   create: async (
@@ -356,6 +367,11 @@ export const statsApi = {
 
   collection: async (name: string): Promise<CollectionStats> => {
     const response = await apiClient.get(`/api/v1/collections/${name}/stats`);
+    return response.data;
+  },
+
+  cluster: async (): Promise<ClusterStatus> => {
+    const response = await apiClient.get("/api/v1/cluster");
     return response.data;
   },
 };

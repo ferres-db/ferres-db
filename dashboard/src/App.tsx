@@ -15,6 +15,7 @@ import { Audit } from '@/pages/Audit';
 import { Analytics } from '@/pages/Analytics';
 import { Settings } from '@/pages/Settings';
 import { SnapshotsRecovery } from '@/pages/SnapshotsRecovery';
+import { Cluster } from '@/pages/Cluster';
 import { Login } from '@/pages/Login';
 
 const queryClient = new QueryClient({
@@ -46,6 +47,7 @@ function App() {
               <Route path="/audit" element={<Audit />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/snapshots-recovery" element={<SnapshotsRecovery />} />
+              <Route path="/cluster" element={<Cluster />} />
               <Route path="/settings" element={<Settings />} />
             </Route>
           </Route>

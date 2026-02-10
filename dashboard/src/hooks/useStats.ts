@@ -1,9 +1,9 @@
-import { useQuery } from '@tanstack/react-query';
-import { statsApi } from '@/api/ferresdb';
+import { useQuery } from "@tanstack/react-query";
+import { statsApi } from "@/api/ferresdb";
 
 export const useGlobalStats = () => {
   return useQuery({
-    queryKey: ['stats', 'global'],
+    queryKey: ["stats", "global"],
     queryFn: statsApi.global,
     refetchInterval: 5000, // Refresh every 5 seconds
   });
@@ -11,7 +11,7 @@ export const useGlobalStats = () => {
 
 export const useAnalytics = () => {
   return useQuery({
-    queryKey: ['stats', 'analytics'],
+    queryKey: ["stats", "analytics"],
     queryFn: statsApi.analytics,
     refetchInterval: 10000, // Refresh every 10 seconds
   });
@@ -19,7 +19,7 @@ export const useAnalytics = () => {
 
 export const useQueryStats = () => {
   return useQuery({
-    queryKey: ['stats', 'queries'],
+    queryKey: ["stats", "queries"],
     queryFn: async () => {
       return await statsApi.queries();
     },
@@ -30,7 +30,7 @@ export const useQueryStats = () => {
 
 export const useSlowQueries = () => {
   return useQuery({
-    queryKey: ['stats', 'slow-queries'],
+    queryKey: ["stats", "slow-queries"],
     queryFn: statsApi.slowQueries,
     refetchInterval: 10000, // Refresh every 10 seconds
   });
@@ -38,9 +38,17 @@ export const useSlowQueries = () => {
 
 export const useCollectionStats = (collectionName: string) => {
   return useQuery({
-    queryKey: ['stats', 'collection', collectionName],
+    queryKey: ["stats", "collection", collectionName],
     queryFn: () => statsApi.collection(collectionName),
     enabled: !!collectionName,
+    refetchInterval: 5000,
+  });
+};
+
+export const useCluster = () => {
+  return useQuery({
+    queryKey: ["cluster"],
+    queryFn: statsApi.cluster,
     refetchInterval: 5000,
   });
 };

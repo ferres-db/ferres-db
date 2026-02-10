@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Database, Sparkles, Key, Users as UsersIcon, ShieldCheck, Cpu, Radio, BarChart3, History, Settings } from 'lucide-react';
+import { LayoutDashboard, Database, Sparkles, Key, Users as UsersIcon, ShieldCheck, Cpu, Radio, BarChart3, History, Settings, Network } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { getStoredRole, type Role } from '@/api/ferresdb';
 
@@ -14,6 +14,7 @@ const allNav = [
   { name: 'Users', href: '/users', icon: UsersIcon, roles: ['admin'] as Role[] },
   { name: 'Audit', href: '/audit', icon: ShieldCheck, roles: ['admin'] as Role[] },
   { name: 'Snapshots & Recovery', href: '/snapshots-recovery', icon: History, roles: ['admin'] as Role[] },
+  { name: 'Cluster', href: '/cluster', icon: Network, roles: ['admin', 'editor', 'viewer'] as Role[] },
   { name: 'Settings', href: '/settings', icon: Settings, roles: ['admin'] as Role[] },
 ];
 

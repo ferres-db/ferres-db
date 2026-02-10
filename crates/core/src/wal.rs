@@ -515,6 +515,86 @@ impl Wal {
     }
 }
 
+// ─── Retention (WAL compaction) ────────────────────────────────────────
+
+/// Compacta o WAL removendo entradas com timestamp anterior a `cutoff_ts` (Unix segundos).
+/// Reescreve `wal.log` apenas com entradas dentro do período de retenção.
+/// Use quando a coleção tiver `retention_days` configurado; chamar sem WAL aberto (ex.: no worker de retenção).
+pub fn compact_wal_entries_older_than(
+    collection_dir: &Path,
+    cutoff_ts: u64,
+    compress: bool,
+) -> Result<usize, FerresError> {
+    let wal_path = collection_dir.join("wal.log");
+    if !wal_path.exists() {
+        return Ok(0);
+    }
+    let entries = Wal::read_entries(collection_dir)?;
+    let original_count = entries.len();
+    let kept: Vec<WalEntry> = entries.into_iter().filter(|e| e.timestamp >= cutoff_ts).collect();
+    let removed = original_count.saturating_sub(kept.len());
+    if removed == 0 {
+        return Ok(0);
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&wal_path)
+        .map_err(|e| {
+            FerresError::Storage(format!(
+                "failed to truncate WAL for compaction at {}: {e}",
+                wal_path.display()
+            ))
+        })?;
+    if compress {
+        file.write_all(WAL_ZSTD_MAGIC).map_err(|e| {
+            FerresError::Storage(format!(
+                "failed to write WAL magic at {}: {e}",
+                wal_path.display()
+            ))
+        })?;
+    }
+    let mut writer = BufWriter::new(file);
+    for entry in &kept {
+        if compress {
+            let json = serde_json::to_string(entry).map_err(|e| {
+                FerresError::Storage(format!("failed to serialize WAL entry: {e}"))
+            })?;
+            let compressed = zstd::encode_all(json.as_bytes(), 0).map_err(|e| {
+                FerresError::Storage(format!("failed to compress WAL entry: {e}"))
+            })?;
+            let len = compressed.len() as u32;
+            writer.write_all(&len.to_le_bytes()).map_err(|e| {
+                FerresError::Storage(format!("failed to write WAL frame length: {e}"))
+            })?;
+            writer.write_all(&compressed).map_err(|e| {
+                FerresError::Storage(format!("failed to write WAL compressed frame: {e}"))
+            })?;
+        } else {
+            let json = serde_json::to_string(entry).map_err(|e| {
+                FerresError::Storage(format!("failed to serialize WAL entry: {e}"))
+            })?;
+            writer.write_all(json.as_bytes()).map_err(|e| {
+                FerresError::Storage(format!("failed to write WAL entry: {e}"))
+            })?;
+            writer.write_all(b"\n").map_err(|e| {
+                FerresError::Storage(format!("failed to write WAL newline: {e}"))
+            })?;
+        }
+    }
+    writer.flush().map_err(|e| {
+        FerresError::Storage(format!("failed to flush WAL after compaction: {e}"))
+    })?;
+    debug!(
+        path = %wal_path.display(),
+        removed,
+        kept = kept.len(),
+        "WAL compacted by retention"
+    );
+    Ok(removed)
+}
+
 // ─── Recovery ─────────────────────────────────────────────────────────
 
 /// Lê o timestamp do último snapshot (gravado por `FileStorage::save_collection`).
@@ -714,6 +794,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         }
     }
 

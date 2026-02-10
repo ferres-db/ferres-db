@@ -18,6 +18,7 @@ use tracing::{debug, info, warn, error};
 use uuid::Uuid;
 
 use ferres_db_core::{
+    compact_wal_entries_older_than,
     ReindexJob, ReindexStatus, ReindexStats,
     apply_delta, build_new_index, estimate_index_size, needs_reindex, tombstone_ratio,
     Point,
@@ -667,6 +668,59 @@ pub fn run_auto_vacuum_cycle(app_state: &AppState) {
     }
     if total_removed > 0 {
         info!(total_removed, "auto-vacuum cycle finished");
+    }
+}
+
+/// Run one cycle of the retention policy worker: compact WAL for collections
+/// that have `retention_days` set, removing entries older than the configured period.
+///
+/// Called from the background task in main (e.g. every hour).
+pub fn run_retention_cycle(app_state: &AppState) {
+    let collections_dir = app_state.config.storage_path.join("collections");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let wal_compress = app_state.config.wal_compression;
+    let mut total_removed = 0usize;
+
+    for entry in app_state.collections.iter() {
+        let name = entry.key();
+        let collection_arc = entry.value();
+        let retention_days = match collection_arc.read() {
+            Ok(coll) => coll.config().retention_days,
+            Err(_) => continue,
+        };
+        let Some(days) = retention_days else { continue };
+        let cutoff_ts = now_secs.saturating_sub(days as u64 * 86400);
+        let collection_dir = collections_dir.join(name);
+
+        match app_state.storage_circuit_breaker.call(|| {
+            compact_wal_entries_older_than(&collection_dir, cutoff_ts, wal_compress)
+        }) {
+            Ok(removed) => {
+                if removed > 0 {
+                    total_removed += removed;
+                    info!(
+                        collection = %name,
+                        removed,
+                        retention_days = days,
+                        "retention policy compacted WAL"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    collection = %name,
+                    error = %e,
+                    "retention policy WAL compaction failed"
+                );
+            }
+        }
+    }
+
+    if total_removed > 0 {
+        info!(total_removed, "retention cycle finished");
     }
 }
 

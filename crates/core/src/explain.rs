@@ -138,7 +138,8 @@ pub struct IndexStats {
 /// Explicação completa de uma busca vetorial.
 ///
 /// Contém informações sobre o vetor de consulta, candidatos escaneados,
-/// resultados explicados individualmente e estatísticas do índice.
+/// resultados explicados individualmente, estatísticas do índice e
+/// metadados do percurso da busca (camadas HNSW, comparações de distância).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchExplanation {
     /// Norma L2 do vetor de consulta.
@@ -153,6 +154,10 @@ pub struct SearchExplanation {
     pub results: Vec<ExplainResult>,
     /// Estatísticas do índice no momento da busca.
     pub index_stats: IndexStats,
+    /// Metadados do percurso da busca (camadas percorridas, comparações).
+    /// Presente quando o índice retorna esses dados (ex.: HNSW).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain_meta: Option<ExplainMeta>,
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -349,12 +354,13 @@ pub fn build_search_explanation_with_resolver(
     let mut explain_results = Vec::with_capacity(raw_results.len());
     let mut rank_after_counter = 0usize;
 
-    // Captura tombstones_skipped UMA VEZ (é propriedade do índice, igual para todos os resultados).
-    // Extrair do primeiro resultado evita sobrescrever com o valor do último se futuramente
-    // search_explain retornar metas diferentes por resultado.
-    let total_tombstones_skipped = raw_results
+    // Captura ExplainMeta do primeiro resultado (igual para todos quando vindo do HNSW).
+    let explain_meta = raw_results
         .first()
-        .map(|(_, _, meta)| meta.tombstones_skipped)
+        .map(|(_, _, meta)| meta.clone());
+    let total_tombstones_skipped = explain_meta
+        .as_ref()
+        .map(|m| m.tombstones_skipped)
         .unwrap_or(0);
 
     let metric = collection.config().distance;
@@ -455,6 +461,7 @@ pub fn build_search_explanation_with_resolver(
         candidates_after_filter,
         results: explain_results,
         index_stats,
+        explain_meta,
     })
 }
 
@@ -486,6 +493,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
         db.create_collection(config).unwrap();
     }
@@ -561,6 +569,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
         db.create_collection(config).unwrap();
 
@@ -727,6 +736,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
         db.create_collection(config).unwrap();
 

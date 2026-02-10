@@ -489,6 +489,10 @@ pub struct AppState {
     pub storage_circuit_breaker: Arc<StorageCircuitBreaker>,
     /// Eventos de ingestão (timestamp_sec, points_count) para séries temporais (últimos 10 min).
     ingest_events: Arc<RwLock<Vec<(u64, u64)>>>,
+
+    #[cfg(feature = "raft")]
+    /// Handle do nó Raft quando feature "raft" está ativa e o nó foi inicializado.
+    pub raft_handle: Option<Arc<crate::raft::RaftHandle>>,
 }
 
 impl AppState {
@@ -630,6 +634,8 @@ impl AppState {
             reranker,
             storage_circuit_breaker: Arc::new(StorageCircuitBreaker::new()),
             ingest_events: Arc::new(RwLock::new(Vec::with_capacity(2000))),
+            #[cfg(feature = "raft")]
+            raft_handle: None,
         })
     }
 

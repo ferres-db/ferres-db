@@ -299,6 +299,7 @@ function QueryTesterContent() {
     setExplainLoading(true);
     setExplainError(null);
     setExplainResult(null);
+    setMainTab('explain');
     try {
       const embedding = await getEmbedding();
       const res = await pointsApi.explain(selectedCollection, {
@@ -542,8 +543,23 @@ function QueryTesterContent() {
 
         {/* ─── Results Panel ───────────────────────────────────── */}
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <CardTitle>Results</CardTitle>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleExplain}
+              disabled={explainLoading || !selectedCollection || !query || !apiKey}
+            >
+              {explainLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <>
+                  <FileSearch className="h-4 w-4 mr-1.5" />
+                  Explain
+                </>
+              )}
+            </Button>
           </CardHeader>
           <CardContent>
             <Tabs value={mainTab} onValueChange={setMainTab}>
@@ -799,7 +815,75 @@ function QueryTesterContent() {
 
                   {explainResult && (
                     <div className="space-y-4">
-                      {/* Explain Summary */}
+                      {/* Step Trace — caminho da busca */}
+                      <div className="rounded-lg border border-bg-tertiary bg-bg-secondary/50 overflow-hidden">
+                        <h4 className="text-sm font-semibold text-gray-50 px-3 py-2 border-b border-bg-tertiary bg-bg-tertiary/50">
+                          Search path (Step Trace)
+                        </h4>
+                        <ul className="divide-y divide-bg-tertiary">
+                          <li className="flex items-center gap-3 px-3 py-2.5">
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-400 text-xs font-bold">
+                              1
+                            </span>
+                            <div>
+                              <p className="text-xs font-medium text-gray-300">Query vector</p>
+                              <p className="text-[10px] text-gray-500">
+                                L2 norm = {explainResult.query_vector_norm.toFixed(4)}, metric = {explainResult.distance_metric}
+                              </p>
+                            </div>
+                          </li>
+                          {explainResult.explain_meta != null && (
+                            <li className="flex items-center gap-3 px-3 py-2.5">
+                              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-400 text-xs font-bold">
+                                2
+                              </span>
+                              <div>
+                                <p className="text-xs font-medium text-gray-300">HNSW traversal</p>
+                                <p className="text-[10px] text-gray-500">
+                                  {explainResult.explain_meta.layers_traversed} layer(s) traversed
+                                </p>
+                              </div>
+                            </li>
+                          )}
+                          {explainResult.explain_meta != null && (
+                          <li className="flex items-center gap-3 px-3 py-2.5">
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-400 text-xs font-bold">
+                              3
+                            </span>
+                            <div>
+                              <p className="text-xs font-medium text-gray-300">Distance comparisons</p>
+                              <p className="text-[10px] text-gray-500">
+                                {explainResult.explain_meta.candidates_visited} candidate(s) evaluated
+                              </p>
+                            </div>
+                          </li>
+                          )}
+                          <li className="flex items-center gap-3 px-3 py-2.5">
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-400 text-xs font-bold">
+                              {explainResult.explain_meta != null ? 4 : 2}
+                            </span>
+                            <div>
+                              <p className="text-xs font-medium text-gray-300">Native pre-filtering</p>
+                              <p className="text-[10px] text-gray-500">
+                                {explainResult.candidates_scanned - explainResult.candidates_after_filter} discarded by filter, {explainResult.candidates_after_filter} passed
+                              </p>
+                            </div>
+                          </li>
+                          <li className="flex items-center gap-3 px-3 py-2.5">
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-green-500/20 text-green-400 text-xs font-bold">
+                              {explainResult.explain_meta != null ? 5 : 3}
+                            </span>
+                            <div>
+                              <p className="text-xs font-medium text-gray-300">Results returned</p>
+                              <p className="text-[10px] text-gray-500">
+                                {explainResult.results.length} result(s)
+                              </p>
+                            </div>
+                          </li>
+                        </ul>
+                      </div>
+
+                      {/* Explain Summary + explain_meta */}
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                         <div className="bg-bg-tertiary rounded-lg px-3 py-2">
                           <p className="text-xs text-gray-400">Vector Norm</p>
@@ -826,6 +910,28 @@ function QueryTesterContent() {
                           </p>
                         </div>
                       </div>
+                      {explainResult.explain_meta != null && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                          <div className="bg-amber-500/10 rounded-lg px-3 py-2 border border-amber-500/30">
+                            <p className="text-xs text-amber-400/90">HNSW layers traversed</p>
+                            <p className="text-sm font-semibold text-amber-300">
+                              {explainResult.explain_meta.layers_traversed}
+                            </p>
+                          </div>
+                          <div className="bg-amber-500/10 rounded-lg px-3 py-2 border border-amber-500/30">
+                            <p className="text-xs text-amber-400/90">Distance comparisons</p>
+                            <p className="text-sm font-semibold text-amber-300">
+                              {explainResult.explain_meta.candidates_visited}
+                            </p>
+                          </div>
+                          <div className="bg-amber-500/10 rounded-lg px-3 py-2 border border-amber-500/30">
+                            <p className="text-xs text-amber-400/90">Pre-filter discarded</p>
+                            <p className="text-sm font-semibold text-amber-300">
+                              {explainResult.candidates_scanned - explainResult.candidates_after_filter}
+                            </p>
+                          </div>
+                        </div>
+                      )}
 
                       {/* Index Stats */}
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
