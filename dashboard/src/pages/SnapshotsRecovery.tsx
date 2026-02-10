@@ -17,7 +17,8 @@ import {
   TableRow,
 } from '@/components/ui/Table';
 import { Badge } from '@/components/ui/Badge';
-import { History, RotateCcw, AlertCircle } from 'lucide-react';
+import { Modal } from '@/components/ui/Modal';
+import { History, RotateCcw, AlertCircle, AlertTriangle } from 'lucide-react';
 
 function formatTs(ts: number): string {
   if (!ts) return '—';
@@ -35,7 +36,9 @@ export const SnapshotsRecovery = () => {
   const [loading, setLoading] = useState(true);
   const [restoring, setRestoring] = useState(false);
   const [restoreTs, setRestoreTs] = useState('');
+  const [restoreDateTime, setRestoreDateTime] = useState('');
   const [restoreCollection, setRestoreCollection] = useState<string>('');
+  const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
   const [restoreResult, setRestoreResult] = useState<{
     ok: boolean;
     restored: string[];
@@ -64,18 +67,39 @@ export const SnapshotsRecovery = () => {
     };
   }, []);
 
-  const handleRestore = async () => {
+  const getTimestampFromInput = (): number | null => {
+    if (restoreDateTime) {
+      const ms = new Date(restoreDateTime).getTime();
+      if (!Number.isNaN(ms)) return Math.floor(ms / 1000);
+    }
     const ts = parseInt(restoreTs, 10);
-    if (Number.isNaN(ts) || ts <= 0) {
+    if (!Number.isNaN(ts) && ts > 0) return ts;
+    return null;
+  };
+
+  const handleRestoreClick = () => {
+    const ts = getTimestampFromInput();
+    if (ts == null) {
       setRestoreResult({
         ok: false,
         restored: [],
-        errors: ['Invalid timestamp (use Unix seconds).'],
+        errors: ['Select a date/time or enter a Unix timestamp (seconds).'],
       });
+      return;
+    }
+    setRestoreTs(String(ts));
+    setShowRestoreConfirm(true);
+  };
+
+  const handleRestoreConfirm = async () => {
+    const ts = getTimestampFromInput();
+    if (ts == null) {
+      setShowRestoreConfirm(false);
       return;
     }
     setRestoring(true);
     setRestoreResult(null);
+    setShowRestoreConfirm(false);
     try {
       const result = await restoreApi.restoreToTimestamp(
         ts,
@@ -187,17 +211,29 @@ export const SnapshotsRecovery = () => {
         <CardHeader>
           <CardTitle className="text-lg text-white flex items-center gap-2">
             <RotateCcw className="h-5 w-5 opacity-90" />
-            Restore to timestamp
+            Point-in-Time Restore
           </CardTitle>
           <p className="text-sm text-gray-400">
-            Restore one collection or all collections to the state at the given Unix timestamp (seconds).
-            The server loads the last snapshot and reapplies WAL entries up to that time.
+            Restore one collection or all collections to the state at a given date/time. The server loads the last snapshot and reapplies WAL entries up to that time. This operation resets database state — use with caution.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap items-end gap-4">
             <div className="flex flex-col gap-1">
-              <label className="text-sm text-gray-400">Unix timestamp (seconds)</label>
+              <label className="text-sm text-gray-400">Date &amp; time</label>
+              <input
+                type="datetime-local"
+                value={restoreDateTime}
+                onChange={(e) => {
+                  setRestoreDateTime(e.target.value);
+                  const ms = new Date(e.target.value).getTime();
+                  if (!Number.isNaN(ms)) setRestoreTs(String(Math.floor(ms / 1000)));
+                }}
+                className="max-w-[220px] rounded-md border border-white/[0.1] bg-white/[0.06] px-3 py-2 text-sm text-white [color-scheme:dark]"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-sm text-gray-400">Or Unix timestamp (seconds)</label>
               <Input
                 type="number"
                 placeholder="e.g. 1739182800"
@@ -222,26 +258,69 @@ export const SnapshotsRecovery = () => {
               </select>
             </div>
             <Button
-              onClick={handleRestore}
-              disabled={restoring || !restoreTs.trim()}
+              onClick={handleRestoreClick}
+              disabled={restoring}
               className="bg-amber-600 hover:bg-amber-700 text-white"
             >
-              {restoring ? 'Restoring…' : 'Restore'}
+              {restoring ? 'Restoring…' : 'Point-in-Time Restore'}
             </Button>
           </div>
+
+          <Modal
+            isOpen={showRestoreConfirm}
+            onClose={() => setShowRestoreConfirm(false)}
+            title="Confirm Point-in-Time Restore"
+          >
+            <div className="space-y-4">
+              <div className="flex gap-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                <AlertTriangle className="h-6 w-6 shrink-0 text-amber-400" />
+                <div className="text-sm text-gray-200">
+                  <p className="font-medium text-amber-200">This operation will reset database state.</p>
+                  <p className="mt-1 text-gray-400">
+                    The server will load the last snapshot and replay the WAL up to the selected timestamp. All data after that point will be discarded. Make sure you have backups if needed.
+                  </p>
+                  <p className="mt-2 text-gray-300">
+                    Target: <strong>{restoreTs ? new Date(parseInt(restoreTs, 10) * 1000).toISOString() : '—'}</strong>
+                    {restoreCollection ? ` · Collection: ${restoreCollection}` : ' · All collections'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="secondary" onClick={() => setShowRestoreConfirm(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  className="bg-amber-600 hover:bg-amber-700 text-white"
+                  onClick={handleRestoreConfirm}
+                  disabled={restoring}
+                >
+                  {restoring ? 'Restoring…' : 'Yes, restore'}
+                </Button>
+              </div>
+            </div>
+          </Modal>
           {sortedTimestamps.length > 0 && (
             <p className="text-xs text-gray-500">
               Available timestamps (from snapshot + WAL):{' '}
-              {sortedTimestamps.slice(-10).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setRestoreTs(String(t))}
-                  className="mr-2 underline hover:text-gray-300"
-                >
-                  {t}
-                </button>
-              ))}
+              {sortedTimestamps.slice(-10).map((t) => {
+                const d = new Date(t * 1000);
+                const localStr = Number.isNaN(d.getTime())
+                  ? ''
+                  : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => {
+                      setRestoreTs(String(t));
+                      setRestoreDateTime(localStr);
+                    }}
+                    className="mr-2 underline hover:text-gray-300"
+                  >
+                    {t}
+                  </button>
+                );
+              })}
               {sortedTimestamps.length > 10 && ' …'}
             </p>
           )}
