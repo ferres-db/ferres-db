@@ -38,7 +38,7 @@ Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em
 
 - **api.md:** Schema de resposta final de `POST /api/v1/collections/{name}/search/explain` já documentado; adicionada secção **GET /api/v1/cluster** com schema de resposta (raft_enabled, leader_id, nodes com id, addr, role, replication_lag).
 
-## [0.1.0-STABLE] - 09/02/2026
+## [Released] - 09/02/2026
 
 Primeira versão estável do FerresDB, com polimento final de performance, analytics e documentação.
 

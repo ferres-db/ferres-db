@@ -62,6 +62,13 @@ pub enum WalOperation {
         /// O ID do ponto a remover.
         id: String,
     },
+    /// Cria uma relação entre dois pontos (grafo não direcionado).
+    Link {
+        /// ID (storage_id) do ponto de origem.
+        from: String,
+        /// ID (storage_id) do ponto de destino.
+        to: String,
+    },
 }
 
 // ─── Wal ──────────────────────────────────────────────────────────────
@@ -190,6 +197,28 @@ impl Wal {
         let entry = WalEntry {
             timestamp: current_timestamp(),
             operation: WalOperation::Delete { id: id.to_string() },
+        };
+        self.append_entry(&entry)?;
+        self.ops_since_snapshot += 1;
+        Ok(())
+    }
+
+    /// Registra uma operação de link (relação entre dois pontos) no WAL.
+    ///
+    /// Deve ser chamado ANTES da mutação em memória.
+    /// Retorna erro se o WAL já tiver muitas operações (backpressure: snapshot obrigatório).
+    pub fn append_link(&mut self, from: &str, to: &str) -> Result<(), FerresError> {
+        if self.ops_since_snapshot >= MAX_WAL_OPS_BEFORE_BACKPRESSURE {
+            return Err(FerresError::Storage(
+                "WAL too large, snapshot required".to_string(),
+            ));
+        }
+        let entry = WalEntry {
+            timestamp: current_timestamp(),
+            operation: WalOperation::Link {
+                from: from.to_string(),
+                to: to.to_string(),
+            },
         };
         self.append_entry(&entry)?;
         self.ops_since_snapshot += 1;
@@ -675,6 +704,20 @@ pub fn recover_collection(collection_dir: &Path) -> Result<Option<Collection>, F
                         }
                     }
                 }
+                WalOperation::Link { from, to } => {
+                    match collection.add_relation(from, to) {
+                        Ok(_) => applied += 1,
+                        Err(e) => {
+                            warn!(
+                                from = %from,
+                                to = %to,
+                                error = %e,
+                                "failed to replay link, skipping"
+                            );
+                            skipped += 1;
+                        }
+                    }
+                }
             }
         }
 
@@ -734,6 +777,9 @@ pub fn recover_collection_to_timestamp(
                 }
                 WalOperation::Delete { id } => {
                     let _ = collection.remove(id);
+                }
+                WalOperation::Link { from, to } => {
+                    let _ = collection.add_relation(from, to);
                 }
             }
         }
@@ -867,6 +913,21 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"op\":\"delete\""));
         assert!(json.contains("\"point-123\""));
+    }
+
+    #[test]
+    fn wal_link_entry_format() {
+        let entry = WalEntry {
+            timestamp: 1234567890,
+            operation: WalOperation::Link {
+                from: "id_A".to_string(),
+                to: "id_B".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"op\":\"link\""));
+        assert!(json.contains("\"id_A\""));
+        assert!(json.contains("\"id_B\""));
     }
 
     #[test]
@@ -1098,6 +1159,31 @@ mod tests {
         let recovered = recover_collection(&dir).unwrap().unwrap();
         assert_eq!(recovered.len(), 1);
         assert!(recovered.get("a").is_some());
+    }
+
+    #[test]
+    fn recovery_link_replay() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("test_col");
+
+        // Snapshot com A, B (sem relações)
+        let config = test_config("test_col");
+        let mut col = Collection::new(config);
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
+
+        // WAL com link(a, b)
+        let mut wal = Wal::open(&dir, 1000, false).unwrap();
+        wal.append_link("a", "b").unwrap();
+
+        // Recovery deve aplicar o link
+        let recovered = recover_collection(&dir).unwrap().unwrap();
+        assert_eq!(recovered.len(), 2);
+        let pa = recovered.get("a").unwrap();
+        let pb = recovered.get("b").unwrap();
+        assert_eq!(pa.relations.as_deref(), Some(&["b".to_string()][..]));
+        assert_eq!(pb.relations.as_deref(), Some(&["a".to_string()][..]));
     }
 
     // ─── Crash Simulation Tests ───────────────────────────────────────

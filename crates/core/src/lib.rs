@@ -49,6 +49,7 @@ pub mod cost;
 pub mod error;
 pub mod explain;
 pub mod fusion;
+pub mod graph;
 pub mod point;
 pub mod quantization;
 pub mod reindex;
@@ -64,9 +65,10 @@ pub use error::FerresError;
 pub use point::Point;
 pub use bm25::BM25Index;
 pub use quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarType};
+pub use graph::traverse_bfs;
 pub use search::{
-    create_ann_index, simd_enabled, ANNIndex, DistanceMetric, HnswConfig, HnswIndex,
-    QuantizedHnswIndex,
+    create_ann_index, distance_between, simd_enabled, ANNIndex, DistanceMetric, HnswConfig,
+    HnswIndex, QuantizedHnswIndex,
 };
 pub use storage::{
     CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker, StorageOptions,

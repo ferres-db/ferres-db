@@ -8,6 +8,7 @@ pub mod backup;
 pub mod collections;
 pub mod users;
 pub mod debug;
+pub mod graph;
 pub mod health;
 pub mod keys;
 pub mod metrics;
