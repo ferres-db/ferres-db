@@ -67,7 +67,9 @@ mod ort_impl {
             let session = Session::builder()
                 .map_err(|e| FerresError::Storage(format!("ONNX session builder: {e}")))?
                 .commit_from_file(path)
-                .map_err(|e| FerresError::Storage(format!("load ONNX model {}: {e}", path.display())))?;
+                .map_err(|e| {
+                    FerresError::Storage(format!("load ONNX model {}: {e}", path.display()))
+                })?;
 
             // Use provided names or defaults; the ONNX model must have input/output with these names.
             let input_name = input_name.unwrap_or_else(|| "input".to_string());

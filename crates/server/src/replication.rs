@@ -12,8 +12,8 @@ use tracing::{debug, error, info, warn};
 use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage, Point};
 
 use crate::grpc::pb::{
-    ferres_db_client::FerresDbClient, GetCollectionRequest, ListCollectionsRequest, StreamWalRequest,
-    WalDelete, WalEntryMessage, WalUpsert,
+    ferres_db_client::FerresDbClient, GetCollectionRequest, ListCollectionsRequest,
+    StreamWalRequest, WalDelete, WalEntryMessage, WalUpsert,
 };
 use crate::state::AppState;
 
@@ -35,7 +35,8 @@ pub async fn run_replication_worker(state: Arc<AppState>) {
             break;
         }
 
-        let endpoint = match format!("http://{}", master_addr).parse::<tonic::transport::Endpoint>() {
+        let endpoint = match format!("http://{}", master_addr).parse::<tonic::transport::Endpoint>()
+        {
             Ok(ep) => ep,
             Err(e) => {
                 error!(error = %e, "invalid replica-of address");
@@ -132,9 +133,10 @@ async fn replicate_collection(
             state.config.binary_snapshot,
             state.config.namespace_physical_isolation,
         )?;
-        state
-            .collections
-            .insert(collection_name.to_string(), Arc::new(std::sync::RwLock::new(collection)));
+        state.collections.insert(
+            collection_name.to_string(),
+            Arc::new(std::sync::RwLock::new(collection)),
+        );
         state
             .query_stats
             .insert(collection_name.to_string(), crate::state::QueryStats::new());
@@ -164,12 +166,17 @@ fn apply_wal_entry(
     collection_name: &str,
     entry: &WalEntryMessage,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(operation) = &entry.operation else { return Ok(()); };
+    let Some(operation) = &entry.operation else {
+        return Ok(());
+    };
 
-    let coll_arc = state
-        .collections
-        .get(collection_name)
-        .ok_or_else(|| format!("collection '{}' not found", collection_name))?;
+    let coll_arc = {
+        let ref_guard = state
+            .collections
+            .get(collection_name)
+            .ok_or_else(|| format!("collection '{}' not found", collection_name))?;
+        Arc::clone(ref_guard.value())
+    };
 
     use crate::grpc::pb::wal_entry_message::Operation;
     match operation {
@@ -179,11 +186,8 @@ fn apply_wal_entry(
             } else {
                 serde_json::from_str(&upsert.metadata_json).unwrap_or(serde_json::Value::Null)
             };
-            let point = Point::new(
-                upsert.id.clone(),
-                upsert.vector.clone(),
-                metadata,
-            ).map_err(|e| format!("invalid point: {}", e))?;
+            let point = Point::new(upsert.id.clone(), upsert.vector.clone(), metadata)
+                .map_err(|e| format!("invalid point: {}", e))?;
             let mut point = point;
             point.namespace = upsert.namespace.clone();
             point.created_at = upsert.created_at;

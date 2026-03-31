@@ -3,6 +3,8 @@
 //! Middleware aceita: API key (Bearer <key>) ou JWT (Bearer <jwt>).
 //! JWT é usado após login do dashboard (usuários em SQLite).
 
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 use axum::{
     extract::Request,
     http::StatusCode,
@@ -10,8 +12,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -48,8 +48,8 @@ pub fn validate_jwt(token: &str) -> bool {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JwtClaims {
-    pub sub: String,   // username
-    pub role: String,  // admin | editor | viewer
+    pub sub: String,  // username
+    pub role: String, // admin | editor | viewer
     pub exp: i64,
     pub iat: i64,
 }
@@ -97,10 +97,7 @@ fn is_valid_legacy(key: &str) -> bool {
 
 /// Middleware que requer API key válida no header `Authorization: Bearer <key>`.
 /// Aceita chaves do SQLite (api_keys) ou do legacy static (testes).
-pub async fn require_api_key(
-    req: Request,
-    next: Next,
-) -> Result<Response, impl IntoResponse> {
+pub async fn require_api_key(req: Request, next: Next) -> Result<Response, impl IntoResponse> {
     let auth_header = req
         .headers()
         .get("Authorization")
@@ -123,12 +120,10 @@ pub async fn require_api_key(
 
     // 1) API key (programática ou legacy) → full access (admin), com possível restrição de namespace
     if crate::api_keys::ApiKeyStore::validate(api_key) || is_valid_legacy(api_key) {
-        let namespace_allowance = crate::api_keys::get_meta_global(api_key)
-            .and_then(|meta| {
-                meta.allowed_namespaces.map(|list| {
-                    crate::permissions::NamespaceAllowance::Only(list)
-                })
-            });
+        let namespace_allowance = crate::api_keys::get_meta_global(api_key).and_then(|meta| {
+            meta.allowed_namespaces
+                .map(|list| crate::permissions::NamespaceAllowance::Only(list))
+        });
         let user = AuthUser {
             username: "api_key".to_string(),
             role: Role::Admin,
@@ -176,12 +171,21 @@ pub async fn require_api_key(
                 return Ok(next.run(req).await);
             }
         }
+        // Token parece JWT mas falhou na validação (expirado ou assinatura inválida).
+        // Retorna 401 para que o cliente limpe o token e redirecione para login.
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "message": "Session expired or invalid. Please log in again.",
+                "code": "unauthorized"
+            })),
+        ));
     }
 
     Err((
         StatusCode::FORBIDDEN,
         Json(json!({
-            "message": "Invalid API key or session. Use a valid API key or log in to the dashboard.",
+            "message": "Invalid API key. Use a valid API key or log in to the dashboard.",
             "code": "forbidden"
         })),
     ))
@@ -364,7 +368,7 @@ pub fn check_user_permission(
     collection: &str,
     action: &crate::permissions::Action,
 ) -> crate::permissions::PermissionResult {
-    use crate::permissions::{PermissionResult, Action};
+    use crate::permissions::{Action, PermissionResult};
     use crate::users::Role;
 
     // Admin bypassa tudo

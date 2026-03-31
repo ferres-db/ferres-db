@@ -4,8 +4,8 @@
 
 use lazy_static::lazy_static;
 use prometheus::{
-    register_counter_vec, register_histogram_vec, register_gauge,
-    CounterVec, HistogramVec, Gauge, TextEncoder,
+    register_counter_vec, register_gauge, register_histogram_vec, CounterVec, Gauge, HistogramVec,
+    TextEncoder,
 };
 
 lazy_static! {
@@ -76,13 +76,13 @@ pub fn gather_metrics() -> String {
 }
 
 /// Extrai o endpoint do path da URL.
-/// 
-/// Normaliza paths como `/api/v1/collections/my-collection/points` 
+///
+/// Normaliza paths como `/api/v1/collections/my-collection/points`
 /// para `/api/v1/collections/:name/points` para melhor agregação de métricas.
 pub fn normalize_endpoint(path: &str) -> String {
     // Remove query parameters
     let path = path.split('?').next().unwrap_or(path);
-    
+
     // Normaliza paths de coleções nomeadas
     if let Some(pos) = path.find("/collections/") {
         let after_collections = &path[pos + "/collections/".len()..];
@@ -91,11 +91,10 @@ pub fn normalize_endpoint(path: &str) -> String {
             // Substitui o nome da coleção por :name
             return path.replace(
                 &format!("/collections/{collection_name}"),
-                "/collections/:name"
+                "/collections/:name",
             );
         }
     }
-    
+
     path.to_string()
 }
-

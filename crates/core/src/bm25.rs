@@ -126,10 +126,8 @@ impl BM25Index {
                 *scores.entry(doc_id.clone()).or_insert(0.0) += term_score;
             }
         }
-        let mut results: Vec<(String, f32)> = scores
-            .into_iter()
-            .map(|(id, s)| (id, s as f32))
-            .collect();
+        let mut results: Vec<(String, f32)> =
+            scores.into_iter().map(|(id, s)| (id, s as f32)).collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
         results

@@ -84,6 +84,7 @@ rmcp = { version = "0.14", features = ["server", "macros"], optional = true }
 
 # Optional: Raft-based distributed consensus (feature "raft"); WAL replicated to majority before commit
 openraft = { version = "0.9", optional = true }
+num_cpus = "1.17.0"
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

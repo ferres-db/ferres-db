@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use ferres_db_core::graph;
 use ferres_db_core::point::Point;
 
-use crate::auth::{AuthenticatedUser, check_user_permission};
 use crate::audit::{self, AuditResult};
+use crate::auth::{check_user_permission, AuthenticatedUser};
 use crate::error::{ApiError, ApiResult};
 use crate::permissions::Action;
 use crate::state::AppState;
@@ -72,7 +72,9 @@ pub async fn link_points(
     }
 
     if payload.from.is_empty() || payload.to.is_empty() {
-        return Err(ApiError::invalid_payload("from and to are required and cannot be empty"));
+        return Err(ApiError::invalid_payload(
+            "from and to are required and cannot be empty",
+        ));
     }
 
     let collection_arc = app_state
@@ -192,11 +194,14 @@ pub async fn get_subgraph(
             return Err(ApiError::invalid_payload("center_id cannot be empty"));
         }
         let get_point = |id: &str| collection.get(id).cloned();
-        let points = graph::traverse_bfs(get_point, center_id, depth)
-            .map_err(|e| ApiError::from(e))?;
+        let points =
+            graph::traverse_bfs(get_point, center_id, depth).map_err(|e| ApiError::from(e))?;
         let node_ids: std::collections::HashSet<String> =
             points.iter().map(|p| p.storage_id()).collect();
-        let nodes: Vec<GraphNodeResponse> = points.iter().map(|p| point_to_graph_node(p, false)).collect();
+        let nodes: Vec<GraphNodeResponse> = points
+            .iter()
+            .map(|p| point_to_graph_node(p, false))
+            .collect();
         let mut edges = Vec::new();
         for p in &points {
             let sid = p.storage_id();

@@ -263,10 +263,7 @@ impl DiskStorage {
     }
 
     /// Carrega uma coleção do disco, retornando metadados e pontos.
-    pub fn load_collection(
-        &self,
-        name: &str,
-    ) -> Result<(CollectionMeta, Vec<Point>), FerresError> {
+    pub fn load_collection(&self, name: &str) -> Result<(CollectionMeta, Vec<Point>), FerresError> {
         let dir = self.collection_dir(name);
         if !dir.exists() {
             return Err(FerresError::CollectionNotFound(name.to_string()));
@@ -288,8 +285,8 @@ impl DiskStorage {
                 if line.is_empty() {
                     continue;
                 }
-                let point: Point = serde_json::from_str(line)
-                    .map_err(|e| FerresError::Storage(e.to_string()))?;
+                let point: Point =
+                    serde_json::from_str(line).map_err(|e| FerresError::Storage(e.to_string()))?;
                 points.push(point);
             }
         }
@@ -399,8 +396,7 @@ impl PointBin {
         }
     }
     fn into_point(self) -> Result<Point, FerresError> {
-        let metadata = serde_json::from_str(&self.metadata_json)
-            .unwrap_or(serde_json::Value::Null);
+        let metadata = serde_json::from_str(&self.metadata_json).unwrap_or(serde_json::Value::Null);
         let mut pt = Point::new(self.id, self.vector, metadata)?;
         pt.created_at = self.created_at;
         pt.namespace = self.namespace;
@@ -483,10 +479,7 @@ impl FileStorage {
             for point in points {
                 match &point.namespace {
                     None => root_points.push(point),
-                    Some(ns) => by_namespace
-                        .entry(ns.clone())
-                        .or_default()
-                        .push(point),
+                    Some(ns) => by_namespace.entry(ns.clone()).or_default().push(point),
                 }
             }
 
@@ -528,7 +521,13 @@ impl FileStorage {
             );
         } else {
             // Legacy: single points file at root
-            Self::write_points_and_index(path, &points, collection.config(), binary_snapshot, true)?;
+            Self::write_points_and_index(
+                path,
+                &points,
+                collection.config(),
+                binary_snapshot,
+                true,
+            )?;
             debug!(
                 name = %collection.name(),
                 points = points.len(),
@@ -590,9 +589,8 @@ impl FileStorage {
     /// Salva em `tier_meta.json` com serialização JSON.
     pub fn save_tier_metadata(path: &Path, metadata: &TierMetadata) -> Result<(), FerresError> {
         let tier_path = path.join("tier_meta.json");
-        let json = serde_json::to_string_pretty(metadata).map_err(|e| {
-            FerresError::Storage(format!("failed to serialize tier metadata: {e}"))
-        })?;
+        let json = serde_json::to_string_pretty(metadata)
+            .map_err(|e| FerresError::Storage(format!("failed to serialize tier metadata: {e}")))?;
         Self::atomic_write(&tier_path, json.as_bytes())?;
         debug!(path = %tier_path.display(), "tier metadata saved");
         Ok(())
@@ -606,12 +604,10 @@ impl FileStorage {
         if !tier_path.exists() {
             return Ok(None);
         }
-        let content = fs::read_to_string(&tier_path).map_err(|e| {
-            FerresError::Storage(format!("failed to read tier metadata: {e}"))
-        })?;
-        let metadata: TierMetadata = serde_json::from_str(&content).map_err(|e| {
-            FerresError::Storage(format!("failed to parse tier metadata: {e}"))
-        })?;
+        let content = fs::read_to_string(&tier_path)
+            .map_err(|e| FerresError::Storage(format!("failed to read tier metadata: {e}")))?;
+        let metadata: TierMetadata = serde_json::from_str(&content)
+            .map_err(|e| FerresError::Storage(format!("failed to parse tier metadata: {e}")))?;
         debug!(path = %tier_path.display(), "tier metadata loaded");
         Ok(Some(metadata))
     }
@@ -624,9 +620,7 @@ impl FileStorage {
     /// permitindo isolamento físico por namespace. Reconstrói o índice HNSW a partir dos pontos.
     pub fn load_collection(path: &Path) -> Result<Collection, FerresError> {
         if !path.exists() {
-            return Err(FerresError::CollectionNotFound(
-                path.display().to_string(),
-            ));
+            return Err(FerresError::CollectionNotFound(path.display().to_string()));
         }
 
         // 1. config.json
@@ -694,9 +688,7 @@ impl FileStorage {
                         }
                     }
                     Err(e) => {
-                        debug!(
-                            "index.bin corrupted ({e}), ignoring — will rebuild from points"
-                        );
+                        debug!("index.bin corrupted ({e}), ignoring — will rebuild from points");
                     }
                 },
                 Err(e) => {
@@ -950,7 +942,10 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert!(loaded.get("a").is_some());
         assert!(loaded.get("b").is_some());
-        assert_eq!(loaded.get("b").unwrap().metadata, serde_json::json!({"x":1}));
+        assert_eq!(
+            loaded.get("b").unwrap().metadata,
+            serde_json::json!({"x":1})
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1048,7 +1043,12 @@ mod tests {
         p0.namespace = None;
         collection.insert(p0).unwrap();
 
-        let mut p1 = Point::new("b", vec![0.0, 1.0, 0.0, 0.0], serde_json::json!({"ns": "tenant1"})).unwrap();
+        let mut p1 = Point::new(
+            "b",
+            vec![0.0, 1.0, 0.0, 0.0],
+            serde_json::json!({"ns": "tenant1"}),
+        )
+        .unwrap();
         p1.namespace = Some("tenant1".into());
         collection.insert(p1).unwrap();
 
@@ -1058,14 +1058,26 @@ mod tests {
 
         FileStorage::save_collection(&collection, &tmp, true, true).unwrap();
         assert!(tmp.join("points.bin").exists());
-        assert!(tmp.join("namespaces").join("tenant1").join("points.bin").exists());
-        assert!(tmp.join("namespaces").join("tenant2").join("points.bin").exists());
+        assert!(tmp
+            .join("namespaces")
+            .join("tenant1")
+            .join("points.bin")
+            .exists());
+        assert!(tmp
+            .join("namespaces")
+            .join("tenant2")
+            .join("points.bin")
+            .exists());
 
         let loaded = FileStorage::load_collection(&tmp).unwrap();
         assert_eq!(loaded.len(), 3);
         assert!(loaded.get("a").is_some());
-        assert!(loaded.get(&Point::storage_id_from_parts(Some("tenant1"), "b")).is_some());
-        assert!(loaded.get(&Point::storage_id_from_parts(Some("tenant2"), "c")).is_some());
+        assert!(loaded
+            .get(&Point::storage_id_from_parts(Some("tenant1"), "b"))
+            .is_some());
+        assert!(loaded
+            .get(&Point::storage_id_from_parts(Some("tenant2"), "c"))
+            .is_some());
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1135,7 +1147,8 @@ mod tests {
     #[test]
     fn circuit_breaker_resets_on_success() {
         let cb = StorageCircuitBreaker::with_config(2, 60);
-        cb.call(|| Err::<(), _>(FerresError::Storage("fail".into()))).ok();
+        cb.call(|| Err::<(), _>(FerresError::Storage("fail".into())))
+            .ok();
         assert_eq!(cb.failure_count(), 1);
         cb.call(|| Ok(())).unwrap();
         assert_eq!(cb.state(), CB_CLOSED);

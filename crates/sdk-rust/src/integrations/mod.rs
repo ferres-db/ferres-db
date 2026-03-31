@@ -6,5 +6,5 @@
 
 mod vector_store;
 
-pub use vector_store::{FerresDbVectorStore, VectorStore, VectorStoreDoc};
 pub use crate::{FerresDbClient, SdkError};
+pub use vector_store::{FerresDbVectorStore, VectorStore, VectorStoreDoc};

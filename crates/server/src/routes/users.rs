@@ -12,6 +12,12 @@ pub fn create_users_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/users/{id}", delete(delete_user))
-        .route("/api/v1/users/{username}/password", put(update_user_password))
-        .route("/api/v1/users/{username}/permissions", put(update_user_permissions))
+        .route(
+            "/api/v1/users/{username}/password",
+            put(update_user_password),
+        )
+        .route(
+            "/api/v1/users/{username}/permissions",
+            put(update_user_permissions),
+        )
 }

@@ -3,7 +3,7 @@
 //! Implementa a interface esperada por ferramentas de orquestração de busca:
 //! adicionar vetores com metadados e consultar por similaridade.
 
-use crate::{FerresDbClient, PointInput, SearchResultItem, SdkError};
+use crate::{FerresDbClient, PointInput, SdkError, SearchResultItem};
 use async_trait::async_trait;
 
 /// Documento retornado pelo VectorStore (id + metadata, ex. texto para RAG).
@@ -131,11 +131,7 @@ impl VectorStore for FerresDbVectorStore {
             .client
             .search(&self.collection_name, query_vector, k, None)
             .await?;
-        Ok(resp
-            .results
-            .into_iter()
-            .map(VectorStoreDoc::from)
-            .collect())
+        Ok(resp.results.into_iter().map(VectorStoreDoc::from).collect())
     }
 
     async fn similarity_search_with_score(

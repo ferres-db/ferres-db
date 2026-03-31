@@ -33,11 +33,7 @@ pub struct ClusterStatus {
 
 /// Returns cluster status for standalone mode (no Raft). Single node, role from replica_of.
 pub fn cluster_status_standalone(this_addr: &str, is_replica_of: bool) -> ClusterStatus {
-    let role = if is_replica_of {
-        "replica"
-    } else {
-        "leader"
-    };
+    let role = if is_replica_of { "replica" } else { "leader" };
     ClusterStatus {
         raft_enabled: false,
         leader_id: Some("1".to_string()),

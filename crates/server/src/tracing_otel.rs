@@ -24,7 +24,13 @@ use tracing_subscriber::Registry;
 /// Endpoint: env `OTEL_EXPORTER_OTLP_ENDPOINT` (padrão: `http://localhost:4317`).
 /// Registra o propagador global W3C Trace Context (traceparent/tracestate).
 #[cfg(feature = "otel")]
-pub fn init_otel_tracing() -> Result<(impl tracing_subscriber::Layer<Registry> + Send + Sync, SdkTracerProvider), Box<dyn std::error::Error + Send + Sync>> {
+pub fn init_otel_tracing() -> Result<
+    (
+        impl tracing_subscriber::Layer<Registry> + Send + Sync,
+        SdkTracerProvider,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     use opentelemetry_otlp::WithExportConfig;
 
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -48,9 +54,7 @@ pub fn init_otel_tracing() -> Result<(impl tracing_subscriber::Layer<Registry> +
     let tracer = provider.tracer("ferres-db-server");
 
     // Registra propagador global W3C Trace Context (traceparent/tracestate)
-    global::set_text_map_propagator(
-        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
-    );
+    global::set_text_map_propagator(opentelemetry_sdk::propagation::TraceContextPropagator::new());
 
     let layer = tracing_opentelemetry::layer().with_tracer(tracer);
     Ok((layer, provider))

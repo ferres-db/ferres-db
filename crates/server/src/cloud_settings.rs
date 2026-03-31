@@ -65,7 +65,10 @@ impl CloudSettingsStore {
 
     /// Returns current cloud settings. Secret is never returned.
     pub fn get(&self) -> Result<CloudSettings, CloudSettingsError> {
-        let conn = self.conn.lock().map_err(|_| CloudSettingsError::LockPoisoned)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CloudSettingsError::LockPoisoned)?;
         let mut stmt = conn.prepare(
             "SELECT region, bucket, COALESCE(endpoint, ''), access_key_id FROM cloud_settings WHERE id = 1",
         )?;
@@ -73,7 +76,11 @@ impl CloudSettingsStore {
             Ok(CloudSettings {
                 region: r.get::<_, Option<String>>(0)?,
                 bucket: r.get::<_, Option<String>>(1)?,
-                endpoint: r.get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+                endpoint: r
+                    .get::<_, Option<String>>(2)
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty()),
                 access_key_id: r.get::<_, Option<String>>(3)?,
                 secret_access_key: None,
             })
@@ -87,12 +94,35 @@ impl CloudSettingsStore {
 
     /// Updates cloud settings. Empty strings are stored as NULL. Secret is optional (only update if Some).
     pub fn set(&self, settings: &CloudSettings) -> Result<(), CloudSettingsError> {
-        let conn = self.conn.lock().map_err(|_| CloudSettingsError::LockPoisoned)?;
-        let region = settings.region.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
-        let bucket = settings.bucket.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
-        let endpoint = settings.endpoint.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
-        let access_key_id = settings.access_key_id.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
-        let secret = settings.secret_access_key.as_deref().and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CloudSettingsError::LockPoisoned)?;
+        let region = settings
+            .region
+            .as_deref()
+            .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let bucket = settings
+            .bucket
+            .as_deref()
+            .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let endpoint =
+            settings
+                .endpoint
+                .as_deref()
+                .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let access_key_id =
+            settings
+                .access_key_id
+                .as_deref()
+                .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let secret = settings.secret_access_key.as_deref().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        });
 
         if let Some(secret) = secret {
             conn.execute(
@@ -110,7 +140,10 @@ impl CloudSettingsStore {
 
     /// Returns settings including secret (for internal use by backup handler). Secret may be None if not set.
     pub fn get_with_secret(&self) -> Result<CloudSettings, CloudSettingsError> {
-        let conn = self.conn.lock().map_err(|_| CloudSettingsError::LockPoisoned)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CloudSettingsError::LockPoisoned)?;
         let mut stmt = conn.prepare(
             "SELECT region, bucket, endpoint, access_key_id, secret_access_key FROM cloud_settings WHERE id = 1",
         )?;
@@ -118,7 +151,11 @@ impl CloudSettingsStore {
             Ok(CloudSettings {
                 region: r.get::<_, Option<String>>(0)?,
                 bucket: r.get::<_, Option<String>>(1)?,
-                endpoint: r.get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+                endpoint: r
+                    .get::<_, Option<String>>(2)
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty()),
                 access_key_id: r.get::<_, Option<String>>(3)?,
                 secret_access_key: r.get::<_, Option<String>>(4)?,
             })
