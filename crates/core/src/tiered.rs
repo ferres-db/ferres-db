@@ -284,9 +284,8 @@ pub struct WarmStorage {
 impl WarmStorage {
     /// Cria ou abre um WarmStorage no diretório especificado.
     pub fn new(dir: &Path, dimension: usize) -> Result<Self, FerresError> {
-        fs::create_dir_all(dir).map_err(|e| {
-            FerresError::Storage(format!("failed to create warm dir: {e}"))
-        })?;
+        fs::create_dir_all(dir)
+            .map_err(|e| FerresError::Storage(format!("failed to create warm dir: {e}")))?;
 
         let vectors_path = dir.join("warm_vectors.bin");
         let index_path = dir.join("warm_index.json");
@@ -301,12 +300,10 @@ impl WarmStorage {
 
         // Carrega índice existente se houver
         if storage.index_path.exists() {
-            let index_data = fs::read_to_string(&storage.index_path).map_err(|e| {
-                FerresError::Storage(format!("failed to read warm index: {e}"))
-            })?;
-            storage.offsets = serde_json::from_str(&index_data).map_err(|e| {
-                FerresError::Storage(format!("failed to parse warm index: {e}"))
-            })?;
+            let index_data = fs::read_to_string(&storage.index_path)
+                .map_err(|e| FerresError::Storage(format!("failed to read warm index: {e}")))?;
+            storage.offsets = serde_json::from_str(&index_data)
+                .map_err(|e| FerresError::Storage(format!("failed to parse warm index: {e}")))?;
         }
 
         // Carrega mmap com verificação de consistência (crash recovery)
@@ -326,9 +323,7 @@ impl WarmStorage {
                 .create(true)
                 .append(true)
                 .open(&self.vectors_path)
-                .map_err(|e| {
-                    FerresError::Storage(format!("failed to open warm vectors: {e}"))
-                })?;
+                .map_err(|e| FerresError::Storage(format!("failed to open warm vectors: {e}")))?;
 
             for &val in vector {
                 file.write_all(&val.to_le_bytes()).map_err(|e| {
@@ -337,9 +332,8 @@ impl WarmStorage {
             }
 
             // fsync garante que os bytes estão no disco antes de atualizar o índice
-            file.sync_all().map_err(|e| {
-                FerresError::Storage(format!("failed to sync warm vectors: {e}"))
-            })?;
+            file.sync_all()
+                .map_err(|e| FerresError::Storage(format!("failed to sync warm vectors: {e}")))?;
         } // file handle é fechado aqui
 
         // Agora é seguro atualizar o mapa de offsets
@@ -360,9 +354,10 @@ impl WarmStorage {
             FerresError::Storage(format!("vector '{id}' not found in warm storage"))
         })?;
 
-        let mmap = self.mmap.as_ref().ok_or_else(|| {
-            FerresError::Storage("warm storage mmap not initialized".to_string())
-        })?;
+        let mmap = self
+            .mmap
+            .as_ref()
+            .ok_or_else(|| FerresError::Storage("warm storage mmap not initialized".to_string()))?;
 
         let byte_offset = *offset;
         let byte_len = self.dimension * 4;
@@ -424,9 +419,8 @@ impl WarmStorage {
                 .map_err(|e| {
                     FerresError::Storage(format!("failed to open warm vectors for flush: {e}"))
                 })?;
-            file.sync_all().map_err(|e| {
-                FerresError::Storage(format!("failed to flush warm vectors: {e}"))
-            })?;
+            file.sync_all()
+                .map_err(|e| FerresError::Storage(format!("failed to flush warm vectors: {e}")))?;
         }
 
         // Escrita atômica do índice (tmp + sync + rename)
@@ -439,15 +433,11 @@ impl WarmStorage {
     }
 
     /// Reconstrói o arquivo mmap com apenas os vetores ativos.
-    pub fn compact(
-        &mut self,
-        vectors: &HashMap<String, Vec<f32>>,
-    ) -> Result<(), FerresError> {
+    pub fn compact(&mut self, vectors: &HashMap<String, Vec<f32>>) -> Result<(), FerresError> {
         // Reescreve o arquivo com apenas os vetores ativos
         let tmp_path = self.vectors_path.with_extension("tmp");
-        let mut file = fs::File::create(&tmp_path).map_err(|e| {
-            FerresError::Storage(format!("failed to create temp warm file: {e}"))
-        })?;
+        let mut file = fs::File::create(&tmp_path)
+            .map_err(|e| FerresError::Storage(format!("failed to create temp warm file: {e}")))?;
 
         let mut new_offsets = HashMap::new();
         let mut offset = 0;
@@ -468,9 +458,8 @@ impl WarmStorage {
         })?;
 
         // Atomic rename
-        fs::rename(&tmp_path, &self.vectors_path).map_err(|e| {
-            FerresError::Storage(format!("failed to rename warm vectors: {e}"))
-        })?;
+        fs::rename(&tmp_path, &self.vectors_path)
+            .map_err(|e| FerresError::Storage(format!("failed to rename warm vectors: {e}")))?;
 
         self.offsets = new_offsets;
         self.save_index()?;
@@ -480,26 +469,23 @@ impl WarmStorage {
     }
 
     fn save_index(&self) -> Result<(), FerresError> {
-        let index_json = serde_json::to_string(&self.offsets).map_err(|e| {
-            FerresError::Storage(format!("failed to serialize warm index: {e}"))
-        })?;
+        let index_json = serde_json::to_string(&self.offsets)
+            .map_err(|e| FerresError::Storage(format!("failed to serialize warm index: {e}")))?;
 
         // Escrita atômica: warm_index.json.tmp → sync_all → rename → warm_index.json
         let tmp_path = PathBuf::from(format!("{}.tmp", self.index_path.display()));
 
-        let mut tmp_file = fs::File::create(&tmp_path).map_err(|e| {
-            FerresError::Storage(format!("failed to create warm index tmp: {e}"))
-        })?;
-        tmp_file.write_all(index_json.as_bytes()).map_err(|e| {
-            FerresError::Storage(format!("failed to write warm index: {e}"))
-        })?;
-        tmp_file.sync_all().map_err(|e| {
-            FerresError::Storage(format!("failed to sync warm index: {e}"))
-        })?;
+        let mut tmp_file = fs::File::create(&tmp_path)
+            .map_err(|e| FerresError::Storage(format!("failed to create warm index tmp: {e}")))?;
+        tmp_file
+            .write_all(index_json.as_bytes())
+            .map_err(|e| FerresError::Storage(format!("failed to write warm index: {e}")))?;
+        tmp_file
+            .sync_all()
+            .map_err(|e| FerresError::Storage(format!("failed to sync warm index: {e}")))?;
 
-        fs::rename(&tmp_path, &self.index_path).map_err(|e| {
-            FerresError::Storage(format!("failed to rename warm index: {e}"))
-        })?;
+        fs::rename(&tmp_path, &self.index_path)
+            .map_err(|e| FerresError::Storage(format!("failed to rename warm index: {e}")))?;
         Ok(())
     }
 
@@ -553,9 +539,8 @@ impl WarmStorage {
             file.set_len(max_valid_end as u64).map_err(|e| {
                 FerresError::Storage(format!("failed to truncate warm vectors: {e}"))
             })?;
-            file.sync_all().map_err(|e| {
-                FerresError::Storage(format!("failed to sync after truncate: {e}"))
-            })?;
+            file.sync_all()
+                .map_err(|e| FerresError::Storage(format!("failed to sync after truncate: {e}")))?;
         }
 
         if lost_entries || needs_truncate {
@@ -611,41 +596,34 @@ impl ColdStorage {
     /// Cria ou abre um ColdStorage no diretório especificado.
     pub fn new(dir: &Path) -> Result<Self, FerresError> {
         let cold_dir = dir.join("cold");
-        fs::create_dir_all(&cold_dir).map_err(|e| {
-            FerresError::Storage(format!("failed to create cold dir: {e}"))
-        })?;
+        fs::create_dir_all(&cold_dir)
+            .map_err(|e| FerresError::Storage(format!("failed to create cold dir: {e}")))?;
         Ok(Self { dir: cold_dir })
     }
 
     /// Salva um ponto completo em disco.
     pub fn save_point(&self, point: &Point) -> Result<(), FerresError> {
         let path = self.point_path(&point.id);
-        let json = serde_json::to_string(point).map_err(|e| {
-            FerresError::Storage(format!("failed to serialize cold point: {e}"))
-        })?;
+        let json = serde_json::to_string(point)
+            .map_err(|e| FerresError::Storage(format!("failed to serialize cold point: {e}")))?;
         let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, &json).map_err(|e| {
-            FerresError::Storage(format!("failed to write cold point: {e}"))
-        })?;
-        fs::rename(&tmp_path, &path).map_err(|e| {
-            FerresError::Storage(format!("failed to rename cold point: {e}"))
-        })?;
+        fs::write(&tmp_path, &json)
+            .map_err(|e| FerresError::Storage(format!("failed to write cold point: {e}")))?;
+        fs::rename(&tmp_path, &path)
+            .map_err(|e| FerresError::Storage(format!("failed to rename cold point: {e}")))?;
         Ok(())
     }
 
     /// Carrega um ponto completo do disco.
     pub fn load_point(&self, id: &str) -> Result<Point, FerresError> {
         let path = self.point_path(id);
-        let mut file = fs::File::open(&path).map_err(|e| {
-            FerresError::Storage(format!("failed to open cold point '{id}': {e}"))
-        })?;
+        let mut file = fs::File::open(&path)
+            .map_err(|e| FerresError::Storage(format!("failed to open cold point '{id}': {e}")))?;
         let mut content = String::new();
-        file.read_to_string(&mut content).map_err(|e| {
-            FerresError::Storage(format!("failed to read cold point '{id}': {e}"))
-        })?;
-        let point: Point = serde_json::from_str(&content).map_err(|e| {
-            FerresError::Storage(format!("failed to parse cold point '{id}': {e}"))
-        })?;
+        file.read_to_string(&mut content)
+            .map_err(|e| FerresError::Storage(format!("failed to read cold point '{id}': {e}")))?;
+        let point: Point = serde_json::from_str(&content)
+            .map_err(|e| FerresError::Storage(format!("failed to parse cold point '{id}': {e}")))?;
         Ok(point)
     }
 
@@ -880,15 +858,17 @@ impl TieredCollection {
     /// - Warm: lê vetor do mmap + metadata da memória, promove para Hot.
     /// - Cold: lê do disco, promove para Hot.
     pub fn get(&self, id: &str) -> Result<Option<Point>, FerresError> {
-        // Registra acesso
-        if let Ok(mut tracker) = self.access_tracker.lock() {
-            tracker.record_access(id);
-        }
-
-        let tier = self.point_tiers.read()
+        // Lock order: point_tiers first, then access_tracker (same as insert/remove)
+        let tier = self
+            .point_tiers
+            .read()
             .map_err(|_| FerresError::Storage("failed to read point tiers".into()))?
             .get(id)
             .cloned();
+
+        if let Ok(mut tracker) = self.access_tracker.lock() {
+            tracker.record_access(id);
+        }
 
         match tier {
             Some(StorageTier::Hot) | None => {
@@ -909,9 +889,9 @@ impl TieredCollection {
     /// Hidrata um ponto do warm storage (promove para Hot).
     fn hydrate_from_warm(&self, id: &str) -> Result<Option<Point>, FerresError> {
         let vector = if let Some(ref warm) = self.warm_storage {
-            let ws = warm.lock().map_err(|_| {
-                FerresError::Storage("failed to lock warm storage".into())
-            })?;
+            let ws = warm
+                .lock()
+                .map_err(|_| FerresError::Storage("failed to lock warm storage".into()))?;
             if ws.contains(id) {
                 Some(ws.read_vector(id)?)
             } else {
@@ -921,7 +901,9 @@ impl TieredCollection {
             None
         };
 
-        let meta = self.warm_metadata.read()
+        let meta = self
+            .warm_metadata
+            .read()
             .map_err(|_| FerresError::Storage("failed to read warm metadata".into()))?
             .get(id)
             .cloned();
@@ -962,7 +944,9 @@ impl TieredCollection {
     /// Hidrata o ponto do tier atual (Warm ou Cold), tombstona o nó antigo
     /// no HNSW para evitar duplicatas, e re-insere na Collection.
     pub fn promote_to_hot(&mut self, id: &str) -> Result<(), FerresError> {
-        let current_tier = self.point_tiers.read()
+        let current_tier = self
+            .point_tiers
+            .read()
             .map_err(|_| FerresError::Storage("failed to read tiers".into()))?
             .get(id)
             .cloned();
@@ -1028,19 +1012,22 @@ impl TieredCollection {
         if let Some(point) = point {
             // Escreve vetor no warm storage
             if let Some(ref warm) = self.warm_storage {
-                let mut ws = warm.lock().map_err(|_| {
-                    FerresError::Storage("failed to lock warm storage".into())
-                })?;
+                let mut ws = warm
+                    .lock()
+                    .map_err(|_| FerresError::Storage("failed to lock warm storage".into()))?;
                 ws.add_vector(id, &point.vector)?;
             }
 
             // Guarda metadata em memória
             if let Ok(mut wm) = self.warm_metadata.write() {
-                wm.insert(id.to_string(), WarmPointMeta {
-                    metadata: point.metadata.clone(),
-                    created_at: point.created_at,
-                    expires_at: point.expires_at,
-                });
+                wm.insert(
+                    id.to_string(),
+                    WarmPointMeta {
+                        metadata: point.metadata.clone(),
+                        created_at: point.created_at,
+                        expires_at: point.expires_at,
+                    },
+                );
             }
 
             // Remove dados da Collection (libera Vec<f32> da RAM) mas NÃO
@@ -1080,10 +1067,13 @@ impl TieredCollection {
 
             // Guarda metadata mínima
             if let Ok(mut ci) = self.cold_ids.write() {
-                ci.insert(id.to_string(), ColdPointMeta {
-                    created_at: point.created_at,
-                    expires_at: point.expires_at,
-                });
+                ci.insert(
+                    id.to_string(),
+                    ColdPointMeta {
+                        created_at: point.created_at,
+                        expires_at: point.expires_at,
+                    },
+                );
             }
 
             // Atualiza tier
@@ -1105,20 +1095,15 @@ impl TieredCollection {
         // Coleta pontos da collection (sem segurar warm lock)
         let points: Vec<(String, Point)> = ids
             .iter()
-            .filter_map(|id| {
-                self.collection
-                    .get(id)
-                    .cloned()
-                    .map(|p| (id.clone(), p))
-            })
+            .filter_map(|id| self.collection.get(id).cloned().map(|p| (id.clone(), p)))
             .collect();
         let count = points.len();
 
         // Um único lock: escreve todos os vetores no warm
         if let Some(ref warm) = self.warm_storage {
-            let mut ws = warm.lock().map_err(|_| {
-                FerresError::Storage("failed to lock warm storage".into())
-            })?;
+            let mut ws = warm
+                .lock()
+                .map_err(|_| FerresError::Storage("failed to lock warm storage".into()))?;
             for (id, ref point) in &points {
                 ws.add_vector(id, &point.vector)?;
             }
@@ -1153,9 +1138,10 @@ impl TieredCollection {
         }
         // Lê metadata warm (read lock) para todos os ids
         let meta_map: HashMap<String, WarmPointMeta> = {
-            let wm = self.warm_metadata.read().map_err(|_| {
-                FerresError::Storage("failed to read warm metadata".into())
-            })?;
+            let wm = self
+                .warm_metadata
+                .read()
+                .map_err(|_| FerresError::Storage("failed to read warm metadata".into()))?;
             ids.iter()
                 .filter_map(|id| wm.get(id).cloned().map(|m| (id.clone(), m)))
                 .collect()
@@ -1163,13 +1149,15 @@ impl TieredCollection {
 
         // Um único lock no warm: lê vetores e remove todos
         let points: Vec<(String, Point)> = if let Some(ref warm) = self.warm_storage {
-            let mut ws = warm.lock().map_err(|_| {
-                FerresError::Storage("failed to lock warm storage".into())
-            })?;
+            let mut ws = warm
+                .lock()
+                .map_err(|_| FerresError::Storage("failed to lock warm storage".into()))?;
             let mut out = Vec::with_capacity(ids.len());
             for id in ids {
                 if let (Some(vec), Some(meta)) = (
-                    ws.contains(id).then(|| ws.read_vector(id)).and_then(|r| r.ok()),
+                    ws.contains(id)
+                        .then(|| ws.read_vector(id))
+                        .and_then(|r| r.ok()),
                     meta_map.get(id),
                 ) {
                     let (namespace, logical_id) = Point::parse_storage_id(id);
@@ -1235,16 +1223,16 @@ impl TieredCollection {
 
         // Snapshot para cálculo paralelo (locks breves)
         let (tiers_vec, last_access_snapshot, config_clone) = {
-            let tracker = self.access_tracker.lock().map_err(|_| {
-                FerresError::Storage("failed to lock access tracker".into())
-            })?;
-            let tiers = self.point_tiers.read().map_err(|_| {
-                FerresError::Storage("failed to read tiers".into())
-            })?;
-            let tiers_vec: Vec<(String, StorageTier)> = tiers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            let tracker = self
+                .access_tracker
+                .lock()
+                .map_err(|_| FerresError::Storage("failed to lock access tracker".into()))?;
+            let tiers = self
+                .point_tiers
+                .read()
+                .map_err(|_| FerresError::Storage("failed to read tiers".into()))?;
+            let tiers_vec: Vec<(String, StorageTier)> =
+                tiers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             let last_access_snapshot = tracker.last_access_snapshot();
             (tiers_vec, last_access_snapshot, self.config.clone())
         };
@@ -1479,9 +1467,7 @@ pub struct TierMetadata {
 impl TierMetadata {
     /// Exporta metadados de uma TieredCollection.
     pub fn from_tiered_collection(tc: &TieredCollection) -> Self {
-        let point_tiers = tc.point_tiers.read()
-            .map(|t| t.clone())
-            .unwrap_or_default();
+        let point_tiers = tc.point_tiers.read().map(|t| t.clone()).unwrap_or_default();
 
         let tracker = tc.access_tracker.lock().unwrap();
         let mut last_access = HashMap::new();
@@ -1511,8 +1497,8 @@ impl TierMetadata {
 mod tests {
     use super::*;
     use crate::collection::CollectionConfig;
-    use crate::search::{DistanceMetric, HnswConfig};
     use crate::quantization::QuantizationConfig;
+    use crate::search::{DistanceMetric, HnswConfig};
 
     fn test_config() -> CollectionConfig {
         CollectionConfig {
@@ -1753,12 +1739,7 @@ mod tests {
 
         let cold = ColdStorage::new(&tmp).unwrap();
 
-        let special_ids = [
-            "doc/1",
-            "ns:item:42",
-            "hello world",
-            "café☕",
-        ];
+        let special_ids = ["doc/1", "ns:item:42", "hello world", "café☕"];
 
         for id in &special_ids {
             let point = make_point(id, vec![1.0, 2.0, 3.0]);
@@ -1770,7 +1751,11 @@ mod tests {
             assert_eq!(loaded.vector, vec![1.0, 2.0, 3.0]);
 
             cold.remove_point(id);
-            assert!(!cold.contains(id), "cold storage should not contain '{}' after removal", id);
+            assert!(
+                !cold.contains(id),
+                "cold storage should not contain '{}' after removal",
+                id
+            );
         }
 
         let _ = fs::remove_dir_all(&tmp);
@@ -1889,7 +1874,11 @@ mod tests {
         // Busca HNSW retorna IDs de pontos em TODOS os tiers
         // (porque demote usa remove_data_only, sem tombstone no HNSW).
         let results = tc.search(&[1.0, 0.0, 0.0], 5).unwrap();
-        assert_eq!(results.len(), 5, "HNSW search must return points from all tiers");
+        assert_eq!(
+            results.len(),
+            5,
+            "HNSW search must return points from all tiers"
+        );
 
         // hot1 deve ser o mais próximo de [1,0,0]
         assert_eq!(results[0].0, "hot1");
@@ -1897,21 +1886,39 @@ mod tests {
         // Pontos em todos os tiers devem estar presentes
         let result_ids: std::collections::HashSet<&str> =
             results.iter().map(|r| r.0.as_str()).collect();
-        assert!(result_ids.contains("hot1"), "hot point must appear in results");
-        assert!(result_ids.contains("warm1"), "warm point must appear in results");
-        assert!(result_ids.contains("cold1"), "cold point must appear in results");
+        assert!(
+            result_ids.contains("hot1"),
+            "hot point must appear in results"
+        );
+        assert!(
+            result_ids.contains("warm1"),
+            "warm point must appear in results"
+        );
+        assert!(
+            result_ids.contains("cold1"),
+            "cold point must appear in results"
+        );
 
         // get_from_any_tier deve encontrar pontos em todos os tiers
         let hot_point = tc.get_from_any_tier("hot1");
-        assert!(hot_point.is_some(), "get_from_any_tier must find hot points");
+        assert!(
+            hot_point.is_some(),
+            "get_from_any_tier must find hot points"
+        );
         assert_eq!(hot_point.unwrap().vector, vec![1.0, 0.0, 0.0]);
 
         let warm_point = tc.get_from_any_tier("warm1");
-        assert!(warm_point.is_some(), "get_from_any_tier must find warm points");
+        assert!(
+            warm_point.is_some(),
+            "get_from_any_tier must find warm points"
+        );
         assert_eq!(warm_point.unwrap().vector, vec![0.0, 1.0, 0.0]);
 
         let cold_point = tc.get_from_any_tier("cold1");
-        assert!(cold_point.is_some(), "get_from_any_tier must find cold points");
+        assert!(
+            cold_point.is_some(),
+            "get_from_any_tier must find cold points"
+        );
         assert_eq!(cold_point.unwrap().vector, vec![0.9, 0.1, 0.0]);
 
         // Ponto inexistente retorna None
@@ -1954,10 +1961,30 @@ mod tests {
         let mut tc = TieredCollection::new(collection, tiered_cfg, Some(&tmp)).unwrap();
 
         // Insere pontos com metadata variada
-        let p_hot = Point::new("hot_tech", vec![1.0, 0.0, 0.0], json!({"category": "tech", "status": "active"})).unwrap();
-        let p_warm = Point::new("warm_tech", vec![0.9, 0.1, 0.0], json!({"category": "tech", "status": "inactive"})).unwrap();
-        let p_cold = Point::new("cold_sci", vec![0.0, 1.0, 0.0], json!({"category": "science", "status": "active"})).unwrap();
-        let p_warm2 = Point::new("warm_tech2", vec![0.8, 0.2, 0.0], json!({"category": "tech", "status": "active"})).unwrap();
+        let p_hot = Point::new(
+            "hot_tech",
+            vec![1.0, 0.0, 0.0],
+            json!({"category": "tech", "status": "active"}),
+        )
+        .unwrap();
+        let p_warm = Point::new(
+            "warm_tech",
+            vec![0.9, 0.1, 0.0],
+            json!({"category": "tech", "status": "inactive"}),
+        )
+        .unwrap();
+        let p_cold = Point::new(
+            "cold_sci",
+            vec![0.0, 1.0, 0.0],
+            json!({"category": "science", "status": "active"}),
+        )
+        .unwrap();
+        let p_warm2 = Point::new(
+            "warm_tech2",
+            vec![0.8, 0.2, 0.0],
+            json!({"category": "tech", "status": "active"}),
+        )
+        .unwrap();
 
         tc.insert(p_hot).unwrap();
         tc.insert(p_warm).unwrap();
@@ -1997,7 +2024,8 @@ mod tests {
         }
 
         assert_eq!(
-            tech_results.len(), 3,
+            tech_results.len(),
+            3,
             "filter category=tech must match 3 points (1 hot + 2 warm), got: {:?}",
             tech_results.iter().map(|r| &r.0).collect::<Vec<_>>()
         );
@@ -2005,9 +2033,18 @@ mod tests {
         // Verifica que os pontos corretos foram encontrados
         let tech_ids: std::collections::HashSet<&str> =
             tech_results.iter().map(|r| r.0.as_str()).collect();
-        assert!(tech_ids.contains("hot_tech"), "hot_tech must pass category=tech filter");
-        assert!(tech_ids.contains("warm_tech"), "warm_tech must pass category=tech filter");
-        assert!(tech_ids.contains("warm_tech2"), "warm_tech2 must pass category=tech filter");
+        assert!(
+            tech_ids.contains("hot_tech"),
+            "hot_tech must pass category=tech filter"
+        );
+        assert!(
+            tech_ids.contains("warm_tech"),
+            "warm_tech must pass category=tech filter"
+        );
+        assert!(
+            tech_ids.contains("warm_tech2"),
+            "warm_tech2 must pass category=tech filter"
+        );
 
         // Filtro mais restritivo: category=tech AND status=active
         // Deve encontrar hot_tech (Hot) e warm_tech2 (Warm)
@@ -2024,7 +2061,8 @@ mod tests {
         }
 
         assert_eq!(
-            active_tech.len(), 2,
+            active_tech.len(),
+            2,
             "filter category=tech AND status=active must match 2 points, got: {:?}",
             active_tech.iter().map(|r| &r.0).collect::<Vec<_>>()
         );
@@ -2043,7 +2081,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(sci_results.len(), 1, "only cold_sci should match category=science");
+        assert_eq!(
+            sci_results.len(),
+            1,
+            "only cold_sci should match category=science"
+        );
         assert_eq!(sci_results[0], "cold_sci");
 
         let _ = fs::remove_dir_all(&tmp);
@@ -2103,7 +2145,8 @@ mod tests {
         let mut tc = TieredCollection::new(collection, tiered_cfg, Some(&tmp)).unwrap();
 
         // Insere pontos
-        tc.insert(make_point("recent", vec![1.0, 0.0, 0.0])).unwrap();
+        tc.insert(make_point("recent", vec![1.0, 0.0, 0.0]))
+            .unwrap();
         tc.insert(make_point("old", vec![0.0, 1.0, 0.0])).unwrap();
 
         // Simula que "old" foi acessado há 2 horas (> hot_threshold=1, < warm_threshold=5)
@@ -2177,7 +2220,10 @@ mod tests {
         assert_eq!(dist.warm, 400, "expected 400 warm");
         assert_eq!(dist.cold, 300, "expected 300 cold");
 
-        assert_eq!(result.demoted_to_warm, 700, "400 hot->warm + 300 hot->cold (then cold batch)");
+        assert_eq!(
+            result.demoted_to_warm, 700,
+            "400 hot->warm + 300 hot->cold (then cold batch)"
+        );
         assert_eq!(result.demoted_to_cold, 300, "300 demoted to cold");
 
         // Amostra: p0 deve estar Hot, p400 Warm, p700 Cold

@@ -10,8 +10,10 @@ use crate::state::AppState;
 
 /// Rotas de estatísticas por coleção (usadas sob o router com rate limit por coleção).
 pub fn create_stats_routes() -> Router<AppState> {
-    Router::new()
-        .route("/api/v1/collections/{name}/stats", get(get_collection_stats))
+    Router::new().route(
+        "/api/v1/collections/{name}/stats",
+        get(get_collection_stats),
+    )
 }
 
 /// Rotas de analytics (global, queries, slow-queries; leem queries.log, cache 1h) e cluster.
@@ -24,4 +26,3 @@ pub fn create_global_stats_routes() -> Router<AppState> {
         .route("/api/v1/stats/feedback", get(get_feedback))
         .route("/api/v1/cluster", get(get_cluster))
 }
-

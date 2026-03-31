@@ -154,11 +154,7 @@ fn rrf_two_rankings(
         .collect();
 
     // Coleta todos os IDs únicos (Vec de IDs únicos via HashSet)
-    let all_ids: HashSet<String> = a
-        .iter()
-        .chain(b.iter())
-        .map(|(id, _)| id.clone())
-        .collect();
+    let all_ids: HashSet<String> = a.iter().chain(b.iter()).map(|(id, _)| id.clone()).collect();
 
     // Para cada ID: score = 1/(k+rank_a) + 1/(k+rank_b); ausente = u32::MAX
     let mut combined: Vec<(String, f32)> = all_ids
@@ -229,11 +225,7 @@ pub fn weighted_fusion(
     }
 
     // Coleta todos os IDs únicos
-    let all_ids: HashSet<&str> = rank_vec
-        .keys()
-        .chain(rank_bm25.keys())
-        .copied()
-        .collect();
+    let all_ids: HashSet<&str> = rank_vec.keys().chain(rank_bm25.keys()).copied().collect();
 
     // Calcula score ponderado
     let mut combined: Vec<(String, f32)> = all_ids
@@ -342,8 +334,7 @@ mod tests {
         ];
 
         let rrf = reciprocal_rank_fusion(&[vec_results.clone(), bm25_results.clone()], 60, 10);
-        let weighted =
-            weighted_fusion(&vec_results, &bm25_results, 0.5, 60, 10);
+        let weighted = weighted_fusion(&vec_results, &bm25_results, 0.5, 60, 10);
 
         // Ambos devem produzir resultados válidos
         assert_eq!(rrf.len(), 3);
@@ -362,14 +353,8 @@ mod tests {
     fn test_weighted_backward_compat() {
         // Verifica que weighted_fusion produz os mesmos scores que a implementação
         // original inline em collection.rs
-        let vec_results = vec![
-            ("a".to_string(), 0.9),
-            ("b".to_string(), 0.7),
-        ];
-        let bm25_results = vec![
-            ("b".to_string(), 5.0),
-            ("c".to_string(), 3.0),
-        ];
+        let vec_results = vec![("a".to_string(), 0.9), ("b".to_string(), 0.7)];
+        let bm25_results = vec![("b".to_string(), 5.0), ("c".to_string(), 3.0)];
 
         let alpha = 0.6_f32;
         let k: usize = 60;
@@ -378,8 +363,8 @@ mod tests {
         // Calcula manualmente o score esperado para "a"
         // rank_vec = 1, rank_bm25 = MAX
         let k_f = k as f32;
-        let expected_a = alpha * (1.0 / (k_f + 1.0))
-            + (1.0 - alpha) * (1.0 / (k_f + u32::MAX as f32));
+        let expected_a =
+            alpha * (1.0 / (k_f + 1.0)) + (1.0 - alpha) * (1.0 / (k_f + u32::MAX as f32));
 
         let actual_a = result.iter().find(|x| x.0 == "a").unwrap().1;
         assert!(
@@ -388,8 +373,7 @@ mod tests {
         );
 
         // Score para "b" (rank 2 em vec, rank 1 em bm25)
-        let expected_b =
-            alpha * (1.0 / (k_f + 2.0)) + (1.0 - alpha) * (1.0 / (k_f + 1.0));
+        let expected_b = alpha * (1.0 / (k_f + 2.0)) + (1.0 - alpha) * (1.0 / (k_f + 1.0));
         let actual_b = result.iter().find(|x| x.0 == "b").unwrap().1;
         assert!(
             (actual_b - expected_b).abs() < 1e-9,

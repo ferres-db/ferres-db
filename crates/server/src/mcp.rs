@@ -8,16 +8,15 @@ use std::sync::Arc;
 use ferres_db_core::{MetadataFilter, Point};
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Implementation, ListToolsResult,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResult, Implementation, ListToolsResult, ServerCapabilities,
+    ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer, ServiceExt};
 use serde_json::json;
 use tracing::warn;
 
 use crate::request_validation::{
-    validate_search_limit, validate_vector_dimension, MAX_POINTS_PER_BATCH,
-    MAX_VECTOR_DIM,
+    validate_search_limit, validate_vector_dimension, MAX_POINTS_PER_BATCH, MAX_VECTOR_DIM,
 };
 use crate::state::AppState;
 
@@ -114,17 +113,19 @@ impl ServerHandler for FerresMcpHandler {
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(
-            Self::tool_definitions(),
-        )))
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_
+    {
+        std::future::ready(Ok(
+            ListToolsResult::with_all_items(Self::tool_definitions()),
+        ))
     }
 
     fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_
+    {
         let app_state = self.app_state.clone();
         let name = request.name.to_string();
         let arguments = request.arguments.clone();
@@ -158,8 +159,11 @@ async fn do_search_points(
     let vector: Vec<f32> = args
         .get("vector")
         .and_then(|v| {
-            v.as_array()
-                .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+            v.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_f64().map(|f| f as f32))
+                    .collect()
+            })
         })
         .ok_or_else(|| "missing or invalid argument: vector (array of numbers)".to_string())?;
     let limit = args
@@ -182,7 +186,10 @@ async fn do_search_points(
         .map_err(|e| e.to_string())?;
 
     let filter_json = args.get("filter").cloned();
-    let namespace = args.get("namespace").and_then(|v| v.as_str()).map(String::from);
+    let namespace = args
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let vector_field = args
         .get("vector_field")
         .and_then(|v| v.as_str())
@@ -258,9 +265,9 @@ async fn do_upsert_points(
     let mut failed = Vec::new();
 
     for (i, pv) in points_arr.iter().enumerate() {
-        let obj = pv.as_object().ok_or_else(|| {
-            format!("points[{}]: expected object", i)
-        })?;
+        let obj = pv
+            .as_object()
+            .ok_or_else(|| format!("points[{}]: expected object", i))?;
         let id = obj
             .get("id")
             .and_then(|v| v.as_str())
@@ -294,7 +301,10 @@ async fn do_upsert_points(
         let metadata = obj.get("metadata").cloned().unwrap_or(json!(null));
         let point = match Point::new(id.clone(), vector, metadata) {
             Ok(mut point) => {
-                point.namespace = obj.get("namespace").and_then(|v| v.as_str()).map(String::from);
+                point.namespace = obj
+                    .get("namespace")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 if let Some(ttl) = obj.get("ttl").and_then(|v| v.as_u64()) {
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -360,15 +370,16 @@ async fn do_get_stats(
                 collection.tombstone_memory_waste(),
             )
         };
-        let (num_queries, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms) = app_state
-            .query_stats
-            .get(name)
-            .map(|s| {
-                let num_queries = s.num_queries.load(std::sync::atomic::Ordering::Relaxed);
-                let (avg, p50, p95, p99) = s.calculate_percentiles();
-                (num_queries, avg, p50, p95, p99)
-            })
-            .unwrap_or((0, 0.0, 0.0, 0.0, 0.0));
+        let (num_queries, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms) =
+            app_state
+                .query_stats
+                .get(name)
+                .map(|s| {
+                    let num_queries = s.num_queries.load(std::sync::atomic::Ordering::Relaxed);
+                    let (avg, p50, p95, p99) = s.calculate_percentiles();
+                    (num_queries, avg, p50, p95, p99)
+                })
+                .unwrap_or((0, 0.0, 0.0, 0.0, 0.0));
 
         return Ok(json!({
             "num_points": num_points,

@@ -35,8 +35,9 @@ pub async fn get_cloud_settings(
     };
     match store.get() {
         Ok(settings) => (axum::http::StatusCode::OK, Json(settings)).into_response(),
-        Err(e) => ApiError::internal_error(format!("failed to load cloud settings: {e}"))
-            .into_response(),
+        Err(e) => {
+            ApiError::internal_error(format!("failed to load cloud settings: {e}")).into_response()
+        }
     }
 }
 
@@ -79,7 +80,11 @@ pub async fn put_cloud_settings(
         return ApiError::internal_error(format!("failed to save cloud settings: {e}"))
             .into_response();
     }
-    (axum::http::StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
 }
 
 /// POST /api/v1/admin/settings/test-s3 — validates S3 connection (region, bucket, credentials) before saving.

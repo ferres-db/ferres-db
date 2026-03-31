@@ -290,7 +290,14 @@ pub fn build_search_explanation(
     vector_field: Option<&str>,
 ) -> Result<SearchExplanation, FerresError> {
     let resolver = |id: &str| collection.get(id).cloned();
-    build_search_explanation_with_resolver(collection, query, limit, filter, vector_field, &resolver)
+    build_search_explanation_with_resolver(
+        collection,
+        query,
+        limit,
+        filter,
+        vector_field,
+        &resolver,
+    )
 }
 
 /// Variante de [`build_search_explanation`] que aceita um resolver customizado
@@ -355,9 +362,7 @@ pub fn build_search_explanation_with_resolver(
     let mut rank_after_counter = 0usize;
 
     // Captura ExplainMeta do primeiro resultado (igual para todos quando vindo do HNSW).
-    let explain_meta = raw_results
-        .first()
-        .map(|(_, _, meta)| meta.clone());
+    let explain_meta = raw_results.first().map(|(_, _, meta)| meta.clone());
     let total_tombstones_skipped = explain_meta
         .as_ref()
         .map(|m| m.tombstones_skipped)
@@ -470,9 +475,7 @@ pub fn build_search_explanation_with_resolver(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        CollectionConfig, DistanceMetric, HnswConfig, MetadataFilter, Point, VectorDB,
-    };
+    use crate::{CollectionConfig, DistanceMetric, HnswConfig, MetadataFilter, Point, VectorDB};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -593,8 +596,7 @@ mod tests {
             // Para Cosine: score e raw_distance podem diferir
             // raw_distance é o valor bruto L2² do HNSW
             // score = 1.0 - (1.0 - raw_distance / 2.0).clamp(0.0, 1.0)
-            let expected_score =
-                1.0 - (1.0 - result.raw_distance / 2.0).clamp(0.0, 1.0);
+            let expected_score = 1.0 - (1.0 - result.raw_distance / 2.0).clamp(0.0, 1.0);
             assert!(
                 (result.score - expected_score).abs() < 1e-6,
                 "Cosine: score ({}) deve ser derivado de raw_distance ({})",
@@ -705,18 +707,17 @@ mod tests {
         if let Some(p2) = p2_result {
             let eval = p2.filter_evaluation.as_ref().unwrap();
             assert!(!eval.passed, "p2 não deveria passar no filtro");
-            assert_eq!(p2.rank_after_filter, 0, "rank_after_filter deve ser 0 para pontos que não passaram");
+            assert_eq!(
+                p2.rank_after_filter, 0,
+                "rank_after_filter deve ser 0 para pontos que não passaram"
+            );
         }
 
         // Verifica que p1 e p3 (tech, price <= 100) PASSARAM no filtro
         let passed_results: Vec<_> = explanation
             .results
             .iter()
-            .filter(|r| {
-                r.filter_evaluation
-                    .as_ref()
-                    .is_none_or(|f| f.passed)
-            })
+            .filter(|r| r.filter_evaluation.as_ref().is_none_or(|f| f.passed))
             .collect();
         assert_eq!(passed_results.len(), 2);
     }
@@ -857,20 +858,17 @@ mod tests {
 
         // Resultado via build_search_explanation (função direta usada por REST/gRPC)
         let collection = db.get_collection("test").unwrap();
-        let via_build = build_search_explanation(
-            collection,
-            &query,
-            limit,
-            Some(filter),
-            None,
-        )
-        .unwrap();
+        let via_build =
+            build_search_explanation(collection, &query, limit, Some(filter), None).unwrap();
 
         // Campos globais idênticos
         assert_eq!(via_db.query_vector_norm, via_build.query_vector_norm);
         assert_eq!(via_db.distance_metric, via_build.distance_metric);
         assert_eq!(via_db.candidates_scanned, via_build.candidates_scanned);
-        assert_eq!(via_db.candidates_after_filter, via_build.candidates_after_filter);
+        assert_eq!(
+            via_db.candidates_after_filter,
+            via_build.candidates_after_filter
+        );
         assert_eq!(via_db.results.len(), via_build.results.len());
 
         // Cada resultado individual idêntico

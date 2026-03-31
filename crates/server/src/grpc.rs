@@ -15,8 +15,8 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use ferres_db_core::{
-    Collection, CollectionConfig, FileStorage, MetadataFilter, Point, Wal, WalEntry, WalOperation,
-    build_search_explanation,
+    build_search_explanation, Collection, CollectionConfig, FileStorage, MetadataFilter, Point,
+    Wal, WalEntry, WalOperation,
 };
 
 use crate::state::AppState;
@@ -35,8 +35,8 @@ fn wal_entry_to_proto(entry: WalEntry) -> WalEntryMessage {
     use pb::wal_entry_message::Operation;
     let operation = match entry.operation {
         WalOperation::Upsert { point } => {
-            let metadata_json = serde_json::to_string(&point.metadata)
-                .unwrap_or_else(|_| "null".to_string());
+            let metadata_json =
+                serde_json::to_string(&point.metadata).unwrap_or_else(|_| "null".to_string());
             Operation::Upsert(WalUpsert {
                 id: point.id,
                 vector: point.vector,
@@ -60,7 +60,9 @@ fn proto_distance_to_core(d: i32) -> Result<ferres_db_core::DistanceMetric, Stat
         1 => Ok(ferres_db_core::DistanceMetric::Cosine),
         2 => Ok(ferres_db_core::DistanceMetric::DotProduct),
         3 => Ok(ferres_db_core::DistanceMetric::Euclidean),
-        _ => Err(Status::invalid_argument("invalid or unspecified distance metric")),
+        _ => Err(Status::invalid_argument(
+            "invalid or unspecified distance metric",
+        )),
     }
 }
 
@@ -113,7 +115,9 @@ impl FerresDb for FerresGrpcService {
             return Err(Status::invalid_argument("name cannot be empty"));
         }
         if req.dimension == 0 || req.dimension > 4096 {
-            return Err(Status::invalid_argument("dimension must be between 1 and 4096"));
+            return Err(Status::invalid_argument(
+                "dimension must be between 1 and 4096",
+            ));
         }
 
         let distance = proto_distance_to_core(req.distance)?;
@@ -310,16 +314,17 @@ impl FerresDb for FerresGrpcService {
         let req = request.into_inner();
 
         if req.points.is_empty() {
-            return Err(Status::invalid_argument("points must contain at least 1 item"));
+            return Err(Status::invalid_argument(
+                "points must contain at least 1 item",
+            ));
         }
 
-        let collection_arc = self
-            .state
-            .collections
-            .get(&req.collection)
-            .ok_or_else(|| {
+        let collection_arc = {
+            let ref_guard = self.state.collections.get(&req.collection).ok_or_else(|| {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
+            Arc::clone(ref_guard.value())
+        };
 
         let (upserted, failed) = {
             let mut coll = collection_arc
@@ -412,15 +417,15 @@ impl FerresDb for FerresGrpcService {
     ) -> Result<Response<DeletePointsResponse>, Status> {
         let req = request.into_inner();
 
-        let collection_arc = self
-            .state
-            .collections
-            .get(&req.collection)
-            .ok_or_else(|| {
+        let collection_arc = {
+            let ref_guard = self.state.collections.get(&req.collection).ok_or_else(|| {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
+            Arc::clone(ref_guard.value())
+        };
 
-        let keys: Vec<String> = req.ids
+        let keys: Vec<String> = req
+            .ids
             .iter()
             .map(|id| Point::storage_id_from_parts(req.namespace.as_deref(), id))
             .collect();
@@ -443,13 +448,12 @@ impl FerresDb for FerresGrpcService {
     ) -> Result<Response<GetPointResponse>, Status> {
         let req = request.into_inner();
 
-        let collection_arc = self
-            .state
-            .collections
-            .get(&req.collection)
-            .ok_or_else(|| {
+        let collection_arc = {
+            let ref_guard = self.state.collections.get(&req.collection).ok_or_else(|| {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
+            Arc::clone(ref_guard.value())
+        };
 
         let coll = collection_arc
             .read()
@@ -460,8 +464,8 @@ impl FerresDb for FerresGrpcService {
             .get(&key)
             .ok_or_else(|| Status::not_found(format!("point '{}' not found", req.id)))?;
 
-        let metadata_json = serde_json::to_string(&point.metadata)
-            .unwrap_or_else(|_| "null".to_string());
+        let metadata_json =
+            serde_json::to_string(&point.metadata).unwrap_or_else(|_| "null".to_string());
 
         Ok(Response::new(GetPointResponse {
             id: point.id.clone(),
@@ -480,13 +484,12 @@ impl FerresDb for FerresGrpcService {
         let limit = (req.limit as usize).min(1000).max(1);
         let offset = req.offset as usize;
 
-        let collection_arc = self
-            .state
-            .collections
-            .get(&req.collection)
-            .ok_or_else(|| {
+        let collection_arc = {
+            let ref_guard = self.state.collections.get(&req.collection).ok_or_else(|| {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
+            Arc::clone(ref_guard.value())
+        };
 
         let coll = collection_arc
             .read()
@@ -507,10 +510,8 @@ impl FerresDb for FerresGrpcService {
 
         // Aplica filtro de metadata se fornecido
         if !req.filter_json.is_empty() {
-            let filter_value: serde_json::Value =
-                serde_json::from_str(&req.filter_json).map_err(|e| {
-                    Status::invalid_argument(format!("invalid filter JSON: {e}"))
-                })?;
+            let filter_value: serde_json::Value = serde_json::from_str(&req.filter_json)
+                .map_err(|e| Status::invalid_argument(format!("invalid filter JSON: {e}")))?;
             let filter = MetadataFilter::from_json(filter_value)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             all_points.retain(|p| {
@@ -544,13 +545,12 @@ impl FerresDb for FerresGrpcService {
         let req = request.into_inner();
         let start = Instant::now();
 
-        let collection_arc = self
-            .state
-            .collections
-            .get(&req.collection)
-            .ok_or_else(|| {
+        let collection_arc = {
+            let ref_guard = self.state.collections.get(&req.collection).ok_or_else(|| {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
+            Arc::clone(ref_guard.value())
+        };
 
         let coll = collection_arc
             .read()
@@ -562,10 +562,8 @@ impl FerresDb for FerresGrpcService {
         let mut filter = if req.filter_json.is_empty() {
             MetadataFilter::empty()
         } else {
-            let filter_value: serde_json::Value =
-                serde_json::from_str(&req.filter_json).map_err(|e| {
-                    Status::invalid_argument(format!("invalid filter JSON: {e}"))
-                })?;
+            let filter_value: serde_json::Value = serde_json::from_str(&req.filter_json)
+                .map_err(|e| Status::invalid_argument(format!("invalid filter JSON: {e}")))?;
             MetadataFilter::from_json(filter_value)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?
         };
@@ -610,7 +608,9 @@ impl FerresDb for FerresGrpcService {
             .entry(req.collection.clone())
             .or_insert_with(|| crate::state::QueryStats::new())
             .record_query(took_ms);
-        self.state.global_query_stats.record(&req.collection, took_ms);
+        self.state
+            .global_query_stats
+            .record(&req.collection, took_ms);
         crate::metrics::QUERIES_TOTAL
             .with_label_values(&[&req.collection])
             .inc();
@@ -628,13 +628,12 @@ impl FerresDb for FerresGrpcService {
         let req = request.into_inner();
         let start = Instant::now();
 
-        let collection_arc = self
-            .state
-            .collections
-            .get(&req.collection)
-            .ok_or_else(|| {
+        let collection_arc = {
+            let ref_guard = self.state.collections.get(&req.collection).ok_or_else(|| {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
+            Arc::clone(ref_guard.value())
+        };
 
         let coll = collection_arc
             .read()
@@ -708,7 +707,9 @@ impl FerresDb for FerresGrpcService {
             .entry(req.collection.clone())
             .or_insert_with(|| crate::state::QueryStats::new())
             .record_query(took_ms);
-        self.state.global_query_stats.record(&req.collection, took_ms);
+        self.state
+            .global_query_stats
+            .record(&req.collection, took_ms);
         crate::metrics::QUERIES_TOTAL
             .with_label_values(&[&req.collection])
             .inc();
@@ -730,8 +731,10 @@ impl FerresDb for FerresGrpcService {
         let mut filter = if !req.filter_json.is_empty() {
             let fv: serde_json::Value = serde_json::from_str(&req.filter_json)
                 .map_err(|e| Status::invalid_argument(format!("invalid filter JSON: {e}")))?;
-            Some(MetadataFilter::from_json(fv)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?)
+            Some(
+                MetadataFilter::from_json(fv)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?,
+            )
         } else {
             Some(MetadataFilter::empty())
         };
@@ -740,13 +743,12 @@ impl FerresDb for FerresGrpcService {
         }
         let filter = filter.and_then(|f| if f.is_empty() { None } else { Some(f) });
 
-        let collection_arc = self
-            .state
-            .collections
-            .get(&req.collection)
-            .ok_or_else(|| {
+        let collection_arc = {
+            let ref_guard = self.state.collections.get(&req.collection).ok_or_else(|| {
                 Status::not_found(format!("collection '{}' not found", req.collection))
             })?;
+            Arc::clone(ref_guard.value())
+        };
 
         // Delega ao core: toda a lógica de explain está em build_search_explanation
         let explanation = {
@@ -931,9 +933,8 @@ fn do_upsert_sync(
         let metadata: serde_json::Value = if input.metadata_json.is_empty() {
             serde_json::Value::Null
         } else {
-            serde_json::from_str(&input.metadata_json).map_err(|e| {
-                Status::invalid_argument(format!("invalid metadata: {e}"))
-            })?
+            serde_json::from_str(&input.metadata_json)
+                .map_err(|e| Status::invalid_argument(format!("invalid metadata: {e}")))?
         };
         match Point::new(input.id.clone(), input.vector.clone(), metadata) {
             Ok(mut point) => {
@@ -1008,8 +1009,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
     } else {
         let fv: serde_json::Value = serde_json::from_str(&req.filter_json)
             .map_err(|e| Status::invalid_argument(format!("invalid filter: {e}")))?;
-        MetadataFilter::from_json(fv)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?
+        MetadataFilter::from_json(fv).map_err(|e| Status::invalid_argument(e.to_string()))?
     };
     if let Some(ref ns) = req.namespace {
         filter.namespace = Some(ns.clone());
@@ -1095,7 +1095,11 @@ mod tests {
     }
 
     /// Helper: insere pontos via gRPC.
-    async fn upsert_test_points(service: &FerresGrpcService, collection: &str, points: Vec<PointInput>) {
+    async fn upsert_test_points(
+        service: &FerresGrpcService,
+        collection: &str,
+        points: Vec<PointInput>,
+    ) {
         service
             .upsert_points(Request::new(UpsertPointsRequest {
                 collection: collection.to_string(),
@@ -1170,8 +1174,14 @@ mod tests {
             for cond in &fe.conditions {
                 assert!(!cond.field.is_empty(), "field não deve ser vazio");
                 assert!(!cond.operator.is_empty(), "operator não deve ser vazio");
-                assert!(!cond.expected_json.is_empty(), "expected_json não deve ser vazio");
-                assert!(!cond.actual_json.is_empty(), "actual_json não deve ser vazio");
+                assert!(
+                    !cond.expected_json.is_empty(),
+                    "expected_json não deve ser vazio"
+                );
+                assert!(
+                    !cond.actual_json.is_empty(),
+                    "actual_json não deve ser vazio"
+                );
             }
         }
 
@@ -1180,12 +1190,22 @@ mod tests {
         if let Some(p2) = p2 {
             let fe = p2.filter_evaluation.as_ref().unwrap();
             assert!(!fe.passed, "p2 não deveria passar no filtro");
-            assert_eq!(p2.rank_after_filter, 0, "rank_after_filter deve ser 0 para p2");
+            assert_eq!(
+                p2.rank_after_filter, 0,
+                "rank_after_filter deve ser 0 para p2"
+            );
 
             // A condição category=$eq deve falhar (science != tech)
-            let cat_cond = fe.conditions.iter().find(|c| c.field == "category").unwrap();
+            let cat_cond = fe
+                .conditions
+                .iter()
+                .find(|c| c.field == "category")
+                .unwrap();
             assert_eq!(cat_cond.operator, "$eq");
-            assert!(!cat_cond.passed, "condição category=$eq deve falhar para p2");
+            assert!(
+                !cat_cond.passed,
+                "condição category=$eq deve falhar para p2"
+            );
             assert_eq!(cat_cond.expected_json, "\"tech\"");
             assert_eq!(cat_cond.actual_json, "\"science\"");
         }
@@ -1195,11 +1215,18 @@ mod tests {
         if let Some(p1) = p1 {
             let fe = p1.filter_evaluation.as_ref().unwrap();
             assert!(fe.passed, "p1 deveria passar no filtro");
-            assert!(p1.rank_after_filter > 0, "rank_after_filter deve ser > 0 para p1");
+            assert!(
+                p1.rank_after_filter > 0,
+                "rank_after_filter deve ser > 0 para p1"
+            );
 
             // Todas as condições devem passar
             for cond in &fe.conditions {
-                assert!(cond.passed, "condição {}={} deve passar para p1", cond.field, cond.operator);
+                assert!(
+                    cond.passed,
+                    "condição {}={} deve passar para p1",
+                    cond.field, cond.operator
+                );
             }
         }
 
@@ -1208,7 +1235,10 @@ mod tests {
         if let Some(p3) = p3 {
             let fe = p3.filter_evaluation.as_ref().unwrap();
             assert!(fe.passed, "p3 deveria passar no filtro");
-            assert!(p3.rank_after_filter > 0, "rank_after_filter deve ser > 0 para p3");
+            assert!(
+                p3.rank_after_filter > 0,
+                "rank_after_filter deve ser > 0 para p3"
+            );
         }
     }
 

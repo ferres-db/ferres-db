@@ -318,9 +318,18 @@ mod tests {
             relations: None,
         };
         assert_eq!(point.vector_for_field(None).unwrap(), &[1.0_f32, 0.0_f32]);
-        assert_eq!(point.vector_for_field(Some("default")).unwrap(), &[1.0_f32, 0.0_f32]);
-        assert_eq!(point.vector_for_field(Some("title_vector")).unwrap(), &[2.0_f32, 3.0_f32]);
-        assert_eq!(point.vector_for_field(Some("content_vector")).unwrap(), &[4.0_f32, 5.0_f32]);
+        assert_eq!(
+            point.vector_for_field(Some("default")).unwrap(),
+            &[1.0_f32, 0.0_f32]
+        );
+        assert_eq!(
+            point.vector_for_field(Some("title_vector")).unwrap(),
+            &[2.0_f32, 3.0_f32]
+        );
+        assert_eq!(
+            point.vector_for_field(Some("content_vector")).unwrap(),
+            &[4.0_f32, 5.0_f32]
+        );
         assert!(point.vector_for_field(Some("other")).is_none());
     }
 

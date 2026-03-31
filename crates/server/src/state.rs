@@ -3,11 +3,11 @@
 //! Contém coleções isoladas com locks individuais e configurações do servidor
 //! que são compartilhadas entre todas as rotas e handlers.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -23,9 +23,9 @@ use ferres_db_core::{
 use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
 use crate::cloud_settings::CloudSettingsStore;
-use crate::users::UserStore;
-use crate::query_logger::QueryLogger;
 use crate::query_log_analytics::{avg_points_per_second_10m, QueryLogCache};
+use crate::query_logger::QueryLogger;
+use crate::users::UserStore;
 
 // ─── GlobalQueryStats (dashboard: queries/min, top slow, histogram) ────────
 
@@ -41,9 +41,14 @@ pub struct GlobalQueryEvent {
 }
 
 /// Estatísticas globais de queries (últimas 24h) para o dashboard.
+///
+/// Usa um channel buffered para evitar contention: `record()` é non-blocking
+/// (fire-and-forget via `try_send`), e uma task de background drena o channel
+/// e atualiza o buffer interno.
 #[derive(Debug)]
 pub struct GlobalQueryStats {
     events: RwLock<VecDeque<GlobalQueryEvent>>,
+    tx: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<GlobalQueryEvent>>>,
 }
 
 impl Default for GlobalQueryStats {
@@ -56,23 +61,63 @@ impl GlobalQueryStats {
     pub fn new() -> Self {
         Self {
             events: RwLock::new(VecDeque::with_capacity(GLOBAL_QUERY_EVENTS_CAP)),
+            tx: std::sync::Mutex::new(None),
         }
     }
 
-    /// Registra uma query (chamado após cada busca).
+    /// Inicia a task de background que drena o channel e atualiza o buffer.
+    /// Deve ser chamado uma vez após criar o AppState dentro do runtime tokio.
+    pub fn start_background_drain(self: &Arc<Self>) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GlobalQueryEvent>(8192);
+        {
+            let mut guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(tx);
+        }
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(256);
+            loop {
+                // Wait for first event (or channel close)
+                match rx.recv().await {
+                    Some(ev) => batch.push(ev),
+                    None => break, // channel closed (shutdown)
+                }
+                // Drain any additional buffered events without waiting
+                while batch.len() < 1024 {
+                    match rx.try_recv() {
+                        Ok(ev) => batch.push(ev),
+                        Err(_) => break,
+                    }
+                }
+                // Flush batch into the VecDeque
+                if let Ok(mut events) = this.events.write() {
+                    for ev in batch.drain(..) {
+                        events.push_back(ev);
+                    }
+                    while events.len() > GLOBAL_QUERY_EVENTS_CAP {
+                        events.pop_front();
+                    }
+                } else {
+                    batch.clear();
+                }
+            }
+        });
+    }
+
+    /// Registra uma query (chamado após cada busca). Non-blocking fire-and-forget.
     pub fn record(&self, collection: &str, latency_ms: u64) {
         let timestamp_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let mut events = self.events.write().unwrap();
-        events.push_back(GlobalQueryEvent {
+        let event = GlobalQueryEvent {
             timestamp_secs,
             latency_ms,
             collection: collection.to_string(),
-        });
-        while events.len() > GLOBAL_QUERY_EVENTS_CAP {
-            events.pop_front();
+        };
+        let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.try_send(event); // drop if channel full — acceptable for stats
         }
     }
 
@@ -114,7 +159,15 @@ impl GlobalQueryStats {
     /// Histograma de latências: buckets (label, count). Bordas: 0, 5, 10, 25, 50, 100, 500, inf.
     pub fn latency_histogram(&self) -> Vec<(&'static str, u64)> {
         let events = self.events_last_24h();
-        let labels = ["0-5ms", "5-10ms", "10-25ms", "25-50ms", "50-100ms", "100-500ms", "500ms+"];
+        let labels = [
+            "0-5ms",
+            "5-10ms",
+            "10-25ms",
+            "25-50ms",
+            "50-100ms",
+            "100-500ms",
+            "500ms+",
+        ];
         let mut counts = vec![0u64; 7];
         for e in &events {
             if e.latency_ms < 5 {
@@ -205,6 +258,12 @@ pub struct ServerConfig {
     /// Dimensão do vetor esperada pelo modelo de rerank (default: 384). Env: FERRESDB_RERANK_DIMENSION.
     #[serde(skip_serializing)]
     pub rerank_dimension: Option<usize>,
+    /// Rate limit por coleção: requisições por segundo (default: 500). Env: FERRESDB_RATE_LIMIT_PER_SECOND.
+    #[serde(default = "default_rate_limit_per_second")]
+    pub rate_limit_per_second: u32,
+    /// Rate limit por coleção: tamanho do burst (default: 1000). Env: FERRESDB_RATE_LIMIT_BURST.
+    #[serde(default = "default_rate_limit_burst")]
+    pub rate_limit_burst: u32,
 }
 
 fn default_host() -> String {
@@ -221,6 +280,14 @@ fn default_storage_path() -> PathBuf {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+fn default_rate_limit_per_second() -> u32 {
+    2_000
+}
+
+fn default_rate_limit_burst() -> u32 {
+    10_000
 }
 
 impl ServerConfig {
@@ -259,9 +326,9 @@ impl ServerConfig {
             config.host = host;
         }
         if let Ok(port_str) = std::env::var("PORT") {
-            config.port = port_str.parse().map_err(|_| {
-                ConfigError::InvalidEnv("PORT must be a valid u16".to_string())
-            })?;
+            config.port = port_str
+                .parse()
+                .map_err(|_| ConfigError::InvalidEnv("PORT must be a valid u16".to_string()))?;
         }
         if let Ok(storage_path) = std::env::var("STORAGE_PATH") {
             config.storage_path = PathBuf::from(storage_path);
@@ -287,7 +354,8 @@ impl ServerConfig {
             }
         }
         // S3 backup (Region, Bucket, Credentials)
-        if let Ok(v) = std::env::var("FERRESDB_S3_REGION").or_else(|_| std::env::var("AWS_REGION")) {
+        if let Ok(v) = std::env::var("FERRESDB_S3_REGION").or_else(|_| std::env::var("AWS_REGION"))
+        {
             if !v.trim().is_empty() {
                 config.s3_region = Some(v.trim().to_string());
             }
@@ -297,12 +365,16 @@ impl ServerConfig {
                 config.s3_bucket = Some(v.trim().to_string());
             }
         }
-        if let Ok(v) = std::env::var("FERRESDB_S3_ACCESS_KEY_ID").or_else(|_| std::env::var("AWS_ACCESS_KEY_ID")) {
+        if let Ok(v) = std::env::var("FERRESDB_S3_ACCESS_KEY_ID")
+            .or_else(|_| std::env::var("AWS_ACCESS_KEY_ID"))
+        {
             if !v.trim().is_empty() {
                 config.s3_access_key_id = Some(v.trim().to_string());
             }
         }
-        if let Ok(v) = std::env::var("FERRESDB_S3_SECRET_ACCESS_KEY").or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY")) {
+        if let Ok(v) = std::env::var("FERRESDB_S3_SECRET_ACCESS_KEY")
+            .or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY"))
+        {
             if !v.trim().is_empty() {
                 config.s3_secret_access_key = Some(v.trim().to_string());
             }
@@ -315,6 +387,16 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("FERRESDB_RERANK_DIMENSION") {
             if let Ok(d) = v.trim().parse::<usize>() {
                 config.rerank_dimension = Some(d);
+            }
+        }
+        if let Ok(v) = std::env::var("FERRESDB_RATE_LIMIT_PER_SECOND") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                config.rate_limit_per_second = n;
+            }
+        }
+        if let Ok(v) = std::env::var("FERRESDB_RATE_LIMIT_BURST") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                config.rate_limit_burst = n;
             }
         }
 
@@ -356,6 +438,8 @@ impl Default for ServerConfig {
             s3_secret_access_key: None,
             rerank_model_path: None,
             rerank_dimension: None,
+            rate_limit_per_second: default_rate_limit_per_second(),
+            rate_limit_burst: default_rate_limit_burst(),
         }
     }
 }
@@ -384,6 +468,9 @@ pub const QUERY_PROFILES_CAP: usize = 10_000;
 // ─── QueryStats ────────────────────────────────────────────────────────────
 
 /// Estatísticas de queries para uma coleção.
+///
+/// `record_query` é non-blocking: incrementa an atomic counter and appends to a
+/// lock-free ring buffer to avoid serialising all concurrent searches.
 #[derive(Debug, Clone)]
 pub struct QueryStats {
     /// Número total de queries executadas.
@@ -408,15 +495,20 @@ impl QueryStats {
     }
 
     /// Registra uma nova query com sua latência.
+    /// Uses try_write to avoid blocking concurrent searches — if the lock is
+    /// currently held (e.g. by calculate_percentiles), the latency sample is
+    /// simply dropped. This is acceptable for approximate stats.
     pub fn record_query(&self, latency_ms: u64) {
         self.num_queries.fetch_add(1, Ordering::Relaxed);
-        
-        let mut latencies = self.latencies_ms.write().unwrap();
-        latencies.push_back(latency_ms);
-        // Mantém apenas as últimas 1000 latências
-        if latencies.len() > 1000 {
-            latencies.pop_front();
+
+        if let Ok(mut latencies) = self.latencies_ms.try_write() {
+            latencies.push_back(latency_ms);
+            // Mantém apenas as últimas 1000 latências
+            if latencies.len() > 1000 {
+                latencies.pop_front();
+            }
         }
+        // If try_write fails, skip this sample — stats remain approximate.
     }
 
     /// Calcula percentis das latências.
@@ -489,6 +581,8 @@ pub struct AppState {
     pub storage_circuit_breaker: Arc<StorageCircuitBreaker>,
     /// Eventos de ingestão (timestamp_sec, points_count) para séries temporais (últimos 10 min).
     ingest_events: Arc<RwLock<Vec<(u64, u64)>>>,
+    /// Semaphore to limit concurrent CPU-intensive searches (prevents thread oversubscription).
+    pub search_semaphore: Arc<tokio::sync::Semaphore>,
 
     #[cfg(feature = "raft")]
     /// Handle do nó Raft quando feature "raft" está ativa e o nó foi inicializado.
@@ -568,7 +662,7 @@ impl AppState {
         }
 
         let query_stats = Arc::new(DashMap::new());
-        
+
         // Inicializa stats para coleções existentes
         for name in collections.iter().map(|e| e.key().clone()) {
             query_stats.insert(name, QueryStats::new());
@@ -578,25 +672,17 @@ impl AppState {
 
         // Inicializa query logger
         let log_dir = config.storage_path.join("logs");
-        let query_logger = Arc::new(
-            QueryLogger::new(log_dir.clone()).map_err(|e| {
-                ferres_db_core::FerresError::Storage(format!(
-                    "failed to initialize query logger: {e}"
-                ))
-            })?
-        );
+        let query_logger = Arc::new(QueryLogger::new(log_dir.clone()).map_err(|e| {
+            ferres_db_core::FerresError::Storage(format!("failed to initialize query logger: {e}"))
+        })?);
 
         let query_log_cache = Arc::new(QueryLogCache::new(log_dir.join("queries.log")));
         let query_profiles = Arc::new(DashMap::new());
 
         // Inicializa audit logger (rotação diária, append-only)
-        let audit_logger = Arc::new(
-            AuditLogger::new(log_dir.clone()).map_err(|e| {
-                ferres_db_core::FerresError::Storage(format!(
-                    "failed to initialize audit logger: {e}"
-                ))
-            })?
-        );
+        let audit_logger = Arc::new(AuditLogger::new(log_dir.clone()).map_err(|e| {
+            ferres_db_core::FerresError::Storage(format!("failed to initialize audit logger: {e}"))
+        })?);
 
         info!(
             collections = collections.len(),
@@ -634,19 +720,21 @@ impl AppState {
             reranker,
             storage_circuit_breaker: Arc::new(StorageCircuitBreaker::new()),
             ingest_events: Arc::new(RwLock::new(Vec::with_capacity(2000))),
+            search_semaphore: Arc::new(tokio::sync::Semaphore::new(num_cpus::get())),
             #[cfg(feature = "raft")]
             raft_handle: None,
         })
     }
 
     /// Registra pontos inseridos para séries temporais (throughput).
+    /// Uses try_write to avoid blocking if another thread holds the lock.
     pub fn record_ingest(&self, timestamp_sec: u64, points_count: u64) {
         if points_count == 0 {
             return;
         }
-        let mut events = match self.ingest_events.write() {
+        let mut events = match self.ingest_events.try_write() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => return, // skip if contended — acceptable for metrics
         };
         events.push((timestamp_sec, points_count));
         const TEN_MIN: u64 = 10 * 60;
@@ -673,7 +761,11 @@ impl AppState {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
-        events.iter().filter(|(ts, _)| *ts >= cutoff).copied().collect()
+        events
+            .iter()
+            .filter(|(ts, _)| *ts >= cutoff)
+            .copied()
+            .collect()
     }
 
     /// Média de pontos inseridos por segundo (últimos 10 min) e throughput por minuto para gráficos.
@@ -779,21 +871,25 @@ impl AppState {
 
     /// Salva todas as coleções dirty no disco.
     ///
-    /// Usa apenas read locks — `is_dirty()` e `mark_clean()` operam sobre
-    /// `AtomicBool` e não precisam de acesso exclusivo à coleção.
+    /// Usa `try_read()` para evitar bloquear writers (vacuum, upserts) que
+    /// estejam esperando o write lock. Coleções que não puderem ser lidas
+    /// serão salvas na próxima iteração (~30s).
     pub fn save_dirty_collections(&self) -> Result<(), ferres_db_core::FerresError> {
         let collections_dir = self.config.storage_path.join("collections");
         let mut saved_count = 0;
+        let mut skipped_count = 0;
 
         for entry in self.collections.iter() {
             let name = entry.key();
             let collection_arc = entry.value();
 
-            let collection = collection_arc.read().map_err(|e| {
-                ferres_db_core::FerresError::Storage(format!(
-                    "failed to acquire read lock for collection {name}: {e}"
-                ))
-            })?;
+            let collection = match collection_arc.try_read() {
+                Ok(c) => c,
+                Err(_) => {
+                    skipped_count += 1;
+                    continue;
+                }
+            };
 
             if collection.is_dirty() {
                 let collection_dir = collections_dir.join(name);
@@ -810,6 +906,12 @@ impl AppState {
 
         if saved_count > 0 {
             info!(saved = saved_count, "auto-saved dirty collections");
+        }
+        if skipped_count > 0 {
+            info!(
+                skipped = skipped_count,
+                "skipped locked collections (will retry next cycle)"
+            );
         }
 
         Ok(())
@@ -850,17 +952,21 @@ impl AppState {
     pub fn list_restore_points(
         &self,
         collection_name: Option<&str>,
-    ) -> Result<std::collections::HashMap<String, ferres_db_core::RestorePoints>, ferres_db_core::FerresError>
-    {
+    ) -> Result<
+        std::collections::HashMap<String, ferres_db_core::RestorePoints>,
+        ferres_db_core::FerresError,
+    > {
         let collections_dir = self.config.storage_path.join("collections");
         let mut out = std::collections::HashMap::new();
         if !collections_dir.exists() {
             return Ok(out);
         }
-        for entry in std::fs::read_dir(&collections_dir).map_err(|e| {
-            ferres_db_core::FerresError::Storage(format!("read dir: {e}"))
-        })? {
-            let entry = entry.map_err(|e| ferres_db_core::FerresError::Storage(format!("read dir entry: {e}")))?;
+        for entry in std::fs::read_dir(&collections_dir)
+            .map_err(|e| ferres_db_core::FerresError::Storage(format!("read dir: {e}")))?
+        {
+            let entry = entry.map_err(|e| {
+                ferres_db_core::FerresError::Storage(format!("read dir entry: {e}"))
+            })?;
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if collection_name.map(|n| n == name).unwrap_or(true) && path.is_dir() {
@@ -888,32 +994,41 @@ impl AppState {
         let collections_dir = self.config.storage_path.join("collections");
         let collection_dir = collections_dir.join(name);
         if !collection_dir.join("config.json").exists() {
-            return Err(ferres_db_core::FerresError::CollectionNotFound(name.to_string()));
+            return Err(ferres_db_core::FerresError::CollectionNotFound(
+                name.to_string(),
+            ));
         }
 
-        let collection = match self.storage_circuit_breaker.call(|| {
-            recover_collection_to_timestamp(&collection_dir, target_timestamp)
-        })? {
+        let collection = match self
+            .storage_circuit_breaker
+            .call(|| recover_collection_to_timestamp(&collection_dir, target_timestamp))?
+        {
             Some(c) => c,
-            None => return Err(ferres_db_core::FerresError::CollectionNotFound(name.to_string())),
+            None => {
+                return Err(ferres_db_core::FerresError::CollectionNotFound(
+                    name.to_string(),
+                ))
+            }
         };
 
         {
-            let guard = self.collections.get(name).ok_or_else(|| {
-                ferres_db_core::FerresError::CollectionNotFound(name.to_string())
-            })?;
-            let mut coll_guard = guard.write().map_err(|e| {
-                ferres_db_core::FerresError::Storage(format!("lock: {e}"))
-            })?;
+            let guard = self
+                .collections
+                .get(name)
+                .ok_or_else(|| ferres_db_core::FerresError::CollectionNotFound(name.to_string()))?;
+            let mut coll_guard = guard
+                .write()
+                .map_err(|e| ferres_db_core::FerresError::Storage(format!("lock: {e}")))?;
             *coll_guard = collection;
         }
 
-        let guard = self.collections.get(name).ok_or_else(|| {
-            ferres_db_core::FerresError::CollectionNotFound(name.to_string())
-        })?;
-        let collection = guard.read().map_err(|e| {
-            ferres_db_core::FerresError::Storage(format!("lock: {e}"))
-        })?;
+        let guard = self
+            .collections
+            .get(name)
+            .ok_or_else(|| ferres_db_core::FerresError::CollectionNotFound(name.to_string()))?;
+        let collection = guard
+            .read()
+            .map_err(|e| ferres_db_core::FerresError::Storage(format!("lock: {e}")))?;
         self.storage_circuit_breaker.call(|| {
             FileStorage::save_collection(
                 &collection,
@@ -952,4 +1067,3 @@ pub enum ConfigError {
     #[error("invalid environment variable: {0}")]
     InvalidEnv(String),
 }
-

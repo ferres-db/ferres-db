@@ -17,7 +17,9 @@ const DEFAULT_USERNAME: &str = "root";
 const DEFAULT_PASSWORD: &str = "ferresdb";
 
 /// Papel do usuário. Ordem: viewer < editor < admin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Viewer = 0,
@@ -115,10 +117,19 @@ impl UserStore {
             [],
         )?;
         // Migração: adicionar coluna role se a tabela já existia sem ela
-        let _ = conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'", []);
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'",
+            [],
+        );
         // Migração: adicionar coluna permissions (JSON) para RBAC granular
-        let _ = conn.execute("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT NULL", []);
-        let _ = conn.execute("UPDATE users SET role = 'admin' WHERE username = ?1", [DEFAULT_USERNAME]);
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT NULL",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE users SET role = 'admin' WHERE username = ?1",
+            [DEFAULT_USERNAME],
+        );
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -145,7 +156,10 @@ impl UserStore {
                 "INSERT INTO users (username, password_hash, role, created_at) VALUES (?1, ?2, 'admin', ?3)",
                 rusqlite::params![DEFAULT_USERNAME, hash, created_at],
             )?;
-            tracing::info!(username = DEFAULT_USERNAME, "default dashboard user created");
+            tracing::info!(
+                username = DEFAULT_USERNAME,
+                "default dashboard user created"
+            );
         }
 
         Ok(())
@@ -194,12 +208,13 @@ impl UserStore {
         )?;
         let rows = stmt.query_map([], |row| {
             let permissions_json: Option<String> = row.get(4).unwrap_or(None);
-            let permissions = permissions_json
-                .and_then(|j| serde_json::from_str(&j).ok());
+            let permissions = permissions_json.and_then(|j| serde_json::from_str(&j).ok());
             Ok(UserInfo {
                 id: row.get(0)?,
                 username: row.get(1)?,
-                role: row.get::<_, String>(2).unwrap_or_else(|_| "viewer".to_string()),
+                role: row
+                    .get::<_, String>(2)
+                    .unwrap_or_else(|_| "viewer".to_string()),
                 created_at: row.get(3)?,
                 permissions,
             })
@@ -292,9 +307,7 @@ impl UserStore {
         };
         drop(conn);
         match json {
-            Some(j) if !j.is_empty() => {
-                Ok(serde_json::from_str(&j).ok())
-            }
+            Some(j) if !j.is_empty() => Ok(serde_json::from_str(&j).ok()),
             _ => Ok(None),
         }
     }

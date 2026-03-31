@@ -4,8 +4,8 @@ use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 
-use crate::auth::{AuthenticatedUser, RequireEditor};
 use crate::audit::{self, AuditResult};
+use crate::auth::{AuthenticatedUser, RequireEditor};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -62,19 +62,20 @@ pub async fn create_key(
         return Err(ApiError::invalid_payload("name is required"));
     }
 
-    let allowed = body
-        .allowed_namespaces
-        .filter(|v| !v.is_empty());
-    let (raw_key, id, key_prefix, created_at) = store
-        .create_key(name, allowed)
-        .map_err(ApiError::from)?;
+    let allowed = body.allowed_namespaces.filter(|v| !v.is_empty());
+    let (raw_key, id, key_prefix, created_at) =
+        store.create_key(name, allowed).map_err(ApiError::from)?;
 
     // Audit trail
     {
         let entry = audit::audit_entry(
-            &user.username, "create_api_key", &format!("api_key:{name}"),
+            &user.username,
+            "create_api_key",
+            &format!("api_key:{name}"),
             serde_json::json!({"key_prefix": &key_prefix}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         state.audit_logger.log(&entry);
     }
@@ -103,7 +104,9 @@ pub async fn update_key_namespaces(
 
     let allowed = body.allowed_namespaces.filter(|v| !v.is_empty());
     let allowed_clone = allowed.clone();
-    store.update_key_namespaces(id, allowed).map_err(ApiError::from)?;
+    store
+        .update_key_namespaces(id, allowed)
+        .map_err(ApiError::from)?;
 
     let entry = audit::audit_entry(
         &user.username,
@@ -136,9 +139,13 @@ pub async fn delete_key(
     // Audit trail
     {
         let entry = audit::audit_entry(
-            &user.username, "delete_api_key", &format!("api_key:{id}"),
+            &user.username,
+            "delete_api_key",
+            &format!("api_key:{id}"),
             serde_json::json!({}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         state.audit_logger.log(&entry);
     }

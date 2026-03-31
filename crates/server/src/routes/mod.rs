@@ -7,17 +7,17 @@ mod audit;
 mod auth;
 mod backup;
 mod collections;
-mod restore;
 mod debug;
 mod health;
 mod keys;
 mod metrics;
-mod reindex;
-mod settings;
-mod users;
 mod points;
+mod reindex;
+mod restore;
+mod settings;
 mod stats;
 mod streaming;
+mod users;
 
 use axum::Router;
 
@@ -29,14 +29,17 @@ use crate::state::AppState;
 ///
 /// - **Rotas protegidas** (requerem API key): collections, points, stats por coleção, save
 /// - **Rotas públicas** (sem autenticação): health, metrics, stats globais
-pub fn create_router() -> Router<AppState> {
+pub fn create_router(config: &crate::state::ServerConfig) -> Router<AppState> {
     // Rotas protegidas com rate limit por coleção + autenticação
     let collection_scoped = Router::new()
         .merge(collections::create_named_collection_routes())
         .merge(points::create_points_routes())
         .merge(stats::create_stats_routes())
         .merge(reindex::create_reindex_routes())
-        .layer(middleware::create_collection_rate_limit_layer());
+        .layer(middleware::create_collection_rate_limit_layer(
+            config.rate_limit_per_second,
+            config.rate_limit_burst,
+        ));
 
     // Rotas protegidas (requerem API key)
     let protected = Router::new()

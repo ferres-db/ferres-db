@@ -6,13 +6,13 @@
 //! ver `property_tests.rs`.
 
 use std::net::SocketAddr;
-use tokio::sync::oneshot;
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
 use ferres_db_server::auth;
+use ferres_db_server::middleware;
 use ferres_db_server::routes;
 use ferres_db_server::state::{AppState, ServerConfig};
-use ferres_db_server::middleware;
 
 /// API key usada em todos os testes de integração.
 const TEST_API_KEY: &str = "test-key-collections";
@@ -52,13 +52,14 @@ async fn setup_server() -> TestServer {
         storage_path: storage_path.clone(),
         log_level: "error".to_string(), // Reduz logs durante testes
         api_keys: Some(TEST_API_KEY.to_string()),
+        ..Default::default()
     };
 
     // Inicializa AppState
     let app_state = AppState::new(config.clone(), None, None, None, None).unwrap();
 
     // Cria o router com middleware
-    let app = routes::create_router()
+    let app = routes::create_router(&config)
         .layer(axum::middleware::from_fn(middleware::request_logger))
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -77,10 +78,9 @@ async fn setup_server() -> TestServer {
 
     // Inicia servidor em background
     let _server_handle = tokio::spawn(async move {
-        let server = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            });
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            shutdown_rx.await.ok();
+        });
         server.await.unwrap();
     });
 
@@ -118,7 +118,7 @@ fn create_collection_request(name: &str, dimension: usize, distance: &str) -> se
         "euclidean" => "Euclidean",
         _ => distance, // Usa como está se não reconhecer
     };
-    
+
     serde_json::json!({
         "name": name,
         "dimension": dimension,
@@ -163,7 +163,11 @@ async fn test_create_collection_duplicate() {
     let response1 = server
         .client
         .post(&url)
-        .json(&create_collection_request("duplicate-test", 64, "euclidean"))
+        .json(&create_collection_request(
+            "duplicate-test",
+            64,
+            "euclidean",
+        ))
         .send()
         .await
         .unwrap();
@@ -173,7 +177,11 @@ async fn test_create_collection_duplicate() {
     let response2 = server
         .client
         .post(&url)
-        .json(&create_collection_request("duplicate-test", 64, "euclidean"))
+        .json(&create_collection_request(
+            "duplicate-test",
+            64,
+            "euclidean",
+        ))
         .send()
         .await
         .unwrap();
@@ -245,12 +253,7 @@ async fn test_get_collection_not_found() {
     let server = setup_server().await;
     let url = format!("{}/api/v1/collections/nonexistent", server.base_url);
 
-    let response = server
-        .client
-        .get(&url)
-        .send()
-        .await
-        .unwrap();
+    let response = server.client.get(&url).send().await.unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
@@ -264,12 +267,7 @@ async fn test_list_collections_empty() {
     let server = setup_server().await;
     let url = format!("{}/api/v1/collections", server.base_url);
 
-    let response = server
-        .client
-        .get(&url)
-        .send()
-        .await
-        .unwrap();
+    let response = server.client.get(&url).send().await.unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
@@ -302,12 +300,7 @@ async fn test_list_collections_with_data() {
         .unwrap();
 
     // Lista todas as coleções
-    let response = server
-        .client
-        .get(&list_url)
-        .send()
-        .await
-        .unwrap();
+    let response = server.client.get(&list_url).send().await.unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
@@ -340,12 +333,7 @@ async fn test_get_collection_success() {
         .unwrap();
 
     // Busca a coleção
-    let response = server
-        .client
-        .get(&get_url)
-        .send()
-        .await
-        .unwrap();
+    let response = server.client.get(&get_url).send().await.unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
@@ -374,30 +362,15 @@ async fn test_delete_collection() {
         .unwrap();
 
     // Verifica que a coleção existe
-    let response1 = server
-        .client
-        .get(&get_url)
-        .send()
-        .await
-        .unwrap();
+    let response1 = server.client.get(&get_url).send().await.unwrap();
     assert_eq!(response1.status(), reqwest::StatusCode::OK);
 
     // Deleta a coleção
-    let response2 = server
-        .client
-        .delete(&delete_url)
-        .send()
-        .await
-        .unwrap();
+    let response2 = server.client.delete(&delete_url).send().await.unwrap();
     assert_eq!(response2.status(), reqwest::StatusCode::NO_CONTENT);
 
     // Verifica que a coleção não existe mais
-    let response3 = server
-        .client
-        .get(&get_url)
-        .send()
-        .await
-        .unwrap();
+    let response3 = server.client.get(&get_url).send().await.unwrap();
     assert_eq!(response3.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
@@ -406,12 +379,7 @@ async fn test_delete_collection_not_found() {
     let server = setup_server().await;
     let delete_url = format!("{}/api/v1/collections/nonexistent", server.base_url);
 
-    let response = server
-        .client
-        .delete(&delete_url)
-        .send()
-        .await
-        .unwrap();
+    let response = server.client.delete(&delete_url).send().await.unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
@@ -688,10 +656,7 @@ async fn test_budget_ms_search_rejected() {
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
     // 2. Insere pontos
-    let upsert_url = format!(
-        "{}/api/v1/collections/budget-test/points",
-        server.base_url
-    );
+    let upsert_url = format!("{}/api/v1/collections/budget-test/points", server.base_url);
     let upsert_body = serde_json::json!({
         "points": [
             {"id": "p1", "vector": [1.0, 0.0, 0.0], "metadata": {}},
@@ -708,10 +673,7 @@ async fn test_budget_ms_search_rejected() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
     // 3. Busca com budget_ms muito baixo (0ms) — deve ser rejeitada
-    let search_url = format!(
-        "{}/api/v1/collections/budget-test/search",
-        server.base_url
-    );
+    let search_url = format!("{}/api/v1/collections/budget-test/search", server.base_url);
     let search_body = serde_json::json!({
         "vector": [1.0, 0.0, 0.0],
         "limit": 5,
@@ -748,7 +710,11 @@ async fn test_budget_ms_search_accepted() {
     let response = server
         .client
         .post(&create_url)
-        .json(&create_collection_request("budget-accept-test", 3, "euclidean"))
+        .json(&create_collection_request(
+            "budget-accept-test",
+            3,
+            "euclidean",
+        ))
         .send()
         .await
         .unwrap();

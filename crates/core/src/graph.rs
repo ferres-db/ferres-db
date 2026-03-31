@@ -34,7 +34,8 @@ where
         ));
     }
 
-    let start = get_point(start_id).ok_or_else(|| FerresError::PointNotFound(start_id.to_string()))?;
+    let start =
+        get_point(start_id).ok_or_else(|| FerresError::PointNotFound(start_id.to_string()))?;
 
     let mut visited: HashMap<String, ()> = HashMap::new();
     let mut result: Vec<Point> = Vec::new();

@@ -37,7 +37,10 @@ use crate::explain::ExplainMeta;
 use crate::graph;
 use crate::point::Point;
 use crate::quantization::QuantizationConfig;
-use crate::search::{distance_between, normalize_vectors_parallel, ANNIndex, DistanceMetric, HnswConfig, create_ann_index};
+use crate::search::{
+    create_ann_index, distance_between, normalize_vectors_parallel, ANNIndex, DistanceMetric,
+    HnswConfig,
+};
 use crate::tiered::TieredStorageConfig;
 
 // ─── CollectionConfig ───────────────────────────────────────────────
@@ -288,12 +291,11 @@ impl Collection {
             if synthetic.is_empty() {
                 continue;
             }
-            let mut idx =
-                create_ann_index(
-                    collection.config.distance,
-                    collection.config.hnsw.clone(),
-                    &collection.config.quantization,
-                );
+            let mut idx = create_ann_index(
+                collection.config.distance,
+                collection.config.hnsw.clone(),
+                &collection.config.quantization,
+            );
             idx.build(&synthetic)?;
             collection.vector_indices.insert(field_name, idx);
         }
@@ -659,7 +661,8 @@ impl Collection {
                     points = self.points.len(),
                     dimension = self.config.dimension,
                     vector_field = ?index_to_use,
-                ).entered();
+                )
+                .entered();
                 match index_to_use {
                     None => self.index.search(query, k, None)?,
                     Some(f) => self.vector_indices.get(f).unwrap().search(query, k, None)?,
@@ -678,10 +681,15 @@ impl Collection {
             points = self.points.len(),
             dimension = self.config.dimension,
             vector_field = ?index_to_use,
-        ).entered();
+        )
+        .entered();
         match index_to_use {
             None => self.index.search(query, k, predicate),
-            Some(f) => self.vector_indices.get(f).unwrap().search(query, k, predicate),
+            Some(f) => self
+                .vector_indices
+                .get(f)
+                .unwrap()
+                .search(query, k, predicate),
         }
     }
 
@@ -725,7 +733,12 @@ impl Collection {
         let k_candidates = (k * 5).min(self.points.len().max(1));
         let candidates = match index_to_use {
             None => self.index.search(query, k_candidates, predicate)?,
-            Some(f) => self.vector_indices.get(f).unwrap().search(query, k_candidates, predicate)?,
+            Some(f) => {
+                self.vector_indices
+                    .get(f)
+                    .unwrap()
+                    .search(query, k_candidates, predicate)?
+            }
         };
         if candidates.is_empty() {
             return Ok(candidates);
@@ -779,7 +792,11 @@ impl Collection {
         };
         match index_to_use {
             None => self.index.search_explain(query, k, predicate),
-            Some(f) => self.vector_indices.get(f).unwrap().search_explain(query, k, predicate),
+            Some(f) => self
+                .vector_indices
+                .get(f)
+                .unwrap()
+                .search_explain(query, k, predicate),
         }
     }
 
@@ -831,10 +848,11 @@ impl Collection {
         strategy: &FusionStrategy,
     ) -> Result<Vec<(String, f32)>, FerresError> {
         self.validate_dimension(query_vector)?;
-        let bm25 = self
-            .bm25_index
-            .as_ref()
-            .ok_or_else(|| FerresError::Storage("hybrid search requires BM25 index enabled for this collection".to_string()))?;
+        let bm25 = self.bm25_index.as_ref().ok_or_else(|| {
+            FerresError::Storage(
+                "hybrid search requires BM25 index enabled for this collection".to_string(),
+            )
+        })?;
 
         let k_expanded = (limit * 3).max(50).min(self.points.len().max(1));
         let vec_results = self.search(query_vector, k_expanded, None, None)?;
@@ -1051,10 +1069,7 @@ impl Collection {
 
         let current = self.index.current_ef_search();
         let base = self.config.hnsw.ef_search;
-        let (min_ef, max_ef) = (
-            (base / 2).max(EF_MIN),
-            (base * 2).min(EF_MAX),
-        );
+        let (min_ef, max_ef) = ((base / 2).max(EF_MIN), (base * 2).min(EF_MAX));
 
         let new_ef = if p95_latency_ms < P95_LOW_MS && recall_priority && current < max_ef {
             (current + STEP).min(max_ef)
@@ -1129,8 +1144,7 @@ impl Collection {
     /// For a 1M × 384 collection (~1.5 GB), expect ~3 GB peak usage.
     pub fn points_snapshot(&self) -> (Vec<Point>, std::collections::HashSet<String>) {
         let points: Vec<Point> = self.points.values().cloned().collect();
-        let ids: std::collections::HashSet<String> =
-            self.points.keys().cloned().collect();
+        let ids: std::collections::HashSet<String> = self.points.keys().cloned().collect();
         (points, ids)
     }
 
@@ -1338,7 +1352,9 @@ mod tests {
         assert_eq!(col.len(), 150);
 
         // Verifica que os pontos são buscáveis após rebuild
-        let results = col.search(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 5, None, None).unwrap();
+        let results = col
+            .search(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 5, None, None)
+            .unwrap();
         assert!(!results.is_empty());
     }
 
@@ -1348,8 +1364,10 @@ mod tests {
         let mut col = Collection::new(test_config());
 
         // Primeiro, insere alguns pontos individuais
-        col.insert(make_point("existing1", vec![1.0, 0.0, 0.0])).unwrap();
-        col.insert(make_point("existing2", vec![0.0, 1.0, 0.0])).unwrap();
+        col.insert(make_point("existing1", vec![1.0, 0.0, 0.0]))
+            .unwrap();
+        col.insert(make_point("existing2", vec![0.0, 1.0, 0.0]))
+            .unwrap();
         assert_eq!(col.len(), 2);
 
         // Depois, insere um batch pequeno
@@ -1584,7 +1602,9 @@ mod tests {
 
         /// Propriedade: o número de pontos na coleção deve ser igual ao número de inserções.
         #[quickcheck]
-        fn prop_collection_length_matches_insertions(points: Vec<(String, Vec<f32>)>) -> TestResult {
+        fn prop_collection_length_matches_insertions(
+            points: Vec<(String, Vec<f32>)>,
+        ) -> TestResult {
             if points.is_empty() || points.len() > 100 {
                 return TestResult::discard();
             }

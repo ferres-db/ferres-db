@@ -6,18 +6,18 @@ pub mod api_keys;
 pub mod audit;
 pub mod auth;
 pub mod cloud_settings;
-pub mod users;
 pub mod error;
 pub mod handlers;
+pub mod metrics;
 pub mod middleware;
 pub mod permissions;
-pub mod request_validation;
-pub mod metrics;
-pub mod query_logger;
 pub mod query_log_analytics;
+pub mod query_logger;
+pub mod request_validation;
 pub mod routes;
-pub mod warmup;
 pub mod state;
+pub mod users;
+pub mod warmup;
 
 #[cfg(feature = "otel")]
 pub mod tracing_otel;

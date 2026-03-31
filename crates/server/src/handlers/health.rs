@@ -22,7 +22,9 @@ fn get_memory_usage_mb() -> u64 {
 /// Retorna espaço livre em disco no sistema de arquivos do path, em MB.
 /// Retorna `None` se a operação falhar (path inexistente, permissão, etc.).
 fn get_disk_free_mb(path: &Path) -> Option<u64> {
-    fs4::available_space(path).ok().map(|bytes| bytes / (1024 * 1024))
+    fs4::available_space(path)
+        .ok()
+        .map(|bytes| bytes / (1024 * 1024))
 }
 
 /// Handler para GET /health

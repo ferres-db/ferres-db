@@ -15,6 +15,10 @@ use thiserror::Error;
 
 lazy_static! {
     static ref KEY_HASHES: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+    /// In-memory cache of API key hash → meta. Avoids hitting SQLite on every
+    /// request.  Populated on init/reload and updated on key create/delete.
+    static ref KEY_META_CACHE: Mutex<std::collections::HashMap<String, Option<ApiKeyMeta>>> =
+        Mutex::new(std::collections::HashMap::new());
 }
 
 /// Store global (definido em main) para o middleware de auth obter meta da chave (namespace allowance).
@@ -27,9 +31,22 @@ pub fn set_global_store(store: Option<Arc<ApiKeyStore>>) {
     }
 }
 
-/// Retorna metadados da chave (allowed_namespaces) se a chave for válida e o store global estiver definido.
+/// Retorna metadados da chave (allowed_namespaces) se a chave for válida.
+/// Uses an in-memory cache to avoid hitting SQLite on every request.
 pub fn get_meta_global(key: &str) -> Option<ApiKeyMeta> {
-    GLOBAL_STORE.get().and_then(|store| store.get_meta(key))
+    let hash = hash_key(key);
+    // Fast path: check in-memory cache
+    if let Ok(cache) = KEY_META_CACHE.lock() {
+        if let Some(meta_opt) = cache.get(&hash) {
+            return meta_opt.clone();
+        }
+    }
+    // Slow path: query SQLite and populate cache
+    let meta = GLOBAL_STORE.get().and_then(|store| store.get_meta(key));
+    if let Ok(mut cache) = KEY_META_CACHE.lock() {
+        cache.insert(hash, meta.clone());
+    }
+    meta
 }
 
 const KEY_PREFIX: &str = "ferres_sk_";
@@ -107,7 +124,10 @@ impl ApiKeyStore {
             |row| row.get(0),
         )?;
         if !has_col {
-            conn.execute("ALTER TABLE api_keys ADD COLUMN allowed_namespaces TEXT", [])?;
+            conn.execute(
+                "ALTER TABLE api_keys ADD COLUMN allowed_namespaces TEXT",
+                [],
+            )?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -152,15 +172,35 @@ impl ApiKeyStore {
     }
 
     fn reload_hashes(&self) -> Result<(), ApiKeyError> {
-        let conn = self.conn.lock().map_err(|_| {
-            rusqlite::Error::InvalidParameterName("lock poisoned".to_string())
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidParameterName("lock poisoned".to_string()))?;
         let mut hashes = KEY_HASHES.lock().map_err(|_| ApiKeyError::LockPoisoned)?;
         hashes.clear();
-        let mut stmt = conn.prepare("SELECT key_hash FROM api_keys")?;
-        let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        for h in iter.flatten() {
-            hashes.insert(h);
+
+        // Also reload meta cache so get_meta_global never hits SQLite on the hot path.
+        let mut meta_cache = KEY_META_CACHE
+            .lock()
+            .map_err(|_| ApiKeyError::LockPoisoned)?;
+        meta_cache.clear();
+
+        let mut stmt = conn.prepare("SELECT key_hash, allowed_namespaces FROM api_keys")?;
+        let iter = stmt.query_map([], |row| {
+            let hash: String = row.get(0)?;
+            let allowed_raw: Option<String> = row.get(1)?;
+            Ok((hash, allowed_raw))
+        })?;
+        for pair in iter.flatten() {
+            let (hash, allowed_raw) = pair;
+            hashes.insert(hash.clone());
+
+            let allowed_namespaces: Option<Vec<String>> = allowed_raw
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .filter(|v: &Vec<String>| !v.is_empty());
+            meta_cache.insert(hash, Some(ApiKeyMeta { allowed_namespaces }));
         }
         Ok(())
     }
@@ -168,7 +208,10 @@ impl ApiKeyStore {
     /// Valida se a chave está registrada (usa cache em memória).
     pub fn validate(key: &str) -> bool {
         let hash = hash_key(key);
-        KEY_HASHES.lock().map(|set| set.contains(&hash)).unwrap_or(false)
+        KEY_HASHES
+            .lock()
+            .map(|set| set.contains(&hash))
+            .unwrap_or(false)
     }
 
     /// Retorna metadados da chave (allowed_namespaces) se a chave for válida.
@@ -185,7 +228,13 @@ impl ApiKeyStore {
             .flatten();
         let list: Option<Vec<String>> = json_opt
             .as_deref()
-            .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() })
+            .and_then(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(s).ok()
+                }
+            })
             .filter(|v: &Vec<String>| !v.is_empty());
         Some(ApiKeyMeta {
             allowed_namespaces: list,
@@ -221,7 +270,15 @@ impl ApiKeyStore {
         let id = conn.last_insert_rowid();
         drop(conn);
 
-        KEY_HASHES.lock().map_err(|_| ApiKeyError::LockPoisoned)?.insert(key_hash);
+        KEY_HASHES
+            .lock()
+            .map_err(|_| ApiKeyError::LockPoisoned)?
+            .insert(key_hash.clone());
+
+        // Update meta cache
+        if let Ok(mut cache) = KEY_META_CACHE.lock() {
+            cache.insert(key_hash, Some(ApiKeyMeta { allowed_namespaces }));
+        }
 
         Ok((raw_key, id, key_prefix, created_at))
     }
@@ -268,7 +325,15 @@ impl ApiKeyStore {
 
         drop(conn);
 
-        KEY_HASHES.lock().map_err(|_| ApiKeyError::LockPoisoned)?.remove(&key_hash);
+        KEY_HASHES
+            .lock()
+            .map_err(|_| ApiKeyError::LockPoisoned)?
+            .remove(&key_hash);
+
+        // Remove from meta cache
+        if let Ok(mut cache) = KEY_META_CACHE.lock() {
+            cache.remove(&key_hash);
+        }
 
         Ok(())
     }
