@@ -2,11 +2,11 @@
 
 use axum::extract::State;
 use axum::Json;
-use serde::Deserialize;
 use jsonwebtoken::{encode, EncodingKey, Header};
+use serde::Deserialize;
 
-use crate::auth::{get_jwt_secret, JwtClaims};
 use crate::audit::{self, AuditResult};
+use crate::auth::{get_jwt_secret, JwtClaims};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -43,9 +43,13 @@ pub async fn login(
     if !valid {
         // Audit: failed login attempt
         let entry = audit::audit_entry(
-            username, "login", &format!("user:{username}"),
+            username,
+            "login",
+            &format!("user:{username}"),
             serde_json::json!({"reason": "invalid credentials"}),
-            AuditResult::Denied, None, None,
+            AuditResult::Denied,
+            None,
+            None,
         );
         state.audit_logger.log(&entry);
         return Err(ApiError::invalid_payload("Invalid username or password"));
@@ -78,9 +82,13 @@ pub async fn login(
     // Audit: successful login
     {
         let entry = audit::audit_entry(
-            username, "login", &format!("user:{username}"),
+            username,
+            "login",
+            &format!("user:{username}"),
             serde_json::json!({"role": role.as_str()}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         state.audit_logger.log(&entry);
     }

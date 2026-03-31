@@ -1,5 +1,6 @@
 //! # Points Handlers — handlers para gerenciamento de pontos
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
@@ -9,13 +10,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-use ferres_db_core::{MetadataFilter, Point, QueryCostEstimate, build_search_explanation};
+use ferres_db_core::{build_search_explanation, MetadataFilter, Point, QueryCostEstimate};
 
 use crate::api_err;
-use crate::auth::{AuthenticatedUser, check_namespace_access, check_user_permission};
 use crate::audit::{self, AuditResult};
+use crate::auth::{check_namespace_access, check_user_permission, AuthenticatedUser};
 use crate::error::{ApiError, ApiResult};
-use crate::permissions::{Action, PermissionResult, merge_restriction_filter};
+use crate::permissions::{merge_restriction_filter, Action, PermissionResult};
 use crate::request_validation;
 use crate::state::{AppState, QueryPhase, QueryProfile, QUERY_PROFILES_CAP};
 
@@ -207,9 +208,13 @@ pub async fn upsert_points(
     if !perm_result.is_allowed() {
         // Audit: ação negada
         let entry = audit::audit_entry(
-            &user.username, "upsert", &format!("collection:{name}"),
+            &user.username,
+            "upsert",
+            &format!("collection:{name}"),
             serde_json::json!({"points_count": payload.points.len(), "denied": true}),
-            AuditResult::Denied, None, None,
+            AuditResult::Denied,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
@@ -220,8 +225,9 @@ pub async fn upsert_points(
     // Namespace allowance (RBAC multitenancy): cada namespace no batch deve ser permitido pela chave
     for point in &payload.points {
         if let Some(ref ns) = point.namespace {
-            check_namespace_access(&user, Some(ns.as_str()))
-                .map_err(|_| ApiError::forbidden("API key does not have access to this namespace"))?;
+            check_namespace_access(&user, Some(ns.as_str())).map_err(|_| {
+                ApiError::forbidden("API key does not have access to this namespace")
+            })?;
         }
     }
 
@@ -249,9 +255,14 @@ pub async fn upsert_points(
     // Captura IDs para broadcast de eventos WebSocket
     let payload_point_ids: Vec<String> = payload.points.iter().map(|p| p.id.clone()).collect();
 
-    // Obtém a coleção uma vez e mantém um único write lock para validação + inserção + mark_dirty
-    let collection_arc = app_state.collections.get(&name)
-        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+    // Clone the Arc and drop the DashMap Ref immediately to release the shard lock.
+    let collection_arc = {
+        let ref_guard = app_state
+            .collections
+            .get(&name)
+            .ok_or_else(|| ApiError::collection_not_found(&name))?;
+        Arc::clone(ref_guard.value())
+    };
 
     let (upserted, batch_failed) = {
         let mut collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
@@ -356,9 +367,13 @@ pub async fn upsert_points(
     {
         let failed_count = batch_failed.len();
         let entry = audit::audit_entry(
-            &user.username, "upsert", &format!("collection:{name}"),
+            &user.username,
+            "upsert",
+            &format!("collection:{name}"),
             serde_json::json!({"points_submitted": points_count, "upserted": upserted, "failed": failed_count}),
-            AuditResult::Success, None, Some(took_ms),
+            AuditResult::Success,
+            None,
+            Some(took_ms),
         );
         app_state.audit_logger.log(&entry);
     }
@@ -384,9 +399,13 @@ pub async fn delete_points(
     let perm_result = check_user_permission(&user, &name, &Action::Write);
     if !perm_result.is_allowed() {
         let entry = audit::audit_entry(
-            &user.username, "delete_points", &format!("collection:{name}"),
+            &user.username,
+            "delete_points",
+            &format!("collection:{name}"),
             serde_json::json!({"ids_count": payload.ids.len(), "denied": true}),
-            AuditResult::Denied, None, None,
+            AuditResult::Denied,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
@@ -400,17 +419,25 @@ pub async fn delete_points(
     request_validation::validate_delete_batch_size(payload.ids.len())?;
 
     let ids_count = payload.ids.len();
-    let collection_arc = app_state.collections.get(&name)
-        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+    let collection_arc = {
+        let ref_guard = app_state
+            .collections
+            .get(&name)
+            .ok_or_else(|| ApiError::collection_not_found(&name))?;
+        Arc::clone(ref_guard.value())
+    };
 
-    let keys: Vec<String> = payload.ids
+    let keys: Vec<String> = payload
+        .ids
         .iter()
         .map(|id| Point::storage_id_from_parts(payload.namespace.as_deref(), id))
         .collect();
     let deleted_ids = payload.ids.clone();
     let deleted = {
         let mut collection = api_err!(collection_arc.write(), "failed to acquire write lock")?;
-        collection.delete_points_batch(&keys).map_err(ApiError::from)?
+        collection
+            .delete_points_batch(&keys)
+            .map_err(ApiError::from)?
     };
 
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -435,9 +462,13 @@ pub async fn delete_points(
     // Audit trail
     {
         let entry = audit::audit_entry(
-            &user.username, "delete_points", &format!("collection:{name}"),
+            &user.username,
+            "delete_points",
+            &format!("collection:{name}"),
             serde_json::json!({"ids_submitted": ids_count, "deleted": deleted}),
-            AuditResult::Success, None, Some(took_ms),
+            AuditResult::Success,
+            None,
+            Some(took_ms),
         );
         app_state.audit_logger.log(&entry);
     }
@@ -473,9 +504,13 @@ pub async fn search_points(
     let perm_result = check_user_permission(&user, &name, &Action::Read);
     if !perm_result.is_allowed() {
         let entry = audit::audit_entry(
-            &user.username, "search", &format!("collection:{name}"),
+            &user.username,
+            "search",
+            &format!("collection:{name}"),
             serde_json::json!({"denied": true}),
-            AuditResult::Denied, None, None,
+            AuditResult::Denied,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
@@ -498,29 +533,46 @@ pub async fn search_points(
     let query_id = uuid::Uuid::new_v4().to_string();
     let start = Instant::now();
 
-    // Fase: validação (get collection + validate dimension)
-    let collection_arc = app_state.collections.get(&name)
-        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+    // Fase: validação. Keep the read-lock scope as short as possible — only
+    // extract the data we need, then release immediately. Cost estimation,
+    // filter parsing, and reranker checks happen OUTSIDE the lock.
+    let (arc_for_blocking, coll_config, coll_len, reranker_dim_match) = {
+        let collection_arc = app_state
+            .collections
+            .get(&name)
+            .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+        let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
-    let _span = tracing::info_span!("validate_query").entered();
-    collection.validate_dimension(&payload.vector)
-        .map_err(ApiError::from)?;
-    drop(_span);
+        let _span = tracing::info_span!("validate_query").entered();
+        collection
+            .validate_dimension(&payload.vector)
+            .map_err(ApiError::from)?;
+        drop(_span);
 
-    // Enriquece span OTel com atributos da coleção
-    {
-        let span = tracing::Span::current();
-        span.record("db.vector.dimension", collection.config().dimension);
-        span.record("db.index.ef_search", collection.config().hnsw.ef_search);
-    }
+        let cfg = collection.config().clone();
+        let len = collection.len();
+        let reranker_dim_ok = app_state
+            .reranker
+            .as_ref()
+            .map_or(false, |r| r.dimension() == cfg.dimension);
 
-    // Budget guard: se budget_ms está presente, estima o custo e rejeita se exceder
+        {
+            let span = tracing::Span::current();
+            span.record("db.vector.dimension", cfg.dimension);
+            span.record("db.index.ef_search", cfg.hnsw.ef_search);
+        }
+
+        (
+            Arc::clone(collection_arc.value()),
+            cfg,
+            len,
+            reranker_dim_ok,
+        )
+    };
+
+    // Cost estimation runs outside the collection lock
     if let Some(budget) = payload.budget_ms {
-        let config = collection.config().clone();
-        let num_points = collection.len();
-
         let (has_filter, filter_conditions_count) = if let Some(filter_value) = &payload.filter {
             match MetadataFilter::from_json(filter_value.clone()) {
                 Ok(f) => (!f.is_empty(), f.conditions().len()),
@@ -531,7 +583,9 @@ pub async fn search_points(
         };
 
         let (p50, p95) = {
-            app_state.query_stats.get(&name)
+            app_state
+                .query_stats
+                .get(&name)
                 .map(|s| {
                     let (_, p50, p95, _) = s.calculate_percentiles();
                     (p50, p95)
@@ -539,12 +593,15 @@ pub async fn search_points(
                 .unwrap_or((0.0, 0.0))
         };
 
-        let is_quantized = !matches!(config.quantization, ferres_db_core::QuantizationConfig::None);
+        let is_quantized = !matches!(
+            coll_config.quantization,
+            ferres_db_core::QuantizationConfig::None
+        );
         let params = ferres_db_core::CostEstimateParams {
-            collection_size: num_points,
-            dimension: config.dimension,
+            collection_size: coll_len,
+            dimension: coll_config.dimension,
             limit: payload.limit,
-            ef_search: config.hnsw.ef_search,
+            ef_search: coll_config.hnsw.ef_search,
             has_filter,
             filter_conditions_count,
             historical_p50: p50,
@@ -555,8 +612,8 @@ pub async fn search_points(
         let estimate = ferres_db_core::estimate_search_cost(&params);
 
         if estimate.estimated_ms > budget as f64 {
-            let estimate_json = serde_json::to_value(&estimate)
-                .unwrap_or_else(|_| serde_json::json!({}));
+            let estimate_json =
+                serde_json::to_value(&estimate).unwrap_or_else(|_| serde_json::json!({}));
             return Err(ApiError::budget_exceeded(
                 format!(
                     "estimated cost ({:.1}ms) exceeds budget ({}ms)",
@@ -567,91 +624,117 @@ pub async fn search_points(
         }
     }
 
-    let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    let search_start = Instant::now();
-
+    // Filter parsing and reranker check also outside the lock
     let mut filter = match &payload.filter {
-        Some(fv) => MetadataFilter::from_json(fv.clone()).map_err(|e| ApiError::invalid_payload(e.to_string()))?,
+        Some(fv) => MetadataFilter::from_json(fv.clone())
+            .map_err(|e| ApiError::invalid_payload(e.to_string()))?,
         None => MetadataFilter::empty(),
     };
     if let Some(ns) = &payload.namespace {
         filter.namespace = Some(ns.clone());
     }
-    let vector_field = payload.vector_field.as_deref();
-    let use_rerank = payload.rerank == Some(true)
-        && app_state.reranker.as_ref().map_or(false, |r| r.dimension() == collection.config().dimension);
+    let vector_field = payload.vector_field.clone();
+    let use_rerank = payload.rerank == Some(true) && reranker_dim_match;
 
-    let (results, rerank_ms) = if use_rerank {
-        let _span = tracing::info_span!("search_with_rerank").entered();
-        let rerank_start = Instant::now();
-        let res = if filter.is_empty() {
-            collection.search_with_rerank(
-                &payload.vector,
-                payload.limit,
-                None,
-                vector_field,
-                app_state.reranker.as_deref(),
-            )
-        } else {
-            let predicate = |id: &str| {
-                collection
-                    .get(id)
-                    .map(|p| filter.matches_point(&p))
-                    .unwrap_or(false)
-            };
-            collection.search_with_rerank(
-                &payload.vector,
-                payload.limit,
-                Some(&predicate),
-                vector_field,
-                app_state.reranker.as_deref(),
-            )
+    let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let search_start = Instant::now();
+
+    let vector = payload.vector.clone();
+    let limit = payload.limit;
+    let reranker = app_state.reranker.clone();
+
+    // Acquire semaphore permit to limit concurrent CPU-intensive searches.
+    // This prevents thread pool starvation under high load.
+    let _permit = app_state
+        .search_semaphore
+        .acquire()
+        .await
+        .map_err(|e| ApiError::internal_error(format!("semaphore acquire: {}", e)))?;
+
+    // Detach from the parent tracing span before entering spawn_blocking.
+    // Under high concurrency the #[instrument] span can be closed by the
+    // subscriber while the blocking thread still holds a reference, causing
+    // "tried to clone a span that already closed" panics in the sharded
+    // registry.  Using Span::none() makes the blocking closure span-free,
+    // which also reduces stack depth (fewer tracing frames → less stack
+    // pressure on the blocking pool).
+    let (search_results, rerank_ms) = tokio::task::spawn_blocking(move || {
+        let _guard = tracing::Span::none().entered();
+
+        let collection = match arc_for_blocking.read() {
+            Ok(c) => c,
+            Err(e) => return Err(ApiError::internal_error(format!("read lock: {}", e))),
         };
-        let res = res.map_err(ApiError::from)?;
-        let rerank_ms = rerank_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        (res, Some(rerank_ms))
-    } else {
-        // Fase: busca (HNSW), com pre-filtering nativo quando filtro ou namespace está presente
-        let _span = tracing::info_span!("hnsw_search").entered();
-        let results = if filter.is_empty() {
-            collection.search(&payload.vector, payload.limit, None, vector_field).map_err(ApiError::from)?
-        } else {
-            let predicate = |id: &str| {
-                collection
-                    .get(id)
-                    .map(|p| filter.matches_point(&p))
-                    .unwrap_or(false)
+        let vector_field_ref = vector_field.as_deref();
+        let (raw_results, rerank_ms_val) = if use_rerank {
+            let rerank_start = Instant::now();
+            let res = if filter.is_empty() {
+                collection.search_with_rerank(
+                    &vector,
+                    limit,
+                    None,
+                    vector_field_ref,
+                    reranker.as_deref(),
+                )
+            } else {
+                let predicate = |id: &str| {
+                    collection
+                        .get(id)
+                        .map(|p| filter.matches_point(&p))
+                        .unwrap_or(false)
+                };
+                collection.search_with_rerank(
+                    &vector,
+                    limit,
+                    Some(&predicate),
+                    vector_field_ref,
+                    reranker.as_deref(),
+                )
             };
-            collection
-                .search(&payload.vector, payload.limit, Some(&predicate), vector_field)
-                .map_err(ApiError::from)?
+            let res = res.map_err(ApiError::from)?;
+            let rerank_ms = rerank_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            (res, Some(rerank_ms))
+        } else {
+            let results = if filter.is_empty() {
+                collection
+                    .search(&vector, limit, None, vector_field_ref)
+                    .map_err(ApiError::from)?
+            } else {
+                let predicate = |id: &str| {
+                    collection
+                        .get(id)
+                        .map(|p| filter.matches_point(&p))
+                        .unwrap_or(false)
+                };
+                collection
+                    .search(&vector, limit, Some(&predicate), vector_field_ref)
+                    .map_err(ApiError::from)?
+            };
+            (results, None)
         };
-        (results, None)
-    };
+
+        let search_results: Vec<ferres_db_core::SearchResult> = raw_results
+            .into_iter()
+            .filter_map(|(storage_id, score)| {
+                let point = collection.get(&storage_id)?;
+                Some(ferres_db_core::SearchResult {
+                    id: point.id.clone(),
+                    score,
+                    metadata: point.metadata.clone(),
+                    vector: None,
+                    namespace: point.namespace.clone(),
+                })
+            })
+            .collect();
+
+        Ok::<_, ApiError>((search_results, rerank_ms_val))
+    })
+    .await
+    .map_err(|_| ApiError::internal_error("search task joined"))??;
 
     let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     tracing::Span::current().record("db.duration.search_ms", search_ms);
     let hydrate_start = Instant::now();
-
-    // Fase: hydrate (construir SearchResults com id lógico e namespace)
-    let _span = tracing::info_span!("hydrate_results").entered();
-    let search_results: Vec<ferres_db_core::SearchResult> = results
-        .into_iter()
-        .filter_map(|(storage_id, score)| {
-            let point = collection.get(&storage_id)?;
-            Some(ferres_db_core::SearchResult {
-                id: point.id.clone(),
-                score,
-                metadata: point.metadata.clone(),
-                vector: None,
-                namespace: point.namespace.clone(),
-            })
-        })
-        .collect();
-
-    // Drop lock imediatamente após extrair os dados necessários da coleção.
-    drop(collection);
-    drop(collection_arc);
 
     let results: Vec<SearchResult> = search_results
         .into_iter()
@@ -662,7 +745,6 @@ pub async fn search_points(
             namespace: r.namespace,
         })
         .collect();
-    drop(_span);
 
     let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let results_count = results.len();
@@ -683,24 +765,40 @@ pub async fn search_points(
         QueryPhase {
             name: "validation".to_string(),
             duration_ms: validation_ms,
-            percentage: if total > 0.0 { (validation_ms as f64 / total) * 100.0 } else { 0.0 },
+            percentage: if total > 0.0 {
+                (validation_ms as f64 / total) * 100.0
+            } else {
+                0.0
+            },
         },
         QueryPhase {
             name: "search".to_string(),
             duration_ms: search_ms,
-            percentage: if total > 0.0 { (search_ms as f64 / total) * 100.0 } else { 0.0 },
+            percentage: if total > 0.0 {
+                (search_ms as f64 / total) * 100.0
+            } else {
+                0.0
+            },
         },
         QueryPhase {
             name: "hydrate".to_string(),
             duration_ms: hydrate_ms,
-            percentage: if total > 0.0 { (hydrate_ms as f64 / total) * 100.0 } else { 0.0 },
+            percentage: if total > 0.0 {
+                (hydrate_ms as f64 / total) * 100.0
+            } else {
+                0.0
+            },
         },
     ];
     if let Some(ms) = rerank_ms {
         phases.push(QueryPhase {
             name: "rerank".to_string(),
             duration_ms: ms,
-            percentage: if total > 0.0 { (ms as f64 / total) * 100.0 } else { 0.0 },
+            percentage: if total > 0.0 {
+                (ms as f64 / total) * 100.0
+            } else {
+                0.0
+            },
         });
     }
     let profile = QueryProfile {
@@ -709,25 +807,8 @@ pub async fn search_points(
         phases,
     };
 
-    // Evict one profile if at capacity, then store
-    if app_state.query_profiles.len() >= QUERY_PROFILES_CAP {
-        if let Some(entry) = app_state.query_profiles.iter().next() {
-            let k = entry.key().clone();
-            drop(entry);
-            app_state.query_profiles.remove(&k);
-        }
-    }
-    app_state.query_profiles.insert(query_id.clone(), profile);
-
-    let query_logger = app_state.query_logger.clone();
-
-    app_state.query_stats
-        .entry(collection_name.clone())
-        .or_insert_with(crate::state::QueryStats::new)
-        .record_query(took_ms);
-
-    app_state.global_query_stats.record(&collection_name, took_ms);
-
+    // --- Record stats, profiles, audit and query log off the critical path ---
+    // Prometheus metrics are lock-free atomics — safe to call inline.
     crate::metrics::QUERIES_TOTAL
         .with_label_values(&[&collection_name])
         .inc();
@@ -735,31 +816,58 @@ pub async fn search_points(
         .with_label_values(&[&collection_name])
         .observe(took_ms as f64);
 
-    let query_logger_clone = query_logger.clone();
-    let collection_name_for_log = collection_name.clone();
-    let query_id_for_log = query_id.clone();
-    tokio::spawn(async move {
-        query_logger_clone
-            .log_query(
-                Some(&query_id_for_log),
-                &collection_name_for_log,
+    // Everything else (profile eviction, stats, query log, audit) runs in a
+    // single spawned task so the HTTP response is returned immediately.
+    {
+        let app = app_state.clone();
+        let query_logger = app_state.query_logger.clone();
+        let coll_name = collection_name.clone();
+        let qid = query_id.clone();
+        let username = user.username.clone();
+        let limit_val = payload.limit;
+        tokio::spawn(async move {
+            // Profile eviction — only iterate when over capacity
+            if app.query_profiles.len() >= QUERY_PROFILES_CAP {
+                if let Some(entry) = app.query_profiles.iter().next() {
+                    let k = entry.key().clone();
+                    drop(entry);
+                    app.query_profiles.remove(&k);
+                }
+            }
+            app.query_profiles.insert(qid.clone(), profile);
+
+            // Per-collection stats (non-blocking try_write inside)
+            app.query_stats
+                .entry(coll_name.clone())
+                .or_insert_with(crate::state::QueryStats::new)
+                .record_query(took_ms);
+
+            // Global stats (non-blocking channel send inside)
+            app.global_query_stats.record(&coll_name, took_ms);
+
+            // Query log (async file write)
+            query_logger.log_query(
+                Some(&qid),
+                &coll_name,
                 &vector_for_log,
-                payload.limit,
+                limit_val,
                 filter_for_log.as_ref(),
                 results_count,
                 took_ms,
-            )
-            .await;
-    });
+            );
 
-    // Audit trail
-    {
-        let entry = audit::audit_entry(
-            &user.username, "search", &format!("collection:{name}"),
-            serde_json::json!({"query_id": &query_id, "limit": payload.limit, "results_count": results_count}),
-            AuditResult::Success, None, Some(took_ms),
-        );
-        app_state.audit_logger.log(&entry);
+            // Audit trail (non-blocking channel send inside)
+            let entry = audit::audit_entry(
+                &username,
+                "search",
+                &format!("collection:{}", coll_name),
+                serde_json::json!({"query_id": &qid, "limit": limit_val, "results_count": results_count}),
+                AuditResult::Success,
+                None,
+                Some(took_ms),
+            );
+            app.audit_logger.log(&entry);
+        });
     }
 
     Ok(Json(SearchPointsResponse {
@@ -802,9 +910,13 @@ pub async fn search_hybrid(
     let perm_result = check_user_permission(&user, &name, &Action::Read);
     if !perm_result.is_allowed() {
         let entry = audit::audit_entry(
-            &user.username, "search_hybrid", &format!("collection:{name}"),
+            &user.username,
+            "search_hybrid",
+            &format!("collection:{name}"),
             serde_json::json!({"denied": true}),
-            AuditResult::Denied, None, None,
+            AuditResult::Denied,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
@@ -823,9 +935,9 @@ pub async fn search_hybrid(
 
     // Parse fusion strategy
     let fusion_strategy = match payload.fusion.as_deref() {
-        None | Some("weighted") => {
-            ferres_db_core::FusionStrategy::WeightedScore { alpha: payload.alpha }
-        }
+        None | Some("weighted") => ferres_db_core::FusionStrategy::WeightedScore {
+            alpha: payload.alpha,
+        },
         Some("rrf") => {
             let k = payload.rrf_k.unwrap_or(ferres_db_core::DEFAULT_RRF_K);
             if k == 0 {
@@ -848,72 +960,88 @@ pub async fn search_hybrid(
     let query_id = uuid::Uuid::new_v4().to_string();
     let start = Instant::now();
 
-    let collection_arc = app_state.collections.get(&name)
-        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+    let collection_arc = {
+        let ref_guard = app_state
+            .collections
+            .get(&name)
+            .ok_or_else(|| ApiError::collection_not_found(&name))?;
+        Arc::clone(ref_guard.value())
+    };
 
-    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+    // Quick validation on async thread (read lock held briefly)
+    let (coll_dim, coll_ef_search) = {
+        let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+        collection
+            .validate_dimension(&payload.query_vector)
+            .map_err(ApiError::from)?;
+        (
+            collection.config().dimension,
+            collection.config().hnsw.ef_search,
+        )
+    };
 
-    let _span = tracing::info_span!("validate_query").entered();
-    collection.validate_dimension(&payload.query_vector)
-        .map_err(ApiError::from)?;
-    drop(_span);
-
-    // Enriquece span OTel com atributos da coleção
     {
         let span = tracing::Span::current();
-        span.record("db.vector.dimension", collection.config().dimension);
-        span.record("db.index.ef_search", collection.config().hnsw.ef_search);
+        span.record("db.vector.dimension", coll_dim);
+        span.record("db.index.ef_search", coll_ef_search);
     }
 
     let validation_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let search_start = Instant::now();
 
-    let _span = tracing::info_span!("hybrid_search").entered();
-    let hybrid_results = collection.hybrid_search(
-        &payload.query_vector,
-        &payload.query_text,
-        payload.limit,
-        &fusion_strategy,
-    ).map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("BM25") || msg.contains("hybrid search") {
-            ApiError::invalid_payload(msg)
-        } else {
-            ApiError::from(e)
-        }
-    })?;
-    drop(_span);
+    let query_vector = payload.query_vector.clone();
+    let query_text = payload.query_text.clone();
+    let hybrid_limit = payload.limit;
+    let ns_filter = payload.namespace.clone();
+    let arc_for_blocking = collection_arc;
 
-    let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    tracing::Span::current().record("db.duration.search_ms", search_ms);
-    let hydrate_start = Instant::now();
+    let (results, search_ms, hydrate_ms) = tokio::task::spawn_blocking(move || {
+        let _guard = tracing::Span::none().entered();
 
-    let _span = tracing::info_span!("hydrate_results").entered();
-    let results: Vec<SearchResult> = hybrid_results
-        .into_iter()
-        .filter_map(|(storage_id, score)| {
-            let point = collection.get(&storage_id)?;
-            if let Some(ref ns) = payload.namespace {
-                if point.namespace.as_deref() != Some(ns.as_str()) {
-                    return None;
+        let collection = match arc_for_blocking.read() {
+            Ok(c) => c,
+            Err(e) => return Err(ApiError::internal_error(format!("read lock: {}", e))),
+        };
+
+        let hybrid_results = collection
+            .hybrid_search(&query_vector, &query_text, hybrid_limit, &fusion_strategy)
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("BM25") || msg.contains("hybrid search") {
+                    ApiError::invalid_payload(msg)
+                } else {
+                    ApiError::from(e)
                 }
-            }
-            Some(SearchResult {
-                id: point.id.clone(),
-                score,
-                metadata: point.metadata.clone(),
-                namespace: point.namespace.clone(),
+            })?;
+
+        let search_ms = search_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let hydrate_start = Instant::now();
+
+        let results: Vec<SearchResult> = hybrid_results
+            .into_iter()
+            .filter_map(|(storage_id, score)| {
+                let point = collection.get(&storage_id)?;
+                if let Some(ref ns) = ns_filter {
+                    if point.namespace.as_deref() != Some(ns.as_str()) {
+                        return None;
+                    }
+                }
+                Some(SearchResult {
+                    id: point.id.clone(),
+                    score,
+                    metadata: point.metadata.clone(),
+                    namespace: point.namespace.clone(),
+                })
             })
-        })
-        .collect();
-    drop(_span);
+            .collect();
 
-    // Drop lock imediatamente após extrair os dados necessários da coleção.
-    // Tudo abaixo (métricas, query_profiles, logging) não precisa do lock.
-    drop(collection);
-    drop(collection_arc);
+        let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        Ok::<_, ApiError>((results, search_ms, hydrate_ms))
+    })
+    .await
+    .map_err(|_| ApiError::internal_error("hybrid search task joined"))??;
 
-    let hydrate_ms = hydrate_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    tracing::Span::current().record("db.duration.search_ms", search_ms);
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let collection_name = name.clone();
     let results_count = results.len();
@@ -928,17 +1056,29 @@ pub async fn search_hybrid(
         QueryPhase {
             name: "validation".to_string(),
             duration_ms: validation_ms,
-            percentage: if total > 0.0 { (validation_ms as f64 / total) * 100.0 } else { 0.0 },
+            percentage: if total > 0.0 {
+                (validation_ms as f64 / total) * 100.0
+            } else {
+                0.0
+            },
         },
         QueryPhase {
             name: "search".to_string(),
             duration_ms: search_ms,
-            percentage: if total > 0.0 { (search_ms as f64 / total) * 100.0 } else { 0.0 },
+            percentage: if total > 0.0 {
+                (search_ms as f64 / total) * 100.0
+            } else {
+                0.0
+            },
         },
         QueryPhase {
             name: "hydrate".to_string(),
             duration_ms: hydrate_ms,
-            percentage: if total > 0.0 { (hydrate_ms as f64 / total) * 100.0 } else { 0.0 },
+            percentage: if total > 0.0 {
+                (hydrate_ms as f64 / total) * 100.0
+            } else {
+                0.0
+            },
         },
     ];
     let profile = QueryProfile {
@@ -947,20 +1087,7 @@ pub async fn search_hybrid(
         phases,
     };
 
-    if app_state.query_profiles.len() >= QUERY_PROFILES_CAP {
-        if let Some(entry) = app_state.query_profiles.iter().next() {
-            let k = entry.key().clone();
-            drop(entry);
-            app_state.query_profiles.remove(&k);
-        }
-    }
-    app_state.query_profiles.insert(query_id.clone(), profile);
-
-    app_state.query_stats
-        .entry(collection_name.clone())
-        .or_insert_with(crate::state::QueryStats::new)
-        .record_query(took_ms);
-    app_state.global_query_stats.record(&collection_name, took_ms);
+    // --- Record stats, profiles, audit and query log off the critical path ---
     crate::metrics::QUERIES_TOTAL
         .with_label_values(&[&collection_name])
         .inc();
@@ -968,32 +1095,52 @@ pub async fn search_hybrid(
         .with_label_values(&[&collection_name])
         .observe(took_ms as f64);
 
-    let query_logger = app_state.query_logger.clone();
-    let collection_name_for_log = collection_name.clone();
-    let vector_for_log = payload.query_vector.clone();
-    let query_id_for_log = query_id.clone();
-    tokio::spawn(async move {
-        query_logger
-            .log_query(
-                Some(&query_id_for_log),
-                &collection_name_for_log,
+    {
+        let app = app_state.clone();
+        let query_logger = app_state.query_logger.clone();
+        let coll_name = collection_name.clone();
+        let qid = query_id.clone();
+        let username = user.username.clone();
+        let vector_for_log = payload.query_vector.clone();
+        let limit_val = payload.limit;
+        tokio::spawn(async move {
+            if app.query_profiles.len() >= QUERY_PROFILES_CAP {
+                if let Some(entry) = app.query_profiles.iter().next() {
+                    let k = entry.key().clone();
+                    drop(entry);
+                    app.query_profiles.remove(&k);
+                }
+            }
+            app.query_profiles.insert(qid.clone(), profile);
+
+            app.query_stats
+                .entry(coll_name.clone())
+                .or_insert_with(crate::state::QueryStats::new)
+                .record_query(took_ms);
+
+            app.global_query_stats.record(&coll_name, took_ms);
+
+            query_logger.log_query(
+                Some(&qid),
+                &coll_name,
                 &vector_for_log,
-                payload.limit,
+                limit_val,
                 None,
                 results_count,
                 took_ms,
-            )
-            .await;
-    });
+            );
 
-    // Audit trail
-    {
-        let entry = audit::audit_entry(
-            &user.username, "search_hybrid", &format!("collection:{name}"),
-            serde_json::json!({"query_id": &query_id, "results_count": results_count}),
-            AuditResult::Success, None, Some(took_ms),
-        );
-        app_state.audit_logger.log(&entry);
+            let entry = audit::audit_entry(
+                &username,
+                "search_hybrid",
+                &format!("collection:{}", coll_name),
+                serde_json::json!({"query_id": &qid, "results_count": results_count}),
+                AuditResult::Success,
+                None,
+                Some(took_ms),
+            );
+            app.audit_logger.log(&entry);
+        });
     }
 
     Ok(Json(SearchPointsResponse {
@@ -1017,13 +1164,19 @@ pub async fn list_points(
     let limit = params.limit.min(1000);
     let offset = params.offset;
 
-    let collection_arc = app_state.collections.get(&name)
-        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+    let collection_arc = {
+        let ref_guard = app_state
+            .collections
+            .get(&name)
+            .ok_or_else(|| ApiError::collection_not_found(&name))?;
+        Arc::clone(ref_guard.value())
+    };
 
     let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
     // Obtém todos os pontos
-    let mut all_points: Vec<GetPointResponse> = collection.points_owned()
+    let mut all_points: Vec<GetPointResponse> = collection
+        .points_owned()
         .iter()
         .map(|point| GetPointResponse {
             id: point.id.clone(),
@@ -1041,13 +1194,11 @@ pub async fn list_points(
             // Parse do JSON string para serde_json::Value
             let filter_value: serde_json::Value = serde_json::from_str(filter_str)
                 .map_err(|e| ApiError::invalid_payload(format!("invalid JSON filter: {e}")))?;
-            
+
             let filter = MetadataFilter::from_json(filter_value)
                 .map_err(|e| ApiError::invalid_payload(format!("invalid metadata filter: {e}")))?;
 
-            all_points.retain(|point| {
-                filter.matches(&point.metadata)
-            });
+            all_points.retain(|point| filter.matches(&point.metadata));
         }
     }
 
@@ -1055,11 +1206,7 @@ pub async fn list_points(
     let has_more = offset + limit < total;
 
     // Aplica paginação
-    let points: Vec<GetPointResponse> = all_points
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect();
+    let points: Vec<GetPointResponse> = all_points.into_iter().skip(offset).take(limit).collect();
 
     Ok(Json(ListPointsResponse {
         points,
@@ -1086,13 +1233,19 @@ pub async fn get_point(
     Path((name, id)): Path<(String, String)>,
     Query(query): Query<GetPointQuery>,
 ) -> ApiResult<Json<GetPointResponse>> {
-    let collection_arc = app_state.collections.get(&name)
-        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+    let collection_arc = {
+        let ref_guard = app_state
+            .collections
+            .get(&name)
+            .ok_or_else(|| ApiError::collection_not_found(&name))?;
+        Arc::clone(ref_guard.value())
+    };
 
     let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
     let key = Point::storage_id_from_parts(query.namespace.as_deref(), &id);
-    let point = collection.get(&key)
+    let point = collection
+        .get(&key)
         .ok_or_else(|| ApiError::point_not_found(&id))?;
 
     Ok(Json(GetPointResponse {
@@ -1169,22 +1322,23 @@ pub async fn estimate_search(
 
     request_validation::validate_search_limit(payload.limit)?;
 
-    // Obtém a coleção para extrair stats
-    let collection_arc = app_state.collections.get(&name)
-        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+    let collection_arc = {
+        let ref_guard = app_state
+            .collections
+            .get(&name)
+            .ok_or_else(|| ApiError::collection_not_found(&name))?;
+        Arc::clone(ref_guard.value())
+    };
 
-    let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-
-    let config = collection.config().clone();
-    let num_points = collection.len();
-
-    // Drop lock — não precisamos mais da coleção
-    drop(collection);
-    drop(collection_arc);
+    let (config, num_points) = {
+        let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
+        (collection.config().clone(), collection.len())
+    };
 
     // Parse do filtro (inclui namespace) para contar condições
     let mut filter = match &payload.filter {
-        Some(fv) => MetadataFilter::from_json(fv.clone()).map_err(|e| ApiError::invalid_payload(e.to_string()))?,
+        Some(fv) => MetadataFilter::from_json(fv.clone())
+            .map_err(|e| ApiError::invalid_payload(e.to_string()))?,
         None => MetadataFilter::empty(),
     };
     if let Some(ns) = &payload.namespace {
@@ -1195,7 +1349,9 @@ pub async fn estimate_search(
 
     // Obtém percentis históricos do QueryStats
     let (avg, p50, p95, p99, total_queries) = {
-        app_state.query_stats.get(&name)
+        app_state
+            .query_stats
+            .get(&name)
             .map(|s| {
                 let num_queries = s.num_queries.load(std::sync::atomic::Ordering::Relaxed);
                 let (avg, p50, p95, p99) = s.calculate_percentiles();
@@ -1205,7 +1361,10 @@ pub async fn estimate_search(
     };
 
     // Calcula a estimativa
-    let is_quantized = !matches!(config.quantization, ferres_db_core::QuantizationConfig::None);
+    let is_quantized = !matches!(
+        config.quantization,
+        ferres_db_core::QuantizationConfig::None
+    );
     let params = ferres_db_core::CostEstimateParams {
         collection_size: num_points,
         dimension: config.dimension,
@@ -1290,7 +1449,10 @@ pub async fn explain_search(
 
     // Parse do filtro e merge de namespace
     let mut filter = match &payload.filter {
-        Some(fv) => Some(MetadataFilter::from_json(fv.clone()).map_err(|e| ApiError::invalid_payload(e.to_string()))?),
+        Some(fv) => Some(
+            MetadataFilter::from_json(fv.clone())
+                .map_err(|e| ApiError::invalid_payload(e.to_string()))?,
+        ),
         None => Some(MetadataFilter::empty()),
     };
     if let (Some(ref mut f), Some(ref ns)) = (filter.as_mut(), &payload.namespace) {
@@ -1298,14 +1460,25 @@ pub async fn explain_search(
     }
     let filter = filter.filter(|f| !f.is_empty());
 
-    let collection_arc = app_state.collections.get(&name)
-        .ok_or_else(|| ApiError::collection_not_found(&name))?;
+    let collection_arc = {
+        let ref_guard = app_state
+            .collections
+            .get(&name)
+            .ok_or_else(|| ApiError::collection_not_found(&name))?;
+        Arc::clone(ref_guard.value())
+    };
 
     let vector_field = payload.vector_field.as_deref();
     let explanation = {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-        build_search_explanation(&collection, &payload.vector, payload.limit, filter, vector_field)
-            .map_err(ApiError::from)?
+        build_search_explanation(
+            &collection,
+            &payload.vector,
+            payload.limit,
+            filter,
+            vector_field,
+        )
+        .map_err(ApiError::from)?
     };
 
     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;

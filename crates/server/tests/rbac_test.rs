@@ -4,15 +4,15 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::oneshot;
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
 use ferres_db_server::auth;
+use ferres_db_server::middleware;
 use ferres_db_server::permissions::{Action, MetadataRestriction, Permission, Resource};
 use ferres_db_server::routes;
 use ferres_db_server::state::{AppState, ServerConfig};
 use ferres_db_server::users::{Role, UserStore};
-use ferres_db_server::middleware;
 
 const TEST_API_KEY: &str = "rbac-test-key-123";
 
@@ -47,6 +47,7 @@ async fn setup_server() -> TestServer {
         storage_path: storage_path.clone(),
         log_level: "error".to_string(),
         api_keys: Some(TEST_API_KEY.to_string()),
+        ..Default::default()
     };
 
     // Create user store with test users
@@ -111,9 +112,10 @@ async fn setup_server() -> TestServer {
 
     let user_store = Arc::new(user_store);
 
-    let app_state = AppState::new(config.clone(), None, Some(user_store.clone()), None, None).unwrap();
+    let app_state =
+        AppState::new(config.clone(), None, Some(user_store.clone()), None, None).unwrap();
 
-    let app = routes::create_router()
+    let app = routes::create_router(&config)
         .layer(axum::middleware::from_fn(middleware::request_logger))
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -129,8 +131,9 @@ async fn setup_server() -> TestServer {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
-        let server = axum::serve(listener, app)
-            .with_graceful_shutdown(async { shutdown_rx.await.ok(); });
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            shutdown_rx.await.ok();
+        });
         server.await.unwrap();
     });
 
@@ -210,7 +213,10 @@ async fn test_viewer_cannot_upsert() {
 
     // Try to upsert — should be denied (403)
     let res = client
-        .post(format!("{}/api/v1/collections/test-coll/points", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/test-coll/points",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "points": [{"id": "p1", "vector": [0.1, 0.2, 0.3]}]
@@ -234,7 +240,10 @@ async fn test_viewer_can_search() {
 
     // Search — should work (viewer has Read by default)
     let res = client
-        .post(format!("{}/api/v1/collections/test-coll/search", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/test-coll/search",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
@@ -256,7 +265,10 @@ async fn test_admin_bypasses_all_restrictions() {
     upsert_test_points(&client, &server.base_url, "admin-test").await;
 
     let res = client
-        .post(format!("{}/api/v1/collections/admin-test/search", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/admin-test/search",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
@@ -280,11 +292,20 @@ async fn test_metadata_restriction_filters_results() {
     upsert_test_points(&client, &server.base_url, "filtered-test").await;
 
     // Login as filtered_viewer (has metadata restriction: department=sales)
-    let token = login(&client, &server.base_url, "filtered_viewer", "filtered_pass").await;
+    let token = login(
+        &client,
+        &server.base_url,
+        "filtered_viewer",
+        "filtered_pass",
+    )
+    .await;
 
     // Search — should only see points with department=sales
     let res = client
-        .post(format!("{}/api/v1/collections/filtered-test/search", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/filtered-test/search",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
@@ -298,7 +319,11 @@ async fn test_metadata_restriction_filters_results() {
     let results = body["results"].as_array().unwrap();
 
     // Should only see p1 and p3 (department=sales), not p2 (department=engineering)
-    assert_eq!(results.len(), 2, "filtered viewer should see only sales department points");
+    assert_eq!(
+        results.len(),
+        2,
+        "filtered viewer should see only sales department points"
+    );
     for r in results {
         let meta = &r["metadata"];
         assert_eq!(
@@ -319,11 +344,20 @@ async fn test_granular_permissions_collection_specific() {
     upsert_test_points(&client, &server.base_url, "test-coll").await;
 
     // Login as restricted_viewer (has Read only on test-coll)
-    let token = login(&client, &server.base_url, "restricted_viewer", "restricted_pass").await;
+    let token = login(
+        &client,
+        &server.base_url,
+        "restricted_viewer",
+        "restricted_pass",
+    )
+    .await;
 
     // Search on test-coll — should work
     let res = client
-        .post(format!("{}/api/v1/collections/test-coll/search", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/test-coll/search",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
@@ -336,7 +370,10 @@ async fn test_granular_permissions_collection_specific() {
 
     // Search on other-coll — should be denied
     let res = client
-        .post(format!("{}/api/v1/collections/other-coll/search", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/other-coll/search",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
@@ -345,7 +382,11 @@ async fn test_granular_permissions_collection_specific() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), 403, "restricted_viewer should NOT read other-coll");
+    assert_eq!(
+        res.status(),
+        403,
+        "restricted_viewer should NOT read other-coll"
+    );
 }
 
 #[tokio::test]
@@ -357,11 +398,20 @@ async fn test_granular_write_permission() {
     create_test_collection(&client, &server.base_url, "other-coll").await;
 
     // Login as restricted_editor (has Read+Write only on test-coll)
-    let token = login(&client, &server.base_url, "restricted_editor", "restricted_edit_pass").await;
+    let token = login(
+        &client,
+        &server.base_url,
+        "restricted_editor",
+        "restricted_edit_pass",
+    )
+    .await;
 
     // Upsert to test-coll — should work
     let res = client
-        .post(format!("{}/api/v1/collections/test-coll/points", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/test-coll/points",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "points": [{"id": "rp1", "vector": [0.1, 0.2, 0.3]}]
@@ -369,11 +419,18 @@ async fn test_granular_write_permission() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), 200, "restricted_editor should write to test-coll");
+    assert_eq!(
+        res.status(),
+        200,
+        "restricted_editor should write to test-coll"
+    );
 
     // Upsert to other-coll — should be denied
     let res = client
-        .post(format!("{}/api/v1/collections/other-coll/points", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/other-coll/points",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "points": [{"id": "rp1", "vector": [0.1, 0.2, 0.3]}]
@@ -381,7 +438,11 @@ async fn test_granular_write_permission() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), 403, "restricted_editor should NOT write to other-coll");
+    assert_eq!(
+        res.status(),
+        403,
+        "restricted_editor should NOT write to other-coll"
+    );
 }
 
 #[tokio::test]
@@ -394,7 +455,10 @@ async fn test_audit_trail_records_actions() {
 
     // Do a search with the admin API key
     let _ = client
-        .post(format!("{}/api/v1/collections/audit-test/search", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/audit-test/search",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
@@ -409,7 +473,10 @@ async fn test_audit_trail_records_actions() {
 
     // Query the audit trail
     let res = client
-        .get(format!("{}/api/v1/audit?action=search&limit=10", server.base_url))
+        .get(format!(
+            "{}/api/v1/audit?action=search&limit=10",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .send()
         .await
@@ -441,7 +508,10 @@ async fn test_audit_trail_records_denied_actions() {
 
     // Try to upsert (will be denied)
     let _ = client
-        .post(format!("{}/api/v1/collections/deny-test/points", server.base_url))
+        .post(format!(
+            "{}/api/v1/collections/deny-test/points",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "points": [{"id": "p1", "vector": [0.1, 0.2, 0.3]}]
@@ -455,7 +525,10 @@ async fn test_audit_trail_records_denied_actions() {
 
     // Query audit trail for denied actions
     let res = client
-        .get(format!("{}/api/v1/audit?action=upsert&limit=10", server.base_url))
+        .get(format!(
+            "{}/api/v1/audit?action=upsert&limit=10",
+            server.base_url
+        ))
         .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .send()
         .await
@@ -465,7 +538,9 @@ async fn test_audit_trail_records_denied_actions() {
     let entries = body.as_array().unwrap();
 
     // Find the denied entry
-    let denied = entries.iter().find(|e| e["result"].as_str() == Some("denied"));
+    let denied = entries
+        .iter()
+        .find(|e| e["result"].as_str() == Some("denied"));
     assert!(denied.is_some(), "should have a denied audit entry");
     assert_eq!(denied.unwrap()["user_id"].as_str().unwrap(), "viewer_user");
 }
@@ -550,7 +625,12 @@ fn test_user_store_permissions_persistence() {
     }];
 
     store
-        .create_with_permissions("testuser", "testpass", Some(Role::Viewer), Some(perms.clone()))
+        .create_with_permissions(
+            "testuser",
+            "testpass",
+            Some(Role::Viewer),
+            Some(perms.clone()),
+        )
         .unwrap();
 
     // Read back permissions
@@ -558,7 +638,10 @@ fn test_user_store_permissions_persistence() {
     assert!(loaded.is_some());
     let loaded_perms = loaded.unwrap();
     assert_eq!(loaded_perms.len(), 1);
-    assert_eq!(loaded_perms[0].resource, Resource::Collection("docs".to_string()));
+    assert_eq!(
+        loaded_perms[0].resource,
+        Resource::Collection("docs".to_string())
+    );
 
     // Update permissions
     let new_perms = vec![Permission {
@@ -566,7 +649,9 @@ fn test_user_store_permissions_persistence() {
         actions: vec![Action::Read, Action::Write],
         metadata_restriction: None,
     }];
-    store.update_permissions("testuser", Some(new_perms)).unwrap();
+    store
+        .update_permissions("testuser", Some(new_perms))
+        .unwrap();
 
     let reloaded = store.get_permissions("testuser").unwrap().unwrap();
     assert_eq!(reloaded.len(), 1);

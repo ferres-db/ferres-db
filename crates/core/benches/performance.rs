@@ -1,7 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ferres_db_core::{
-    fusion::reciprocal_rank_fusion,
-    ANNIndex, CollectionConfig, DistanceMetric, Point, VectorDB,
+    fusion::reciprocal_rank_fusion, ANNIndex, CollectionConfig, DistanceMetric, Point, VectorDB,
 };
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -39,7 +38,10 @@ fn load_points_from_jsonl(file_path: &PathBuf) -> Vec<Point> {
             .map(|v| v.as_f64().unwrap() as f32)
             .collect();
 
-        let metadata = json.get("metadata").cloned().unwrap_or(serde_json::Value::Null);
+        let metadata = json
+            .get("metadata")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         let point = Point::new(id, vector, metadata)
             .unwrap_or_else(|e| panic!("failed to create point at line {}: {}", line_num + 1, e));
@@ -72,7 +74,7 @@ fn benchmark_indexing(c: &mut Criterion) {
 
     for (filename, _expected_size) in corpus_sizes {
         let corpus_file = corpus_path(filename);
-        
+
         // Verifica se o arquivo existe, se não, pula o benchmark
         if !corpus_file.exists() {
             eprintln!("⚠️  Arquivo não encontrado: {:?}", corpus_file);
@@ -82,7 +84,7 @@ fn benchmark_indexing(c: &mut Criterion) {
 
         let points = load_points_from_jsonl(&corpus_file);
         let actual_size = points.len();
-        
+
         if actual_size == 0 {
             eprintln!("⚠️  Arquivo vazio: {:?}", corpus_file);
             continue;
@@ -105,9 +107,9 @@ fn benchmark_indexing(c: &mut Criterion) {
                             .unwrap()
                             .as_nanos()
                     ));
-                    
+
                     let mut db = VectorDB::new(temp_dir.clone()).unwrap();
-                    
+
                     let config = CollectionConfig {
                         name: "bench_collection".into(),
                         dimension,
@@ -118,12 +120,13 @@ fn benchmark_indexing(c: &mut Criterion) {
                         bm25_text_field: "text".to_string(),
                         quantization: Default::default(),
                         tiered_storage: Default::default(),
+                        retention_days: None,
                     };
-                    
+
                     db.create_collection(config).unwrap();
                     db.upsert_points("bench_collection", black_box(points.clone()))
                         .unwrap();
-                    
+
                     // Limpa o diretório temporário
                     let _ = std::fs::remove_dir_all(&temp_dir);
                 });
@@ -138,7 +141,7 @@ fn benchmark_indexing(c: &mut Criterion) {
 
 fn benchmark_search(c: &mut Criterion) {
     let corpus_file = corpus_path("corpus_10k.jsonl");
-    
+
     if !corpus_file.exists() {
         eprintln!("⚠️  Arquivo não encontrado: {:?}", corpus_file);
         eprintln!("   Execute: python tests/fixtures/generate_corpus.py");
@@ -146,7 +149,7 @@ fn benchmark_search(c: &mut Criterion) {
     }
 
     let points = load_points_from_jsonl(&corpus_file);
-    
+
     if points.is_empty() {
         eprintln!("⚠️  Arquivo vazio: {:?}", corpus_file);
         return;
@@ -175,6 +178,7 @@ fn benchmark_search(c: &mut Criterion) {
         bm25_text_field: "text".to_string(),
         quantization: Default::default(),
         tiered_storage: Default::default(),
+        retention_days: None,
     };
     db.create_collection(config).unwrap();
     db.upsert_points("search_bench", points.clone()).unwrap();
@@ -233,7 +237,7 @@ fn benchmark_search(c: &mut Criterion) {
         let p50 = latencies[latencies.len() / 2];
         let p95 = latencies[(latencies.len() * 95) / 100];
         let p99 = latencies[(latencies.len() * 99) / 100];
-        
+
         println!("   P50: {:.2} μs", p50);
         println!("   P95: {:.2} μs", p95);
         println!("   P99: {:.2} μs", p99);
@@ -248,7 +252,7 @@ fn benchmark_search(c: &mut Criterion) {
 fn benchmark_upsert(c: &mut Criterion) {
     let base_corpus = corpus_path("corpus_10k.jsonl");
     let new_points_file = corpus_path("corpus_1k.jsonl");
-    
+
     if !base_corpus.exists() || !new_points_file.exists() {
         eprintln!("⚠️  Arquivos não encontrados:");
         eprintln!("   Base: {:?}", base_corpus);
@@ -259,7 +263,7 @@ fn benchmark_upsert(c: &mut Criterion) {
 
     let base_points = load_points_from_jsonl(&base_corpus);
     let new_points = load_points_from_jsonl(&new_points_file);
-    
+
     if base_points.is_empty() || new_points.is_empty() {
         eprintln!("⚠️  Arquivos vazios");
         return;
@@ -294,6 +298,7 @@ fn benchmark_upsert(c: &mut Criterion) {
                 bm25_text_field: "text".to_string(),
                 quantization: Default::default(),
                 tiered_storage: Default::default(),
+                retention_days: None,
             };
             db.create_collection(config).unwrap();
 
@@ -519,4 +524,3 @@ criterion_group!(
     benchmark_rrf_two_vs_generic
 );
 criterion_main!(benches);
-

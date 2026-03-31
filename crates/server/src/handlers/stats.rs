@@ -217,7 +217,9 @@ pub async fn get_collection_stats(
     Path(name): Path<String>,
 ) -> ApiResult<Json<CollectionStatsResponse>> {
     // Verifica se a coleção existe
-    let collection_arc = app_state.collections.get(&name)
+    let collection_arc = app_state
+        .collections
+        .get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     // Obtém número de pontos, tombstone count, waste e ef_search atual (um único lock).
@@ -233,7 +235,9 @@ pub async fn get_collection_stats(
 
     // Obtém estatísticas de queries
     let (num_queries, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms) = {
-        let stats = app_state.query_stats.get(&name)
+        let stats = app_state
+            .query_stats
+            .get(&name)
             .map(|s| {
                 let num_queries = s.num_queries.load(std::sync::atomic::Ordering::Relaxed);
                 let (avg, p50, p95, p99) = s.calculate_percentiles();
@@ -289,13 +293,7 @@ pub async fn get_global_stats(
     let total_points: usize = app_state
         .collections
         .iter()
-        .map(|entry| {
-            entry
-                .value()
-                .read()
-                .map(|c| c.len())
-                .unwrap_or(0)
-        })
+        .map(|entry| entry.value().read().map(|c| c.len()).unwrap_or(0))
         .sum();
 
     let cache = &app_state.query_log_cache;
@@ -491,15 +489,16 @@ pub async fn get_analytics(
                 .unwrap_or("(default)")
                 .to_string();
             *namespace_point_count.entry(ns.clone()).or_insert(0) += 1;
-            *namespace_storage_bytes
-                .entry(ns)
-                .or_insert(0) += bytes_per_point;
+            *namespace_storage_bytes.entry(ns).or_insert(0) += bytes_per_point;
         }
     }
     let mut top_namespaces_by_storage: Vec<TopNamespaceByStorage> = namespace_point_count
         .into_iter()
         .map(|(namespace, point_count)| {
-            let storage_bytes_estimate = namespace_storage_bytes.get(&namespace).copied().unwrap_or(0);
+            let storage_bytes_estimate = namespace_storage_bytes
+                .get(&namespace)
+                .copied()
+                .unwrap_or(0);
             TopNamespaceByStorage {
                 namespace,
                 point_count,
@@ -507,7 +506,8 @@ pub async fn get_analytics(
             }
         })
         .collect();
-    top_namespaces_by_storage.sort_by(|a, b| b.storage_bytes_estimate.cmp(&a.storage_bytes_estimate));
+    top_namespaces_by_storage
+        .sort_by(|a, b| b.storage_bytes_estimate.cmp(&a.storage_bytes_estimate));
     top_namespaces_by_storage.truncate(30);
 
     // Re-ranking overhead: média da fase "rerank" nos perfis de query recentes
@@ -651,8 +651,14 @@ pub struct FeedbackStatsResponse {
 /// Handler para GET /api/v1/stats/feedback
 ///
 /// Lê feedback.jsonl (log_dir/feedback.jsonl). Retorna contagens e últimas entradas para gráfico de satisfação.
-pub async fn get_feedback(State(app_state): State<AppState>) -> ApiResult<Json<FeedbackStatsResponse>> {
-    let feedback_path = app_state.config.storage_path.join("logs").join("feedback.jsonl");
+pub async fn get_feedback(
+    State(app_state): State<AppState>,
+) -> ApiResult<Json<FeedbackStatsResponse>> {
+    let feedback_path = app_state
+        .config
+        .storage_path
+        .join("logs")
+        .join("feedback.jsonl");
     let content = match std::fs::read_to_string(&feedback_path) {
         Ok(c) => c,
         Err(_) => {
@@ -697,4 +703,3 @@ pub async fn get_feedback(State(app_state): State<AppState>) -> ApiResult<Json<F
         entries,
     }))
 }
-

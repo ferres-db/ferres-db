@@ -9,5 +9,8 @@ use crate::state::AppState;
 pub fn create_keys_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/keys", get(list_keys).post(create_key))
-        .route("/api/v1/keys/{id}", put(update_key_namespaces).delete(delete_key))
+        .route(
+            "/api/v1/keys/{id}",
+            put(update_key_namespaces).delete(delete_key),
+        )
 }

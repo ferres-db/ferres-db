@@ -102,6 +102,10 @@ apiClient.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       clearStoredToken();
+      // Redireciona para login se não estiver já na página de login
+      if (!window.location.pathname.startsWith("/login")) {
+        window.location.href = "/login";
+      }
     }
     console.error("API Error:", error.response?.data || error.message);
     return Promise.reject(error);

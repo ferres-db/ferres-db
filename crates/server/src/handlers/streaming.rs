@@ -103,7 +103,9 @@ enum ServerMessage {
 
 impl ServerMessage {
     fn to_text(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| r#"{"type":"error","message":"serialization failed","code":500}"#.to_string())
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            r#"{"type":"error","message":"serialization failed","code":500}"#.to_string()
+        })
     }
 }
 
@@ -118,7 +120,7 @@ fn authenticate_ws(headers: &HeaderMap, query: &WsQueryParams) -> bool {
         }
         // Check legacy keys
         crate::auth::init_api_keys_from(None); // ensure initialized
-        // Try legacy validation via the same mechanism the middleware uses
+                                               // Try legacy validation via the same mechanism the middleware uses
     }
 
     // 2. Header Authorization: Bearer <key>
@@ -130,7 +132,7 @@ fn authenticate_ws(headers: &HeaderMap, query: &WsQueryParams) -> bool {
         }
     }
 
-    // 3. Query param against legacy keys  
+    // 3. Query param against legacy keys
     if let Some(ref token) = query.token {
         // Check if it's in the legacy static set
         if is_valid_legacy_key(token) {
@@ -148,15 +150,12 @@ fn authenticate_ws(headers: &HeaderMap, query: &WsQueryParams) -> bool {
     }
 
     // 5. JWT (login do dashboard) — query param ou header
-    let token = query
-        .token
-        .as_deref()
-        .or_else(|| {
-            headers
-                .get("Authorization")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|h| h.strip_prefix("Bearer "))
-        });
+    let token = query.token.as_deref().or_else(|| {
+        headers
+            .get("Authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+    });
     if let Some(t) = token {
         if crate::auth::validate_jwt(t) {
             return true;
@@ -251,9 +250,7 @@ async fn handle_ws_connection(socket: WebSocket, app_state: AppState) {
     });
 
     // Heartbeat e inactivity tracking
-    let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
-        unix_now(),
-    ));
+    let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(unix_now()));
     let awaiting_pong = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Heartbeat task
@@ -270,28 +267,32 @@ async fn handle_ws_connection(socket: WebSocket, app_state: AppState) {
             let last = last_activity_hb.load(Ordering::Relaxed);
             if now.saturating_sub(last) > INACTIVITY_TIMEOUT_SECS {
                 warn!("WebSocket inactivity timeout, closing");
-                let _ = tx_heartbeat.send(
-                    ServerMessage::Error {
-                        message: "inactivity timeout".to_string(),
-                        code: 408,
-                    }
-                    .to_text(),
-                ).await;
+                let _ = tx_heartbeat
+                    .send(
+                        ServerMessage::Error {
+                            message: "inactivity timeout".to_string(),
+                            code: 408,
+                        }
+                        .to_text(),
+                    )
+                    .await;
                 break;
             }
 
             // Check pong timeout
             if awaiting_pong_hb.load(Ordering::Relaxed) {
-                // We were waiting for pong — check if it arrived  
+                // We were waiting for pong — check if it arrived
                 // (If still awaiting after a full heartbeat interval, disconnect)
                 warn!("WebSocket pong timeout, closing");
-                let _ = tx_heartbeat.send(
-                    ServerMessage::Error {
-                        message: "pong timeout".to_string(),
-                        code: 408,
-                    }
-                    .to_text(),
-                ).await;
+                let _ = tx_heartbeat
+                    .send(
+                        ServerMessage::Error {
+                            message: "pong timeout".to_string(),
+                            code: 408,
+                        }
+                        .to_text(),
+                    )
+                    .await;
                 break;
             }
 
@@ -308,8 +309,7 @@ async fn handle_ws_connection(socket: WebSocket, app_state: AppState) {
     });
 
     // Batch buffer for upserts (debounce)
-    let (batch_tx, mut batch_rx) =
-        tokio::sync::mpsc::channel::<(String, Vec<WsPointInput>)>(512);
+    let (batch_tx, mut batch_rx) = tokio::sync::mpsc::channel::<(String, Vec<WsPointInput>)>(512);
 
     // Batch processor task
     let app_state_batch = app_state.clone();
@@ -347,8 +347,7 @@ async fn handle_ws_connection(socket: WebSocket, app_state: AppState) {
             }
 
             for (collection, points) in grouped {
-                let result =
-                    process_upsert_batch(&app_state_batch, &collection, points).await;
+                let result = process_upsert_batch(&app_state_batch, &collection, points).await;
                 let msg = match result {
                     Ok((upserted, failed, took_ms)) => ServerMessage::Ack {
                         upserted,
@@ -390,9 +389,7 @@ async fn handle_ws_connection(socket: WebSocket, app_state: AppState) {
 
                         if subscriptions.contains(&collection) {
                             let msg = ServerMessage::Error {
-                                message: format!(
-                                    "already subscribed to '{collection}'"
-                                ),
+                                message: format!("already subscribed to '{collection}'"),
                                 code: 409,
                             };
                             if tx_out.send(msg.to_text()).await.is_err() {
@@ -413,8 +410,7 @@ async fn handle_ws_connection(socket: WebSocket, app_state: AppState) {
                             continue;
                         }
 
-                        let event_filter: HashSet<String> =
-                            events.into_iter().collect();
+                        let event_filter: HashSet<String> = events.into_iter().collect();
 
                         // Subscribe to broadcast channel
                         let rx = app_state
@@ -423,9 +419,7 @@ async fn handle_ws_connection(socket: WebSocket, app_state: AppState) {
                         subscriptions.insert(collection.clone());
 
                         let tx_out_sub = tx_out.clone();
-                        let sub_handle = tokio::spawn(
-                            forward_events(rx, tx_out_sub, event_filter),
-                        );
+                        let sub_handle = tokio::spawn(forward_events(rx, tx_out_sub, event_filter));
                         subscription_handles.push(sub_handle);
 
                         // Send ack for subscription
@@ -513,12 +507,14 @@ async fn process_upsert_batch(
 
     let start = Instant::now();
 
-    let collection_arc = app_state.collections.get(collection_name).ok_or_else(|| {
-        ServerMessage::Error {
-            message: "collection not found".to_string(),
-            code: 404,
-        }
-    })?;
+    let collection_arc =
+        app_state
+            .collections
+            .get(collection_name)
+            .ok_or_else(|| ServerMessage::Error {
+                message: "collection not found".to_string(),
+                code: 404,
+            })?;
 
     let mut valid_points = Vec::new();
     let mut failed = 0usize;
@@ -563,8 +559,7 @@ async fn process_upsert_batch(
             match collection.insert_batch(valid_points) {
                 Ok(result) => {
                     collection.mark_dirty();
-                    let took_ms =
-                        start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
                     // Emit event for subscribers
                     let event = CollectionEvent {
@@ -639,4 +634,3 @@ fn unix_now() -> u64 {
         .unwrap()
         .as_secs()
 }
-

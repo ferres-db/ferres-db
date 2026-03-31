@@ -19,10 +19,7 @@ pub fn create_points_routes() -> Router<AppState> {
             "/api/v1/collections/{name}/points",
             get(list_points).post(upsert_points).delete(delete_points),
         )
-        .route(
-            "/api/v1/collections/{name}/search",
-            post(search_points),
-        )
+        .route("/api/v1/collections/{name}/search", post(search_points))
         .route(
             "/api/v1/collections/{name}/search/hybrid",
             post(search_hybrid),
@@ -35,17 +32,10 @@ pub fn create_points_routes() -> Router<AppState> {
             "/api/v1/collections/{name}/search/estimate",
             post(estimate_search),
         )
-        .route(
-            "/api/v1/collections/{name}/points/link",
-            post(link_points),
-        )
+        .route("/api/v1/collections/{name}/points/link", post(link_points))
         .route(
             "/api/v1/collections/{name}/graph/subgraph",
             get(get_subgraph),
         )
-        .route(
-            "/api/v1/collections/{name}/points/{id}",
-            get(get_point),
-        )
+        .route("/api/v1/collections/{name}/points/{id}", get(get_point))
 }
-

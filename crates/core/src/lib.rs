@@ -60,12 +60,23 @@ pub mod tiered;
 pub mod wal;
 
 // Re-exporta os tipos mais usados na raiz do crate para ergonomia.
-pub use collection::{BatchInsertResult, Collection, CollectionConfig};
-pub use error::FerresError;
-pub use point::Point;
 pub use bm25::BM25Index;
-pub use quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarType};
+pub use collection::{BatchInsertResult, Collection, CollectionConfig};
+pub use cost::{estimate_search_cost, CostBreakdown, CostEstimateParams, QueryCostEstimate};
+pub use error::FerresError;
+pub use explain::{
+    build_search_explanation, build_search_explanation_with_resolver, evaluate_condition,
+    ConditionResult, ExplainMeta, ExplainResult, FilterExplanation, IndexStats, SearchExplanation,
+};
+pub use fusion::{reciprocal_rank_fusion, weighted_fusion, FusionStrategy, DEFAULT_RRF_K};
 pub use graph::traverse_bfs;
+pub use point::Point;
+pub use quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarType};
+pub use reindex::{
+    apply_delta, build_new_index, estimate_index_size, needs_reindex, tombstone_ratio, ReindexJob,
+    ReindexStats, ReindexStatus, AUTO_REINDEX_TOMBSTONE_RATIO,
+};
+pub use rerank::Reranker;
 pub use search::{
     create_ann_index, distance_between, simd_enabled, ANNIndex, DistanceMetric, HnswConfig,
     HnswIndex, QuantizedHnswIndex,
@@ -74,26 +85,14 @@ pub use storage::{
     CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker, StorageOptions,
 };
 pub use tiered::{
-    AccessTracker, CompactionResult, ColdStorage, StorageTier, TierDistribution,
-    TierMetadata, TieredCollection, TieredStorageConfig, WarmStorage,
+    AccessTracker, ColdStorage, CompactionResult, StorageTier, TierDistribution, TierMetadata,
+    TieredCollection, TieredStorageConfig, WarmStorage,
 };
 pub use wal::{
-    compact_wal_entries_older_than, recover_collection, recover_collection_to_timestamp,
-    list_restore_points, read_last_snapshot_timestamp,
-    RestorePoints, Wal, WalEntry, WalOperation,
+    compact_wal_entries_older_than, list_restore_points, read_last_snapshot_timestamp,
+    recover_collection, recover_collection_to_timestamp, RestorePoints, Wal, WalEntry,
+    WalOperation,
 };
-pub use cost::{CostBreakdown, CostEstimateParams, QueryCostEstimate, estimate_search_cost};
-pub use explain::{
-    ConditionResult, ExplainMeta, ExplainResult, FilterExplanation, IndexStats,
-    SearchExplanation, build_search_explanation, build_search_explanation_with_resolver,
-    evaluate_condition,
-};
-pub use fusion::{FusionStrategy, reciprocal_rank_fusion, weighted_fusion, DEFAULT_RRF_K};
-pub use reindex::{
-    ReindexJob, ReindexStats, ReindexStatus, AUTO_REINDEX_TOMBSTONE_RATIO,
-    apply_delta, build_new_index, estimate_index_size, needs_reindex, tombstone_ratio,
-};
-pub use rerank::Reranker;
 
 #[cfg(feature = "rerank")]
 pub use rerank::CrossEncoderOrt;
@@ -147,12 +146,8 @@ impl MetadataCondition {
     /// Avalia a condição contra o metadata de um ponto.
     pub fn matches(&self, metadata: &serde_json::Value) -> bool {
         match self {
-            MetadataCondition::Eq(key, expected) => {
-                metadata.get(key) == Some(expected)
-            }
-            MetadataCondition::Ne(key, expected) => {
-                metadata.get(key) != Some(expected)
-            }
+            MetadataCondition::Eq(key, expected) => metadata.get(key) == Some(expected),
+            MetadataCondition::Ne(key, expected) => metadata.get(key) != Some(expected),
             MetadataCondition::In(key, values) => metadata
                 .get(key)
                 .map(|v| values.iter().any(|x| x == v))
@@ -531,10 +526,7 @@ impl VectorDB {
         };
 
         db.load_collections_from_disk()?;
-        info!(
-            collections = db.collections.len(),
-            "VectorDB initialized"
-        );
+        info!(collections = db.collections.len(), "VectorDB initialized");
         Ok(db)
     }
 
@@ -1236,7 +1228,7 @@ impl VectorDB {
     /// let db = VectorDB::new("./data".into())?;
     ///
     /// let stats = db.get_collection_stats("embeddings")?;
-    /// println!("Pontos: {}, Tamanho índice: {} bytes", 
+    /// println!("Pontos: {}, Tamanho índice: {} bytes",
     ///          stats.num_points, stats.index_size_bytes);
     /// # Ok::<(), ferres_db_core::FerresError>(())
     /// ```
@@ -1246,10 +1238,7 @@ impl VectorDB {
     ///
     /// # Erros
     /// - `CollectionNotFound` se a coleção não existir.
-    pub fn get_collection_stats(
-        &self,
-        collection: &str,
-    ) -> Result<CollectionStats, FerresError> {
+    pub fn get_collection_stats(&self, collection: &str) -> Result<CollectionStats, FerresError> {
         let ac = self
             .collections
             .get(collection)
@@ -1258,7 +1247,7 @@ impl VectorDB {
 
         // Usa total_len para contar pontos em todos os tiers
         let num_points = ac.total_len();
-        
+
         // Estima o tamanho do índice em bytes
         // Aproximação: cada ponto tem um vetor de f32 (4 bytes) + overhead do HNSW
         // HNSW tem overhead de ~M * num_points * (ponteiros + distâncias)
@@ -1297,7 +1286,7 @@ impl VectorDB {
                 let col = ac.collection();
                 let config = col.config();
                 let num_points = ac.total_len();
-                
+
                 // Usa o timestamp do ponto mais antigo como created_at
                 // Se a coleção estiver vazia, usa 0
                 let created_at = col
@@ -1322,7 +1311,7 @@ impl VectorDB {
     /// Carrega todas as coleções persistidas do disco.
     fn load_collections_from_disk(&mut self) -> Result<(), FerresError> {
         let collections_dir = self.storage_path.join("collections");
-        
+
         // Cria o diretório collections se não existir
         if !collections_dir.exists() {
             std::fs::create_dir_all(&collections_dir).map_err(|e| {
@@ -1332,7 +1321,7 @@ impl VectorDB {
                 ))
             })?;
         }
-        
+
         let collection_dirs = std::fs::read_dir(&collections_dir).map_err(|e| {
             FerresError::Storage(format!(
                 "failed to read collections directory {}: {e}",
@@ -1386,11 +1375,7 @@ impl VectorDB {
 
                         // Wraps em TieredCollection se tiered storage está habilitado
                         let any_col = if tiered_enabled {
-                            let tc = TieredCollection::new(
-                                collection,
-                                tiered_config,
-                                Some(&path),
-                            )?;
+                            let tc = TieredCollection::new(collection, tiered_config, Some(&path))?;
                             AnyCollection::Tiered(Box::new(tc))
                         } else {
                             AnyCollection::Plain(Box::new(collection))
@@ -1614,7 +1599,8 @@ mod tests {
         assert_eq!(results.len(), 3);
 
         // Busca com filtro que corresponde a 1 ponto
-        let filter = MetadataFilter::from_json(json!({"category": "tech", "status": "active"})).unwrap();
+        let filter =
+            MetadataFilter::from_json(json!({"category": "tech", "status": "active"})).unwrap();
         let filtered_results = db
             .search_with_filter("test", vec![1.0, 0.0, 0.0], 10, Some(filter))
             .unwrap();
@@ -1658,9 +1644,8 @@ mod tests {
         create_test_collection(&mut db, "test", 3);
 
         // Ponto sem o campo "category"
-        let points = vec![
-            Point::new("p1", vec![1.0, 0.0, 0.0], json!({"other": "value"})).unwrap(),
-        ];
+        let points =
+            vec![Point::new("p1", vec![1.0, 0.0, 0.0], json!({"other": "value"})).unwrap()];
 
         db.upsert_points("test", points).unwrap();
 
@@ -1681,25 +1666,10 @@ mod tests {
 
         // Insere apenas 2 pontos que correspondem ao filtro
         let points = vec![
-            Point::new(
-                "p1",
-                vec![1.0, 0.0, 0.0],
-                json!({"category": "tech"}),
-            )
-            .unwrap(),
-            Point::new(
-                "p2",
-                vec![0.0, 1.0, 0.0],
-                json!({"category": "tech"}),
-            )
-            .unwrap(),
+            Point::new("p1", vec![1.0, 0.0, 0.0], json!({"category": "tech"})).unwrap(),
+            Point::new("p2", vec![0.0, 1.0, 0.0], json!({"category": "tech"})).unwrap(),
             // Ponto que não corresponde ao filtro
-            Point::new(
-                "p3",
-                vec![0.0, 0.0, 1.0],
-                json!({"category": "science"}),
-            )
-            .unwrap(),
+            Point::new("p3", vec![0.0, 0.0, 1.0], json!({"category": "science"})).unwrap(),
         ];
 
         db.upsert_points("test", points).unwrap();
@@ -1712,7 +1682,9 @@ mod tests {
 
         // Deve retornar apenas os 2 pontos que correspondem ao filtro
         assert_eq!(filtered_results.len(), 2);
-        assert!(filtered_results.iter().all(|r| r.id == "p1" || r.id == "p2"));
+        assert!(filtered_results
+            .iter()
+            .all(|r| r.id == "p1" || r.id == "p2"));
     }
 
     #[test]
@@ -1757,7 +1729,9 @@ mod tests {
         // Deve retornar apenas p1 e p2 (ambos têm category=tech E status=active); p3 não deve aparecer
         assert!(!filtered_results.is_empty());
         assert!(filtered_results.len() <= 2);
-        assert!(filtered_results.iter().all(|r| r.id == "p1" || r.id == "p2"));
+        assert!(filtered_results
+            .iter()
+            .all(|r| r.id == "p1" || r.id == "p2"));
     }
 
     #[test]

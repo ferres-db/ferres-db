@@ -3,13 +3,13 @@
 //! Testes de integração para autenticação via API Key.
 
 use std::net::SocketAddr;
-use tokio::sync::oneshot;
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
 use ferres_db_server::auth;
+use ferres_db_server::middleware;
 use ferres_db_server::routes;
 use ferres_db_server::state::{AppState, ServerConfig};
-use ferres_db_server::middleware;
 
 /// API key usada nos testes de autenticação.
 const TEST_API_KEY: &str = "test-key-123";
@@ -42,11 +42,12 @@ async fn setup_server() -> TestServer {
         storage_path: storage_path.clone(),
         log_level: "error".to_string(),
         api_keys: Some(TEST_API_KEY.to_string()),
+        ..Default::default()
     };
 
     let app_state = AppState::new(config.clone(), None, None, None, None).unwrap();
 
-    let app = routes::create_router()
+    let app = routes::create_router(&config)
         .layer(axum::middleware::from_fn(middleware::request_logger))
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -62,10 +63,9 @@ async fn setup_server() -> TestServer {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let _server_handle = tokio::spawn(async move {
-        let server = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            });
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            shutdown_rx.await.ok();
+        });
         server.await.unwrap();
     });
 

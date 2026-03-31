@@ -156,9 +156,7 @@ pub fn check_permission(
 
         if matches_resource && perm.actions.contains(action) {
             return match &perm.metadata_restriction {
-                Some(restriction) => {
-                    PermissionResult::AllowedWithRestriction(restriction.clone())
-                }
+                Some(restriction) => PermissionResult::AllowedWithRestriction(restriction.clone()),
                 None => PermissionResult::Allowed,
             };
         }
@@ -168,9 +166,7 @@ pub fn check_permission(
     for perm in permissions {
         if perm.resource == Resource::AllCollections && perm.actions.contains(action) {
             return match &perm.metadata_restriction {
-                Some(restriction) => {
-                    PermissionResult::AllowedWithRestriction(restriction.clone())
-                }
+                Some(restriction) => PermissionResult::AllowedWithRestriction(restriction.clone()),
                 None => PermissionResult::Allowed,
             };
         }
@@ -320,7 +316,10 @@ mod tests {
 
         // "docs" collection: wildcard match, has restriction
         let result = check_permission(&perms, "docs", &Action::Read);
-        assert!(matches!(result, PermissionResult::AllowedWithRestriction(_)));
+        assert!(matches!(
+            result,
+            PermissionResult::AllowedWithRestriction(_)
+        ));
     }
 
     #[test]

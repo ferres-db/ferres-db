@@ -11,11 +11,14 @@ use validator::{Validate, ValidationError};
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use ferres_db_core::{Collection, CollectionConfig, FileStorage, DistanceMetric, QuantizationConfig, TieredStorageConfig};
+use ferres_db_core::{
+    Collection, CollectionConfig, DistanceMetric, FileStorage, QuantizationConfig,
+    TieredStorageConfig,
+};
 
 use crate::api_err;
-use crate::auth::{AuthenticatedUser, check_user_permission};
 use crate::audit::{self, AuditResult};
+use crate::auth::{check_user_permission, AuthenticatedUser};
 use crate::error::{ApiError, ApiResult};
 use crate::permissions::Action;
 use crate::state::AppState;
@@ -43,10 +46,10 @@ fn validate_collection_name(name: &str) -> Result<(), ValidationError> {
 pub struct CreateCollectionRequest {
     #[validate(custom(function = "validate_collection_name"))]
     pub name: String,
-    
+
     #[validate(range(min = 1, max = 4096))]
     pub dimension: usize,
-    
+
     pub distance: DistanceMetric,
     /// Habilita índice BM25 para busca híbrida. Padrão: false.
     #[serde(default)]
@@ -151,13 +154,18 @@ pub async fn create_collection(
     let perm_result = check_user_permission(&user, &payload.name, &Action::Create);
     if !perm_result.is_allowed() {
         let entry = audit::audit_entry(
-            &user.username, "create_collection", &format!("collection:{}", payload.name),
+            &user.username,
+            "create_collection",
+            &format!("collection:{}", payload.name),
             serde_json::json!({"denied": true}),
-            AuditResult::Denied, None, None,
+            AuditResult::Denied,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
-            "permission denied: create collection '{}'", payload.name
+            "permission denied: create collection '{}'",
+            payload.name
         )));
     }
 
@@ -168,9 +176,16 @@ pub async fn create_collection(
             for error in errors {
                 let msg = match error.code.as_ref() {
                     "name_cannot_be_empty" => "name cannot be empty".to_string(),
-                    "name_invalid_characters" => "name can only contain letters, numbers, hyphens, and underscores".to_string(),
+                    "name_invalid_characters" => {
+                        "name can only contain letters, numbers, hyphens, and underscores"
+                            .to_string()
+                    }
                     "range" => "dimension must be between 1 and 4096".to_string(),
-                    _ => error.message.as_ref().map(|m| m.to_string()).unwrap_or_else(|| format!("invalid {field}")),
+                    _ => error
+                        .message
+                        .as_ref()
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| format!("invalid {field}")),
                 };
                 messages.push(msg);
             }
@@ -204,24 +219,34 @@ pub async fn create_collection(
 
     // Valida a configuração
     if config.dimension == 0 {
-        return Err(ApiError::invalid_payload("dimension must be greater than 0"));
+        return Err(ApiError::invalid_payload(
+            "dimension must be greater than 0",
+        ));
     }
 
     // Cria a nova coleção
     let collection = Collection::new(config.clone());
     let collection_arc = Arc::new(RwLock::new(collection));
-    
+
     // Insere no mapa de coleções
-    app_state.collections.insert(payload.name.clone(), collection_arc.clone());
+    app_state
+        .collections
+        .insert(payload.name.clone(), collection_arc.clone());
 
     // Inicializa estatísticas de queries para a nova coleção
-    app_state.query_stats.insert(payload.name.clone(), crate::state::QueryStats::new());
+    app_state
+        .query_stats
+        .insert(payload.name.clone(), crate::state::QueryStats::new());
 
     // Atualiza gauge de coleções ativas
     crate::metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
 
     // Salva no disco
-    let collection_dir = app_state.config.storage_path.join("collections").join(&payload.name);
+    let collection_dir = app_state
+        .config
+        .storage_path
+        .join("collections")
+        .join(&payload.name);
     {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
         FileStorage::save_collection(
@@ -242,9 +267,13 @@ pub async fn create_collection(
     // Audit trail
     {
         let entry = audit::audit_entry(
-            &user.username, "create_collection", &format!("collection:{}", config.name),
+            &user.username,
+            "create_collection",
+            &format!("collection:{}", config.name),
             serde_json::json!({"dimension": config.dimension}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
     }
@@ -289,9 +318,10 @@ pub async fn list_collections(
 
         let config = collection.config();
         let num_points = collection.len();
-        
+
         // Calcula created_at a partir do ponto mais antigo (se houver)
-        let created_at = collection.points_owned()
+        let created_at = collection
+            .points_owned()
             .iter()
             .map(|p| p.created_at)
             .min()
@@ -322,16 +352,19 @@ pub async fn get_collection(
     State(app_state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<GetCollectionResponse>> {
-    let collection_arc = app_state.collections.get(&name)
+    let collection_arc = app_state
+        .collections
+        .get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
 
     let config = collection.config();
     let num_points = collection.len();
-    
+
     // Calcula last_updated a partir do ponto mais recente (se houver)
-    let last_updated = collection.points_owned()
+    let last_updated = collection
+        .points_owned()
         .iter()
         .map(|p| p.created_at)
         .max()
@@ -351,9 +384,7 @@ pub async fn get_collection(
         num_points,
         last_updated,
         distance: config.distance,
-        stats: CollectionStatsResponse {
-            index_size_bytes,
-        },
+        stats: CollectionStatsResponse { index_size_bytes },
         quantization: config.quantization.clone(),
         enable_bm25: config.enable_bm25,
         bm25_text_field: config.bm25_text_field.clone(),
@@ -374,9 +405,13 @@ pub async fn delete_collection(
     let perm_result = check_user_permission(&user, &name, &Action::Delete);
     if !perm_result.is_allowed() {
         let entry = audit::audit_entry(
-            &user.username, "delete_collection", &format!("collection:{name}"),
+            &user.username,
+            "delete_collection",
+            &format!("collection:{name}"),
             serde_json::json!({"denied": true}),
-            AuditResult::Denied, None, None,
+            AuditResult::Denied,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
@@ -385,7 +420,9 @@ pub async fn delete_collection(
     }
 
     // Remove do mapa de coleções
-    let collection_arc = app_state.collections.remove(&name)
+    let collection_arc = app_state
+        .collections
+        .remove(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     // Remove estatísticas de queries
@@ -395,7 +432,11 @@ pub async fn delete_collection(
     crate::metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
 
     // Remove do disco
-    let collection_dir = app_state.config.storage_path.join("collections").join(&name);
+    let collection_dir = app_state
+        .config
+        .storage_path
+        .join("collections")
+        .join(&name);
     if collection_dir.exists() {
         api_err!(
             std::fs::remove_dir_all(&collection_dir),
@@ -409,9 +450,13 @@ pub async fn delete_collection(
     // Audit trail
     {
         let entry = audit::audit_entry(
-            &user.username, "delete_collection", &format!("collection:{name}"),
+            &user.username,
+            "delete_collection",
+            &format!("collection:{name}"),
             serde_json::json!({}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
     }
@@ -431,9 +476,13 @@ pub async fn patch_collection_retention(
     let perm_result = check_user_permission(&user, &name, &Action::Admin);
     if !perm_result.is_allowed() {
         let entry = audit::audit_entry(
-            &user.username, "patch_collection_retention", &format!("collection:{name}"),
+            &user.username,
+            "patch_collection_retention",
+            &format!("collection:{name}"),
             serde_json::json!({"denied": true}),
-            AuditResult::Denied, None, None,
+            AuditResult::Denied,
+            None,
+            None,
         );
         app_state.audit_logger.log(&entry);
         return Err(ApiError::forbidden(format!(
@@ -441,7 +490,9 @@ pub async fn patch_collection_retention(
         )));
     }
 
-    let collection_arc = app_state.collections.get(&name)
+    let collection_arc = app_state
+        .collections
+        .get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     {
@@ -449,17 +500,24 @@ pub async fn patch_collection_retention(
         coll.set_retention_days(body.retention_days);
     }
 
-    let collection_dir = app_state.config.storage_path.join("collections").join(&name);
+    let collection_dir = app_state
+        .config
+        .storage_path
+        .join("collections")
+        .join(&name);
     {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
-        app_state.storage_circuit_breaker.call(|| {
-            FileStorage::save_collection(
-                &collection,
-                &collection_dir,
-                app_state.config.binary_snapshot,
-                app_state.config.namespace_physical_isolation,
-            )
-        }).map_err(ApiError::from)?;
+        app_state
+            .storage_circuit_breaker
+            .call(|| {
+                FileStorage::save_collection(
+                    &collection,
+                    &collection_dir,
+                    app_state.config.binary_snapshot,
+                    app_state.config.namespace_physical_isolation,
+                )
+            })
+            .map_err(ApiError::from)?;
     }
     {
         let coll = api_err!(collection_arc.write(), "failed to acquire write lock")?;
@@ -467,9 +525,13 @@ pub async fn patch_collection_retention(
     }
 
     let entry = audit::audit_entry(
-        &user.username, "patch_collection_retention", &format!("collection:{name}"),
+        &user.username,
+        "patch_collection_retention",
+        &format!("collection:{name}"),
         serde_json::json!({ "retention_days": body.retention_days }),
-        AuditResult::Success, None, None,
+        AuditResult::Success,
+        None,
+        None,
     );
     app_state.audit_logger.log(&entry);
 
@@ -494,7 +556,9 @@ pub async fn get_tier_distribution(
     State(app_state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<TierDistributionResponse>> {
-    let collection_arc = app_state.collections.get(&name)
+    let collection_arc = app_state
+        .collections
+        .get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
     let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;

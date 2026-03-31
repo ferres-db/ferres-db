@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
 
-use crate::auth::{AuthenticatedUser, RequireAdmin};
 use crate::audit::{self, AuditResult};
+use crate::auth::{AuthenticatedUser, RequireAdmin};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -123,11 +123,14 @@ pub async fn restore_to_timestamp(
 
     (
         axum::http::StatusCode::OK,
-        Json(serde_json::to_value(RestoreResponse {
-            ok: errors.is_empty(),
-            restored,
-            errors,
-        }).unwrap_or(json!({ "ok": true, "restored": [], "errors": [] }))),
+        Json(
+            serde_json::to_value(RestoreResponse {
+                ok: errors.is_empty(),
+                restored,
+                errors,
+            })
+            .unwrap_or(json!({ "ok": true, "restored": [], "errors": [] })),
+        ),
     )
         .into_response()
 }
@@ -155,7 +158,10 @@ pub async fn get_restore_points(
                 .collect();
             (
                 axum::http::StatusCode::OK,
-                Json(serde_json::to_value(RestorePointsResponse { collections }).unwrap_or(json!({ "collections": {} }))),
+                Json(
+                    serde_json::to_value(RestorePointsResponse { collections })
+                        .unwrap_or(json!({ "collections": {} })),
+                ),
             )
                 .into_response()
         }

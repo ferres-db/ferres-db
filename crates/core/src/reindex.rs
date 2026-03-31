@@ -161,11 +161,8 @@ pub fn build_new_index(
     config: &CollectionConfig,
     points: &[Point],
 ) -> Result<Box<dyn ANNIndex>, FerresError> {
-    let mut new_index = create_ann_index(
-        config.distance,
-        config.hnsw.clone(),
-        &config.quantization,
-    );
+    let mut new_index =
+        create_ann_index(config.distance, config.hnsw.clone(), &config.quantization);
     new_index.build(points)?;
     Ok(new_index)
 }
@@ -332,8 +329,7 @@ mod tests {
             make_point("a", vec![1.0, 0.0, 0.0]),
             make_point("b", vec![0.0, 1.0, 0.0]),
         ];
-        let snapshot_ids: HashSet<String> =
-            snapshot_points.iter().map(|p| p.id.clone()).collect();
+        let snapshot_ids: HashSet<String> = snapshot_points.iter().map(|p| p.id.clone()).collect();
 
         let mut new_index = build_new_index(&config, &snapshot_points).unwrap();
 
@@ -343,8 +339,7 @@ mod tests {
         current_points.insert("b".to_string(), make_point("b", vec![0.0, 1.0, 0.0]));
         current_points.insert("c".to_string(), make_point("c", vec![0.0, 0.0, 1.0]));
 
-        let (added, removed) =
-            apply_delta(&mut new_index, &snapshot_ids, &current_points).unwrap();
+        let (added, removed) = apply_delta(&mut new_index, &snapshot_ids, &current_points).unwrap();
         assert_eq!(added, 1);
         assert_eq!(removed, 0);
 
@@ -361,8 +356,7 @@ mod tests {
             make_point("b", vec![0.0, 1.0, 0.0]),
             make_point("c", vec![0.0, 0.0, 1.0]),
         ];
-        let snapshot_ids: HashSet<String> =
-            snapshot_points.iter().map(|p| p.id.clone()).collect();
+        let snapshot_ids: HashSet<String> = snapshot_points.iter().map(|p| p.id.clone()).collect();
 
         let mut new_index = build_new_index(&config, &snapshot_points).unwrap();
 
@@ -371,8 +365,7 @@ mod tests {
         current_points.insert("a".to_string(), make_point("a", vec![1.0, 0.0, 0.0]));
         current_points.insert("c".to_string(), make_point("c", vec![0.0, 0.0, 1.0]));
 
-        let (added, removed) =
-            apply_delta(&mut new_index, &snapshot_ids, &current_points).unwrap();
+        let (added, removed) = apply_delta(&mut new_index, &snapshot_ids, &current_points).unwrap();
         assert_eq!(added, 0);
         assert_eq!(removed, 1);
     }
@@ -410,7 +403,10 @@ mod tests {
 
         // Remove a point (creates tombstone in the index)
         col.remove("b").unwrap();
-        assert!(col.tombstone_count() > 0, "should have tombstones after remove");
+        assert!(
+            col.tombstone_count() > 0,
+            "should have tombstones after remove"
+        );
 
         // Build new index from current points (simulates reindex)
         let current_points: Vec<Point> = col.points_owned();
@@ -420,7 +416,11 @@ mod tests {
         col.swap_index(new_index);
 
         // After swap, tombstones should be 0
-        assert_eq!(col.tombstone_count(), 0, "tombstones should be 0 after reindex");
+        assert_eq!(
+            col.tombstone_count(),
+            0,
+            "tombstones should be 0 after reindex"
+        );
 
         // Search should still work
         let results = col.search(&[1.0, 0.0, 0.0], 3, None, None).unwrap();
@@ -448,7 +448,10 @@ mod tests {
 
         // Meanwhile, search should still work on old index
         let results = col.search(&[1.0, 0.0, 0.0], 5, None, None).unwrap();
-        assert!(!results.is_empty(), "search should work during reindex build");
+        assert!(
+            !results.is_empty(),
+            "search should work during reindex build"
+        );
 
         // Swap
         col.swap_index(new_index);
@@ -490,12 +493,18 @@ mod tests {
         // Verify: "c" (added during build) should appear
         let results = col.search(&[0.0, 0.0, 1.0], 5, None, None).unwrap();
         let ids: Vec<&str> = results.iter().map(|r| r.0.as_str()).collect();
-        assert!(ids.contains(&"c"), "point added during reindex should appear after swap");
+        assert!(
+            ids.contains(&"c"),
+            "point added during reindex should appear after swap"
+        );
 
         // "b" (removed during build) should NOT appear
         let all_results = col.search(&[0.0, 1.0, 0.0], 5, None, None).unwrap();
         let all_ids: Vec<&str> = all_results.iter().map(|r| r.0.as_str()).collect();
-        assert!(!all_ids.contains(&"b"), "point removed during reindex should not appear");
+        assert!(
+            !all_ids.contains(&"b"),
+            "point removed during reindex should not appear"
+        );
 
         // "a" should still be there
         assert!(col.get("a").is_some());

@@ -422,7 +422,12 @@ impl ScalarQuantizationParams {
         let sample: Vec<&[f32]> = if vectors.len() > MAX_CALIBRATION_SAMPLE {
             // Amostra uniforme: pega a cada `step` vetores
             let step = vectors.len() / MAX_CALIBRATION_SAMPLE;
-            vectors.iter().step_by(step).take(MAX_CALIBRATION_SAMPLE).copied().collect()
+            vectors
+                .iter()
+                .step_by(step)
+                .take(MAX_CALIBRATION_SAMPLE)
+                .copied()
+                .collect()
         } else {
             vectors.to_vec()
         };
@@ -533,7 +538,10 @@ impl ScalarQuantizationParams {
                     },
                     DistanceMetric::Cosine => unsafe {
                         asym_simd::asymmetric_cosine_avx2(
-                            query, quantized, &self.mins, &self.scales,
+                            query,
+                            quantized,
+                            &self.mins,
+                            &self.scales,
                         )
                     },
                 };
@@ -548,7 +556,10 @@ impl ScalarQuantizationParams {
                     },
                     DistanceMetric::Cosine => unsafe {
                         asym_simd::asymmetric_cosine_sse41(
-                            query, quantized, &self.mins, &self.scales,
+                            query,
+                            quantized,
+                            &self.mins,
+                            &self.scales,
                         )
                     },
                 };
@@ -636,16 +647,40 @@ mod tests {
         assert_eq!(params.dimension(), 3);
 
         // Dim 0: min=0, max=4
-        assert!((params.mins[0] - 0.0).abs() < 0.01, "min[0]={}", params.mins[0]);
-        assert!((params.maxs[0] - 4.0).abs() < 0.01, "max[0]={}", params.maxs[0]);
+        assert!(
+            (params.mins[0] - 0.0).abs() < 0.01,
+            "min[0]={}",
+            params.mins[0]
+        );
+        assert!(
+            (params.maxs[0] - 4.0).abs() < 0.01,
+            "max[0]={}",
+            params.maxs[0]
+        );
 
         // Dim 1: min=10, max=50
-        assert!((params.mins[1] - 10.0).abs() < 0.01, "min[1]={}", params.mins[1]);
-        assert!((params.maxs[1] - 50.0).abs() < 0.01, "max[1]={}", params.maxs[1]);
+        assert!(
+            (params.mins[1] - 10.0).abs() < 0.01,
+            "min[1]={}",
+            params.mins[1]
+        );
+        assert!(
+            (params.maxs[1] - 50.0).abs() < 0.01,
+            "max[1]={}",
+            params.maxs[1]
+        );
 
         // Dim 2: min=-5, max=5
-        assert!((params.mins[2] - (-5.0)).abs() < 0.01, "min[2]={}", params.mins[2]);
-        assert!((params.maxs[2] - 5.0).abs() < 0.01, "max[2]={}", params.maxs[2]);
+        assert!(
+            (params.mins[2] - (-5.0)).abs() < 0.01,
+            "min[2]={}",
+            params.mins[2]
+        );
+        assert!(
+            (params.maxs[2] - 5.0).abs() < 0.01,
+            "max[2]={}",
+            params.maxs[2]
+        );
 
         // Verifica scales
         assert!((params.scales[0] - 255.0 / 4.0).abs() < 0.01);
@@ -685,7 +720,11 @@ mod tests {
                 assert!(
                     relative_error < 0.01, // < 1% da faixa
                     "dim {}: original={}, dequantized={}, error={}, relative={}",
-                    d, v[d], dequantized[d], error, relative_error
+                    d,
+                    v[d],
+                    dequantized[d],
+                    error,
+                    relative_error
                 );
             }
         }
@@ -699,7 +738,7 @@ mod tests {
 
         // Memória para Vec<f32>
         let f32_bytes = n * dim * std::mem::size_of::<f32>(); // 4 bytes
-        // Memória para Vec<u8>
+                                                              // Memória para Vec<u8>
         let u8_bytes = n * dim * std::mem::size_of::<u8>(); // 1 byte
 
         // Razão de compressão
@@ -728,17 +767,11 @@ mod tests {
 
         // Distância entre v1 e v2 quantizado deve ser ~3.0 (L2²)
         let dist = params.asymmetric_distance(&v1, &q_v2, DistanceMetric::Euclidean);
-        assert!(
-            (dist - 3.0).abs() < 0.1,
-            "expected ~3.0, got {dist}"
-        );
+        assert!((dist - 3.0).abs() < 0.1, "expected ~3.0, got {dist}");
 
         // Distância entre v2 e v2 quantizado deve ser ~0.0
         let dist_self = params.asymmetric_distance(&v2, &q_v2, DistanceMetric::Euclidean);
-        assert!(
-            dist_self < 0.01,
-            "expected ~0.0, got {dist_self}"
-        );
+        assert!(dist_self < 0.01, "expected ~0.0, got {dist_self}");
     }
 
     /// Testa distância assimétrica Cosine.
@@ -754,7 +787,10 @@ mod tests {
         // Mesmo vetor: cos distance ~= 0
         let q_v1 = params.quantize(&v1);
         let dist = params.asymmetric_distance(&v1, &q_v1, DistanceMetric::Cosine);
-        assert!(dist < 0.1, "same vector cosine distance should be ~0, got {dist}");
+        assert!(
+            dist < 0.1,
+            "same vector cosine distance should be ~0, got {dist}"
+        );
 
         // Vetores ortogonais: cos distance ~= 1
         let q_v2 = params.quantize(&v2);

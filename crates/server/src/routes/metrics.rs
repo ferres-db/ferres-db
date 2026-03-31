@@ -9,4 +9,3 @@ use crate::state::AppState;
 pub fn create_metrics_routes() -> Router<AppState> {
     Router::new().route("/metrics", get(get_metrics))
 }
-

@@ -194,8 +194,14 @@ export const GraphExplorer = () => {
           </CardHeader>
           <CardContent className="flex-1 p-0 relative min-h-[400px]" ref={containerRef}>
             {initialLoading ? (
-              <div className="absolute inset-0 flex items-center justify-center bg-gray-900/50">
+              <div className="absolute inset-0 flex items-center justify-center rounded-b-xl" style={{ backgroundColor: '#2d2d2d' }}>
                 <Loader2 className="h-8 w-8 animate-spin text-orange-500" />
+              </div>
+            ) : nodes.length === 0 ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-b-xl" style={{ backgroundColor: '#2d2d2d' }}>
+                <Network className="h-12 w-12 text-gray-600" />
+                <p className="text-sm text-gray-500">No graph data found for this collection.</p>
+                <p className="text-xs text-gray-600">Insert points with graph relations to explore them here.</p>
               </div>
             ) : (
               <ForceGraph2D
@@ -209,7 +215,7 @@ export const GraphExplorer = () => {
                 linkColor="#475569"
                 linkWidth={1}
                 onNodeClick={handleNodeClick}
-                backgroundColor="rgb(15 23 42)"
+                backgroundColor="#2d2d2d"
               />
             )}
           </CardContent>

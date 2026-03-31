@@ -220,10 +220,7 @@ impl QueryLogCache {
         let mut buckets: HashMap<u64, Vec<u64>> = HashMap::new();
         for e in &entries {
             let minute = e.timestamp_secs / 60;
-            buckets
-                .entry(minute)
-                .or_default()
-                .push(e.took_ms);
+            buckets.entry(minute).or_default().push(e.took_ms);
         }
         let mut out: Vec<(u64, f64, f64)> = buckets
             .into_iter()

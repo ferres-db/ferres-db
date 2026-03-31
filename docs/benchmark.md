@@ -49,43 +49,51 @@ ferres-bench ingest --api-key <ferres-api-key> --openai-api-key <openai-key> --v
 ferres-bench ingest --vectors 100000 --dim 768 --concurrency 50
 ```
 
-| Argumento           | Default   | Descrição                                                                 |
-|---------------------|-----------|----------------------------------------------------------------------------|
-| `--api-key`         | —         | API key do FerresDB (env: `FERRESDB_API_KEY`). Ver docs/api.md.            |
-| `--vectors`         | 10000     | Número total de vetores a inserir                                          |
-| `--dim`             | —         | Dimensão (só sem OpenAI). Com OpenAI a dimensão vem do modelo.            |
-| `--concurrency`     | 50        | Número de tarefas concorrentes                                             |
-| `--collection`      | bench     | Nome da coleção (criada automaticamente se não existir)                   |
-| `--openai-api-key`  | —         | Chave OpenAI para embeddings (env: `OPENAI_API_KEY`)                       |
-| `--embedding-model` | text-embedding-3-small | Modelo OpenAI (dimensão 1536 ou 3072 para large)              |
-| `--url`             | localhost:8080 | URL base do servidor                                                  |
+| Argumento           | Default                | Descrição                                                       |
+| ------------------- | ---------------------- | --------------------------------------------------------------- |
+| `--api-key`         | —                      | API key do FerresDB (env: `FERRESDB_API_KEY`). Ver docs/api.md. |
+| `--vectors`         | 10000                  | Número total de vetores a inserir                               |
+| `--dim`             | —                      | Dimensão (só sem OpenAI). Com OpenAI a dimensão vem do modelo.  |
+| `--concurrency`     | 50                     | Número de tarefas concorrentes                                  |
+| `--collection`      | bench                  | Nome da coleção (criada automaticamente se não existir)         |
+| `--openai-api-key`  | —                      | Chave OpenAI para embeddings (env: `OPENAI_API_KEY`)            |
+| `--embedding-model` | text-embedding-3-small | Modelo OpenAI (dimensão 1536 ou 3072 para large)                |
+| `--url`             | localhost:8080         | URL base do servidor                                            |
 
 **Métricas exibidas:** throughput (vetores/seg), tempo total. Relatório Markdown ao final.
 
 ### 2. Search (Read Stress)
 
-Realiza buscas vetoriais de forma contínua por um tempo determinado. Com `--openai-api-key`, cada query é um texto ("Query about topic N...") convertido em vetor via API OpenAI antes da busca. Sem OpenAI, usa vetores aleatórios (`--dim` ou default 1536).
+Realiza buscas vetoriais de forma contínua por um tempo determinado. O modo usa uma **arquitetura de duas fases** para que a latência reportada seja **exclusivamente do FerresDB** (sem overhead de chamadas à API de embeddings dentro do loop de medição):
+
+- **Fase 1 — Preparação:** Pré-computa um pool de vetores de query. Com `--openai-api-key`, gera N textos ("Query about topic 0..N...") e chama a API de embeddings da OpenAI em batch; sem OpenAI, gera N vetores aleatórios. Nenhuma medição é feita nesta fase.
+- **Fase 2 — Benchmark:** Workers consomem vetores do pool (round-robin) e disparam apenas `POST .../search` contra o FerresDB. O timer mede só o tempo de cada requisição HTTP (ida e volta ao servidor).
+
+Assim, QPS e latência (min, avg, P50/P90/P95/P99, max) refletem apenas a capacidade do FerresDB, e não da API OpenAI. Para benchmarks representativos do FerresDB puro, pode-se usar vetores aleatórios (`--dim 1536`). O modo OpenAI garante vetores realistas, mas a geração de embeddings é pré-computada na Fase 1 e **não** afeta a medição.
 
 ```bash
-# Com API key FerresDB + OpenAI (queries com embedding real)
+# Com API key FerresDB + OpenAI (pool de embeddings pré-computado)
 ferres-bench search --api-key <ferres-api-key> --openai-api-key <openai-key> --duration 60s --concurrency 100
 
-# Vetores aleatórios
+# Vetores aleatórios (sem OpenAI)
 ferres-bench search --duration 60s --concurrency 100 --dim 768
 ```
 
-| Argumento           | Default   | Descrição                                                |
-|---------------------|-----------|----------------------------------------------------------|
-| `--api-key`         | —         | API key do FerresDB (env: `FERRESDB_API_KEY`)            |
-| `--duration`        | 60s       | Duração do teste (ex: `30s`, `2m`)                      |
-| `--concurrency`     | 100       | Número de workers concorrentes                           |
-| `--collection`      | bench     | Nome da coleção (deve existir e ter dados)              |
-| `--dim`             | —         | Dimensão do vetor de busca (com OpenAI vem do modelo)    |
-| `--openai-api-key`  | —         | Chave OpenAI para embedding das queries (env: `OPENAI_API_KEY`) |
-| `--embedding-model` | text-embedding-3-small | Modelo OpenAI                            |
-| `--url`             | localhost:8080 | URL base do servidor                              |
+| Argumento           | Default                | Descrição                                                       |
+| ------------------- | ---------------------- | --------------------------------------------------------------- |
+| `--api-key`         | —                      | API key do FerresDB (env: `FERRESDB_API_KEY`)                   |
+| `--duration`        | 60s                    | Duração do teste (ex: `30s`, `2m`)                              |
+| `--concurrency`     | 100                    | Número de workers concorrentes                                  |
+| `--collection`      | bench                  | Nome da coleção (deve existir e ter dados)                      |
+| `--dim`             | —                      | Dimensão do vetor de busca (com OpenAI vem do modelo)           |
+| `--openai-api-key`  | —                      | Chave OpenAI para embedding das queries (env: `OPENAI_API_KEY`) |
+| `--embedding-model` | text-embedding-3-small | Modelo OpenAI                                                   |
+| `--num-queries`     | 200                    | Tamanho do pool de vetores de query (pré-computados na Fase 1)  |
+| `--limit`           | 10                     | Número de resultados por busca                                  |
+| `--warmup`          | 10                     | Requisições de aquecimento (não contabilizadas) antes da Fase 2 |
+| `--url`             | localhost:8080         | URL base do servidor                                            |
 
-**Métricas exibidas:** QPS, latência média, P95 e P99 (HDR Histogram). Relatório Markdown ao final.
+**Métricas exibidas:** Query Pool, Total Requests, Successful (count e %), Duration, QPS, Latency Min/Avg/P50/P90/P95/P99/Max (HDR Histogram). Relatório Markdown ao final.
 
 ### 3. Chaos (Mixed)
 
@@ -95,13 +103,13 @@ Executa escritas, leituras e criações de coleção **simultaneamente** para te
 ferres-bench chaos --duration 30s --writers 20 --readers 50
 ```
 
-| Argumento    | Default | Descrição                              |
-|--------------|---------|----------------------------------------|
-| `--duration` | 30s     | Duração do teste                       |
-| `--writers`  | 20      | Número de workers de escrita           |
-| `--readers`  | 50      | Número de workers de leitura           |
-| `--dim`      | 768     | Dimensão dos vetores                    |
-| `--url`      | localhost:8080 | URL base do servidor               |
+| Argumento    | Default        | Descrição                    |
+| ------------ | -------------- | ---------------------------- |
+| `--duration` | 30s            | Duração do teste             |
+| `--writers`  | 20             | Número de workers de escrita |
+| `--readers`  | 50             | Número de workers de leitura |
+| `--dim`      | 768            | Dimensão dos vetores         |
+| `--url`      | localhost:8080 | URL base do servidor         |
 
 **Métricas exibidas:** total de pontos escritos, total de buscas, coleções criadas. Relatório Markdown ao final.
 
@@ -116,12 +124,18 @@ Ao final da execução, a ferramenta imprime um bloco em Markdown, por exemplo:
 | Metric | Value |
 |--------|-------|
 | Mode | Search (Read Stress) |
+| Query Pool | 200 vectors (OpenAI text-embedding-3-small) |
 | Total Requests | 95,230 |
+| Successful | 95,230 (100.0%) |
 | Duration | 15.02s |
 | QPS | 6,342 |
+| Latency Min | 2.10ms |
 | Latency Avg | 12.50ms |
+| Latency P50 | 11.20ms |
+| Latency P90 | 16.80ms |
 | Latency P95 | 18.20ms |
 | Latency P99 | 24.10ms |
+| Latency Max | 45.00ms |
 
 ---
 ```

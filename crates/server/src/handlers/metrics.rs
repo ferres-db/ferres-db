@@ -1,8 +1,8 @@
 //! # Metrics Handler — handler para endpoint de métricas Prometheus
 
-use axum::response::Response;
-use axum::http::StatusCode;
 use axum::body::Body;
+use axum::http::StatusCode;
+use axum::response::Response;
 
 use crate::metrics::gather_metrics;
 
@@ -17,4 +17,3 @@ pub async fn get_metrics() -> Response<Body> {
         .body(Body::from(metrics))
         .unwrap()
 }
-

@@ -1,21 +1,25 @@
 use std::net::SocketAddr;
 use tokio::time::{interval, Duration};
-use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt, Registry, Layer};
-use tracing_appender::{non_blocking, rolling};
 use tower_http::cors::CorsLayer;
+use tracing::{error, info, warn};
+use tracing_appender::{non_blocking, rolling};
+use tracing_subscriber::{
+    fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer, Registry,
+};
 
-use std::sync::Arc;
 use ferres_db_server::api_keys::ApiKeyStore;
 use ferres_db_server::auth;
 use ferres_db_server::cloud_settings::CloudSettingsStore;
+use ferres_db_server::handlers::reindex::{
+    run_auto_reindex_cycle, run_auto_vacuum_cycle, run_retention_cycle,
+};
+use ferres_db_server::handlers::stats::run_hnsw_auto_tune_cycle;
+use ferres_db_server::metrics;
+use ferres_db_server::middleware;
+use ferres_db_server::routes;
 use ferres_db_server::state::{AppState, ServerConfig};
 use ferres_db_server::users::UserStore;
-use ferres_db_server::handlers::reindex::{run_auto_reindex_cycle, run_auto_vacuum_cycle, run_retention_cycle};
-use ferres_db_server::handlers::stats::run_hnsw_auto_tune_cycle;
-use ferres_db_server::routes;
-use ferres_db_server::middleware;
-use ferres_db_server::metrics;
+use std::sync::Arc;
 
 fn enable_mcp() -> bool {
     std::env::args().any(|a| a == "--mcp")
@@ -25,8 +29,27 @@ fn enable_mcp() -> bool {
             .unwrap_or(false)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Stack size for runtime threads (workers and blocking pool). Larger than default to avoid
+/// STATUS_STACK_BUFFER_OVERRUN when many concurrent searches run in spawn_blocking (HNSW + tracing).
+/// 8 MiB gives comfortable headroom for deep HNSW traversal + tracing frames in release builds.
+const RUNTIME_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
+
+/// Maximum number of threads in the blocking pool. Prevents unbounded thread
+/// creation under high-concurrency `spawn_blocking` (HNSW search). When all
+/// threads are busy, new blocking tasks queue until a thread becomes available,
+/// which provides natural back-pressure instead of spawning thousands of threads.
+const MAX_BLOCKING_THREADS: usize = 128;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(RUNTIME_THREAD_STACK_SIZE)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .enable_all()
+        .build()?;
+    rt.block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Carrega .env do diretório atual ou do workspace (para FERRESDB_API_KEYS, etc.)
     dotenvy::dotenv().ok();
 
@@ -52,14 +75,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (non_blocking_appender, file_guard) = non_blocking(file_appender);
 
     // Configura subscriber com JSON format para arquivo e texto para console
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&log_level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level));
 
     // Layer para arquivo (JSON); clone para poder usar também no branch OTel
     let file_layer = fmt::layer()
         .with_writer(non_blocking_appender.clone())
         .json()
         .with_filter(env_filter.clone());
+
+    // Configura writers non-blocking para stdout/stderr
+    let (stdout_non_blocking, stdout_guard) = non_blocking(std::io::stdout());
+    let (stderr_non_blocking, stderr_guard) = non_blocking(std::io::stderr());
 
     // Inicializa o subscriber (com layer OTel quando feature "otel" e init ok).
     // Com MCP ativo, console usa stderr para não corromper o protocolo MCP em stdout.
@@ -68,12 +95,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if use_stderr_console {
             Registry::default()
                 .with(file_layer)
-                .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                .with(
+                    fmt::layer()
+                        .with_writer(stderr_non_blocking)
+                        .with_filter(EnvFilter::new("info")),
+                )
                 .init();
         } else {
             Registry::default()
                 .with(file_layer)
-                .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                .with(
+                    fmt::layer()
+                        .with_writer(stdout_non_blocking)
+                        .with_filter(EnvFilter::new("info")),
+                )
                 .init();
         }
     }
@@ -86,14 +121,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if use_stderr_console {
                     Registry::default()
                         .with(otel_layer)
-                        .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
-                        .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                        .with(
+                            fmt::layer()
+                                .with_writer(non_blocking_appender)
+                                .json()
+                                .with_filter(env_filter.clone()),
+                        )
+                        .with(
+                            fmt::layer()
+                                .with_writer(stderr_non_blocking)
+                                .with_filter(EnvFilter::new("info")),
+                        )
                         .init();
                 } else {
                     Registry::default()
                         .with(otel_layer)
-                        .with(fmt::layer().with_writer(non_blocking_appender).json().with_filter(env_filter.clone()))
-                        .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                        .with(
+                            fmt::layer()
+                                .with_writer(non_blocking_appender)
+                                .json()
+                                .with_filter(env_filter.clone()),
+                        )
+                        .with(
+                            fmt::layer()
+                                .with_writer(stdout_non_blocking)
+                                .with_filter(EnvFilter::new("info")),
+                        )
                         .init();
                 }
                 info!("OpenTelemetry tracing enabled (OTLP)");
@@ -103,26 +156,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if use_stderr_console {
                     Registry::default()
                         .with(file_layer)
-                        .with(fmt::layer().with_writer(std::io::stderr).with_filter(EnvFilter::new("info")))
+                        .with(
+                            fmt::layer()
+                                .with_writer(stderr_non_blocking)
+                                .with_filter(EnvFilter::new("info")),
+                        )
                         .init();
                 } else {
                     Registry::default()
                         .with(file_layer)
-                        .with(fmt::layer().with_writer(std::io::stdout).with_filter(EnvFilter::new("info")))
+                        .with(
+                            fmt::layer()
+                                .with_writer(stdout_non_blocking)
+                                .with_filter(EnvFilter::new("info")),
+                        )
                         .init();
                 }
             }
         }
     }
 
-    // Mantém o guard vivo para garantir que logs sejam escritos
-    // O guard precisa ser mantido durante toda a execução do programa
-    // Será dropado automaticamente quando o programa terminar
+    // Mantém guards vivos para garantir que logs sejam escritos
     let _file_guard = file_guard;
+    let _stdout_guard = stdout_guard;
+    let _stderr_guard = stderr_guard;
 
     info!("FerresDB server starting...");
 
-    if config.api_keys.as_ref().map_or(true, |s| s.trim().is_empty()) {
+    if config
+        .api_keys
+        .as_ref()
+        .map_or(true, |s| s.trim().is_empty())
+    {
         warn!(
             "No API keys configured. Set api_keys in config.toml or FERRESDB_API_KEYS env; \
              all protected routes will return 403 Invalid API key."
@@ -132,13 +197,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Inicializa store de API keys (SQLite) e opcionalmente chaves bootstrap do config/env
     let api_keys_path = config.storage_path.join("api_keys.db");
     let api_key_store = ApiKeyStore::new(&api_keys_path).map_err(|e| {
-        eprintln!("Failed to open API key store at {}: {}", api_keys_path.display(), e);
+        eprintln!(
+            "Failed to open API key store at {}: {}",
+            api_keys_path.display(),
+            e
+        );
         e
     })?;
-    api_key_store.init(config.api_keys.as_deref()).map_err(|e| {
-        eprintln!("Failed to initialize API key store: {e}");
-        e
-    })?;
+    api_key_store
+        .init(config.api_keys.as_deref())
+        .map_err(|e| {
+            eprintln!("Failed to initialize API key store: {e}");
+            e
+        })?;
     let api_key_store = Some(Arc::new(api_key_store));
     info!("API key store initialized (multi-key support enabled)");
     ferres_db_server::api_keys::set_global_store(api_key_store.clone());
@@ -149,7 +220,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Store de usuários do dashboard (SQLite) e usuário padrão root/ferresdb
     let users_path = config.storage_path.join("users.db");
     let user_store = UserStore::new(&users_path).map_err(|e| {
-        eprintln!("Failed to open user store at {}: {}", users_path.display(), e);
+        eprintln!(
+            "Failed to open user store at {}: {}",
+            users_path.display(),
+            e
+        );
         e
     })?;
     user_store.ensure_default_user().map_err(|e| {
@@ -162,7 +237,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cloud (S3) settings from dashboard (SQLite)
     let cloud_settings_path = config.storage_path.join("cloud_settings.db");
     let cloud_settings_store = CloudSettingsStore::new(&cloud_settings_path).map_err(|e| {
-        eprintln!("Failed to open cloud settings store at {}: {}", cloud_settings_path.display(), e);
+        eprintln!(
+            "Failed to open cloud settings store at {}: {}",
+            cloud_settings_path.display(),
+            e
+        );
         e
     })?;
     let cloud_settings_store = Some(Arc::new(cloud_settings_store));
@@ -199,17 +278,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reranker = None;
 
     // Inicializa AppState (com store de API keys, usuários e cloud settings)
-    let app_state = AppState::new(config.clone(), api_key_store, user_store, cloud_settings_store, reranker)
-        .map_err(|e| {
-            error!(error = %e, "failed to initialize collections");
-            e
-        })?;
+    let app_state = AppState::new(
+        config.clone(),
+        api_key_store,
+        user_store,
+        cloud_settings_store,
+        reranker,
+    )
+    .map_err(|e| {
+        error!(error = %e, "failed to initialize collections");
+        e
+    })?;
 
     // Atualiza gauge de coleções ativas
     metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
 
+    // Start background drain for global query stats (non-blocking record path)
+    app_state.global_query_stats.start_background_drain();
+
     // Warmup: reexecuta últimas 50 queries do log em background para carregar HNSW e search_cache
-    ferres_db_server::warmup::spawn_warmup_task(app_state.clone());
+    // ferres_db_server::warmup::spawn_warmup_task(app_state.clone());
 
     // Log do status de aceleração SIMD no startup
     let simd = ferres_db_core::simd_enabled();
@@ -238,9 +326,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::select! {
                 _ = interval.tick() => {
                     if !is_shutting_down.load(std::sync::atomic::Ordering::Acquire) {
-                        if let Err(e) = app_state_for_save.save_dirty_collections() {
-                            warn!(error = %e, "failed to auto-save collections");
-                        }
+                        let state = app_state_for_save.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Err(e) = state.save_dirty_collections() {
+                                warn!(error = %e, "failed to auto-save collections");
+                            }
+                        })
+                        .await;
                     }
                 }
                 _ = shutdown_notify_for_task.notified() => {
@@ -294,7 +386,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::select! {
                 _ = vacuum_interval.tick() => {
                     if !is_shutting_down_vacuum.load(std::sync::atomic::Ordering::Acquire) {
-                        run_auto_vacuum_cycle(&app_state_for_vacuum);
+                        let state = app_state_for_vacuum.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            run_auto_vacuum_cycle(&state);
+                        })
+                        .await;
                     }
                 }
                 _ = shutdown_notify_vacuum.notified() => {
@@ -316,7 +412,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::select! {
                 _ = retention_interval.tick() => {
                     if !is_shutting_down_retention.load(std::sync::atomic::Ordering::Acquire) {
-                        run_retention_cycle(&app_state_retention);
+                        let state = app_state_retention.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            run_retention_cycle(&state);
+                        }).await;
                     }
                 }
                 _ = shutdown_notify_retention.notified() => {
@@ -338,7 +437,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::select! {
                 _ = auto_tune_interval.tick() => {
                     if !is_shutting_down_auto_tune.load(std::sync::atomic::Ordering::Acquire) {
-                        run_hnsw_auto_tune_cycle(&app_state_auto_tune);
+                        let state = app_state_auto_tune.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            run_hnsw_auto_tune_cycle(&state);
+                        }).await;
                     }
                 }
                 _ = shutdown_notify_auto_tune.notified() => {
@@ -354,7 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configura CORS: CORS_ORIGINS (vírgula) em runtime; senão aceita qualquer localhost/127.0.0.1 (qualquer porta)
     use axum::http::request::Parts as RequestParts;
-    use axum::http::{Method, HeaderValue};
+    use axum::http::{HeaderValue, Method};
     let cors_origin = match std::env::var("CORS_ORIGINS") {
         Ok(s) => {
             let origins: Vec<HeaderValue> = s
@@ -365,8 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tower_http::cors::AllowOrigin::predicate(
                     |origin: &HeaderValue, _: &RequestParts| {
                         origin.to_str().map_or(false, |s| {
-                            s.starts_with("http://localhost:")
-                                || s.starts_with("http://127.0.0.1:")
+                            s.starts_with("http://localhost:") || s.starts_with("http://127.0.0.1:")
                         })
                     },
                 )
@@ -374,14 +475,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tower_http::cors::AllowOrigin::list(origins)
             }
         }
-        Err(_) => tower_http::cors::AllowOrigin::predicate(
-            |origin: &HeaderValue, _: &RequestParts| {
+        Err(_) => {
+            tower_http::cors::AllowOrigin::predicate(|origin: &HeaderValue, _: &RequestParts| {
                 origin.to_str().map_or(false, |s| {
-                    s.starts_with("http://localhost:")
-                        || s.starts_with("http://127.0.0.1:")
+                    s.starts_with("http://localhost:") || s.starts_with("http://127.0.0.1:")
                 })
-            },
-        ),
+            })
+        }
     };
     let cors = CorsLayer::new()
         .allow_origin(cors_origin)
@@ -402,7 +502,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .allow_credentials(true);
 
     // Cria o router com todas as rotas da API
-    let app = routes::create_router()
+    let app = routes::create_router(&config)
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::replica_write_guard,
@@ -466,7 +566,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     #[cfg(not(unix))]
     let shutdown = async {
-        tokio::signal::ctrl_c().await.expect("failed to listen for Ctrl+C");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for Ctrl+C");
     };
 
     tokio::select! {

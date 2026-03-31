@@ -6,20 +6,20 @@
 use std::io::Write;
 use std::path::Path;
 
-use axum::response::IntoResponse;
-use axum::{extract::State, response::Json};
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
+use axum::response::IntoResponse;
+use axum::{extract::State, response::Json};
 use chrono::Utc;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::json;
 use tracing::info;
 
-use crate::auth::{AuthenticatedUser, RequireAdmin};
 use crate::audit::{self, AuditResult};
+use crate::auth::{AuthenticatedUser, RequireAdmin};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -127,13 +127,7 @@ pub async fn build_s3_client(
     let s3_config = aws_config::defaults(BehaviorVersion::latest())
         .region(aws_config::Region::new(region.to_string()));
     let s3_config = if let (Some(ak), Some(sk)) = (access_key_id, secret_access_key) {
-        s3_config.credentials_provider(Credentials::new(
-            ak,
-            sk,
-            None,
-            None,
-            "ferresdb-s3",
-        ))
+        s3_config.credentials_provider(Credentials::new(ak, sk, None, None, "ferresdb-s3"))
     } else {
         s3_config
     };
@@ -192,7 +186,8 @@ pub async fn backup_to_s3(
     }
 
     let storage_path = app_state.config.storage_path.clone();
-    let tar_gz_bytes = match tokio::task::spawn_blocking(move || create_tar_gz(&storage_path)).await {
+    let tar_gz_bytes = match tokio::task::spawn_blocking(move || create_tar_gz(&storage_path)).await
+    {
         Ok(Ok(data)) => data,
         Ok(Err(e)) => {
             return ApiError::internal_error(format!("failed to create backup archive: {e}"))
@@ -268,7 +263,9 @@ pub async fn backup_to_s3(
     };
     (
         axum::http::StatusCode::OK,
-        Json(serde_json::to_value(response).unwrap_or(json!({ "ok": true, "key": key, "bucket": bucket, "size_bytes": size_bytes }))),
+        Json(serde_json::to_value(response).unwrap_or(
+            json!({ "ok": true, "key": key, "bucket": bucket, "size_bytes": size_bytes }),
+        )),
     )
         .into_response()
 }
