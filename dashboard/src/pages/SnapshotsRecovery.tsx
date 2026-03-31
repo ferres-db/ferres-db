@@ -183,7 +183,7 @@ export const SnapshotsRecovery = () => {
                       <TableCell className="text-gray-300">
                         {formatTs(p.last_snapshot_timestamp)}
                         {p.last_snapshot_timestamp ? (
-                          <Badge variant="secondary" className="ml-2 text-xs">
+                          <Badge variant="default" className="ml-2 text-xs">
                             {p.last_snapshot_timestamp}
                           </Badge>
                         ) : null}

@@ -189,13 +189,20 @@ export const collectionsApi = {
     };
 
     if (options?.quantization && options.quantization !== "none") {
-      body.quantization = {
-        Scalar: {
-          dtype: "Int8",
-          always_ram: (options.quantization as any).always_ram ?? false,
-          quantile: (options.quantization as any).quantile ?? 0.99,
-        },
-      };
+      const q = options.quantization as any;
+      if (q.type === "polar") {
+        body.quantization = {
+          Polar: { bits_per_angle: q.bits_per_angle ?? 8 },
+        };
+      } else {
+        body.quantization = {
+          Scalar: {
+            dtype: "Int8",
+            always_ram: q.always_ram ?? false,
+            quantile: q.quantile ?? 0.99,
+          },
+        };
+      }
     }
     if (options?.enable_bm25) {
       body.enable_bm25 = true;
@@ -494,15 +501,22 @@ export const usersApi = {
 export const graphApi = {
   getSubgraph: async (
     collection: string,
-    options?: { seed?: string; center_id?: string; depth?: number; limit?: number }
+    options?: {
+      seed?: string;
+      center_id?: string;
+      depth?: number;
+      limit?: number;
+    },
   ): Promise<SubgraphResponse> => {
     const params = new URLSearchParams();
     if (options?.seed != null && options.seed !== "")
       params.append("seed", options.seed);
     if (options?.center_id != null && options.center_id !== "")
       params.append("center_id", options.center_id);
-    if (options?.depth != null) params.append("depth", options.depth.toString());
-    if (options?.limit != null) params.append("limit", options.limit.toString());
+    if (options?.depth != null)
+      params.append("depth", options.depth.toString());
+    if (options?.limit != null)
+      params.append("limit", options.limit.toString());
     const queryString = params.toString();
     const url = `/api/v1/collections/${encodeURIComponent(collection)}/graph/subgraph${queryString ? `?${queryString}` : ""}`;
     const response = await apiClient.get<SubgraphResponse>(url);

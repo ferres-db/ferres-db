@@ -11,7 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Plus, Trash2, Filter } from 'lucide-react';
-import type { QuantizationConfig, TieredStorageConfig } from '@/types';
+import type { QuantizationConfig, PolarQuantizationConfig, TieredStorageConfig } from '@/types';
 
 export const Collections = () => {
   const navigate = useNavigate();
@@ -30,10 +30,16 @@ export const Collections = () => {
   const [newVectorSize, setNewVectorSize] = useState('128');
   const [newDistanceMetric, setNewDistanceMetric] = useState('cosine');
 
-  // SQ8 Quantization
-  const [enableQuantization, setEnableQuantization] = useState(false);
+  // Quantization
+  const [quantizationType, setQuantizationType] = useState<'none' | 'sq8' | 'polar'>('none');
+  // SQ8 options
   const [alwaysRam, setAlwaysRam] = useState(false);
   const [quantile, setQuantile] = useState('0.99');
+  // QJL options (residual correction for SQ8)
+  const [enableQjl, setEnableQjl] = useState(false);
+  const [qjlM, setQjlM] = useState('64');
+  // PolarQuant options
+  const [bitsPerAngle, setBitsPerAngle] = useState('8');
 
   // BM25
   const [enableBm25, setEnableBm25] = useState(false);
@@ -49,13 +55,21 @@ export const Collections = () => {
     if (!newCollectionName || !newVectorSize) return;
 
     let quantization: QuantizationConfig | undefined;
-    if (enableQuantization) {
+    if (quantizationType === 'sq8') {
       quantization = {
         type: 'scalar',
         dtype: 'int8',
         always_ram: alwaysRam,
         quantile: parseFloat(quantile) || 0.99,
+        enable_qjl: enableQjl || undefined,
+        qjl_m: enableQjl ? (parseInt(qjlM) || 64) : undefined,
       };
+    } else if (quantizationType === 'polar') {
+      const pq: PolarQuantizationConfig = {
+        type: 'polar',
+        bits_per_angle: parseInt(bitsPerAngle) || 8,
+      };
+      quantization = pq;
     }
 
     let tiered_storage: TieredStorageConfig | undefined;
@@ -80,9 +94,12 @@ export const Collections = () => {
     setIsCreateModalOpen(false);
     setNewCollectionName('');
     setNewVectorSize('128');
-    setEnableQuantization(false);
+    setQuantizationType('none');
     setAlwaysRam(false);
     setQuantile('0.99');
+    setEnableQjl(false);
+    setQjlM('64');
+    setBitsPerAngle('8');
     setEnableBm25(false);
     setBm25TextField('text');
     setEnableTiered(false);
@@ -170,7 +187,14 @@ export const Collections = () => {
                     <TableCell>
                       <div className="flex gap-1 flex-wrap">
                         {(collection as any).quantization && (collection as any).quantization !== 'None' && (
-                          <Badge variant="warning" className="text-[10px]">SQ8</Badge>
+                          typeof (collection as any).quantization === 'object' && 'Polar' in (collection as any).quantization
+                            ? <Badge variant="warning" className="text-[10px]">PolarQuant</Badge>
+                            : <Badge variant="warning" className="text-[10px]">SQ8</Badge>
+                        )}
+                        {typeof (collection as any).quantization === 'object' &&
+                          'Scalar' in (collection as any).quantization &&
+                          (collection as any).quantization.Scalar?.enable_qjl && (
+                            <Badge variant="default" className="text-[10px]">QJL</Badge>
                         )}
                         {(collection as any).bm25_enabled && (
                           <Badge variant="success" className="text-[10px]">BM25</Badge>
@@ -242,21 +266,23 @@ export const Collections = () => {
             </select>
           </div>
 
-          {/* ─── SQ8 Quantization ─────────────────────────────── */}
+          {/* ─── Quantization ─────────────────────────────────── */}
           <div className="border-t border-white/[0.06] pt-4">
-            <label className="mb-3 flex cursor-pointer items-center gap-2 text-sm font-medium">
-              <input
-                type="checkbox"
-                checked={enableQuantization}
-                onChange={(e) => setEnableQuantization(e.target.checked)}
-                className="rounded border-white/[0.2] bg-white/[0.04] text-orange-500 focus:ring-orange-500"
-              />
-              Enable Scalar Quantization (SQ8)
-            </label>
-            {enableQuantization && (
-              <div className="ml-6 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.03] p-3">
+            <label className="block text-sm font-medium mb-2">Vector Quantization</label>
+            <select
+              className="flex h-9 w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-sm text-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/60 [&>option]:bg-bg-secondary [&>option]:text-gray-50"
+              value={quantizationType}
+              onChange={(e) => setQuantizationType(e.target.value as 'none' | 'sq8' | 'polar')}
+            >
+              <option value="none">None (full f32)</option>
+              <option value="sq8">SQ8 — Scalar Quantization</option>
+              <option value="polar">PolarQuant — Polar Coordinates</option>
+            </select>
+
+            {quantizationType === 'sq8' && (
+              <div className="mt-3 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.03] p-3">
                 <p className="text-xs text-gray-400">
-                  Compresses f32 vectors to u8 (~4x memory savings) with minimal recall loss.
+                  Compresses f32 → u8 per dimension (~4× memory). Requires calibration on existing data.
                 </p>
                 <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
                   <input
@@ -283,6 +309,66 @@ export const Collections = () => {
                   <div className="flex justify-between text-[10px] text-gray-500">
                     <span>0.90</span>
                     <span>1.00</span>
+                  </div>
+                </div>
+                <div className="border-t border-white/[0.06] pt-2">
+                  <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={enableQjl}
+                      onChange={(e) => setEnableQjl(e.target.checked)}
+                      className="rounded border-white/[0.2] bg-white/[0.04] text-orange-500 focus:ring-orange-500"
+                    />
+                    Enable QJL residual correction (improves recall)
+                  </label>
+                  <p className="mt-1 text-[10px] text-gray-500 ml-6">
+                    Estimates quantization error via 1-bit JL projection and corrects re-rank scores.
+                  </p>
+                  {enableQjl && (
+                    <div className="mt-2 ml-6">
+                      <label className="block text-xs text-gray-400 mb-1">
+                        Projection dimensions m: {qjlM}
+                      </label>
+                      <input
+                        type="range"
+                        min="32"
+                        max="128"
+                        step="32"
+                        value={qjlM}
+                        onChange={(e) => setQjlM(e.target.value)}
+                        className="w-full accent-orange-500"
+                      />
+                      <div className="flex justify-between text-[10px] text-gray-500">
+                        <span>32 (faster)</span>
+                        <span>128 (more accurate)</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {quantizationType === 'polar' && (
+              <div className="mt-3 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.03] p-3">
+                <p className="text-xs text-gray-400">
+                  Encodes pairs of coordinates as (radius, angle) recursively. No calibration needed — angle boundaries are always [0, 2π]. ~4× memory savings.
+                </p>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    Bits per angle: {bitsPerAngle} ({Math.pow(2, parseInt(bitsPerAngle) || 8)} levels)
+                  </label>
+                  <input
+                    type="range"
+                    min="4"
+                    max="8"
+                    step="1"
+                    value={bitsPerAngle}
+                    onChange={(e) => setBitsPerAngle(e.target.value)}
+                    className="w-full accent-orange-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-gray-500">
+                    <span>4 (16 levels)</span>
+                    <span>8 (256 levels)</span>
                   </div>
                 </div>
               </div>

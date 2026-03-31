@@ -22,6 +22,7 @@ clap = { workspace = true }
 chrono = { workspace = true }
 tracing-subscriber = { workspace = true }
 rayon = { workspace = true }
+rand = { workspace = true }
 lru = { workspace = true }
 memmap2 = { workspace = true }
 pulp = "0.22"
