@@ -285,10 +285,10 @@ export const Analytics = () => {
                         border: '1px solid #3f3f3f',
                         borderRadius: '8px',
                       }}
-                      formatter={(value: number, _name: string, props: { payload?: { storage_kb?: number } }) =>
+                      formatter={(value: number | undefined, _name: string | undefined, props: { payload?: { storage_kb?: number } }) =>
                         typeof value === 'number' && props?.payload?.storage_kb != null
                           ? [`${value.toLocaleString()} pts · ${props.payload.storage_kb} KB`, 'Storage']
-                          : [value, 'Points']
+                          : [value ?? 0, 'Points']
                       }
                     />
                     <Bar dataKey="points" fill="#f97316" name="Points" radius={[0, 4, 4, 0]} />

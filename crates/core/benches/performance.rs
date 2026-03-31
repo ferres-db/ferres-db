@@ -363,6 +363,7 @@ fn benchmark_sq8(c: &mut Criterion) {
                         dtype: ferres_db_core::ScalarType::Int8,
                         always_ram: false,
                         quantile: 99.5,
+                        ..Default::default()
                     };
                     let mut index = ferres_db_core::QuantizedHnswIndex::new(
                         ferres_db_core::DistanceMetric::Euclidean,
@@ -400,6 +401,7 @@ fn benchmark_sq8(c: &mut Criterion) {
             dtype: ferres_db_core::ScalarType::Int8,
             always_ram: false,
             quantile: 99.5,
+            ..Default::default()
         };
         let mut sq_index = ferres_db_core::QuantizedHnswIndex::new(
             ferres_db_core::DistanceMetric::Euclidean,
@@ -515,12 +517,353 @@ fn benchmark_rrf_two_vs_generic(c: &mut Criterion) {
     group.finish();
 }
 
+// ─── Benchmark de SQ8 vs PolarQuant ─────────────────────────────────────────
+
+fn benchmark_quantization_comparison(c: &mut Criterion) {
+    use rand::Rng;
+
+    let mut rng = rand::thread_rng();
+    let mut group = c.benchmark_group("quantization_comparison");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
+
+    for dim in [128usize, 384] {
+        let n = 1_000usize;
+        let k = 10usize;
+
+        let points: Vec<ferres_db_core::Point> = (0..n)
+            .map(|i| ferres_db_core::Point {
+                id: format!("v{i}"),
+                vector: (0..dim).map(|_| rng.gen_range(-1.0_f32..1.0)).collect(),
+                metadata: serde_json::Value::Null,
+                created_at: 0,
+                namespace: None,
+                expires_at: None,
+                vectors: None,
+                relations: None,
+            })
+            .collect();
+
+        let queries: Vec<Vec<f32>> = (0..50)
+            .map(|_| (0..dim).map(|_| rng.gen_range(-1.0_f32..1.0)).collect())
+            .collect();
+
+        let hnsw_config = ferres_db_core::HnswConfig {
+            max_nb_connection: 16,
+            max_elements: n + 100,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 100,
+        };
+
+        // ── Build benchmarks ──────────────────────────────────────────────────
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("sq8_build_dim{dim}")),
+            &points,
+            |b, points| {
+                b.iter(|| {
+                    let sq_config = ferres_db_core::ScalarQuantizationConfig {
+                        dtype: ferres_db_core::ScalarType::Int8,
+                        always_ram: false,
+                        quantile: 99.5,
+                        ..Default::default()
+                    };
+                    let mut idx = ferres_db_core::QuantizedHnswIndex::new(
+                        ferres_db_core::DistanceMetric::Euclidean,
+                        hnsw_config.clone(),
+                        sq_config,
+                    );
+                    idx.build(black_box(points)).unwrap();
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("polar_build_dim{dim}")),
+            &points,
+            |b, points| {
+                b.iter(|| {
+                    let pq_config = ferres_db_core::PolarQuantConfig::default();
+                    let mut idx = ferres_db_core::PolarQuantHnswIndex::new(
+                        ferres_db_core::DistanceMetric::Euclidean,
+                        hnsw_config.clone(),
+                        pq_config,
+                    );
+                    idx.build(black_box(points)).unwrap();
+                });
+            },
+        );
+
+        // ── Build indices for search + recall comparison ───────────────────────
+        let mut normal_index = ferres_db_core::HnswIndex::new(
+            ferres_db_core::DistanceMetric::Euclidean,
+            hnsw_config.clone(),
+        );
+        normal_index.build(&points).unwrap();
+
+        let sq_config = ferres_db_core::ScalarQuantizationConfig {
+            dtype: ferres_db_core::ScalarType::Int8,
+            always_ram: false,
+            quantile: 99.5,
+            ..Default::default()
+        };
+        let mut sq_index = ferres_db_core::QuantizedHnswIndex::new(
+            ferres_db_core::DistanceMetric::Euclidean,
+            hnsw_config.clone(),
+            sq_config,
+        );
+        sq_index.build(&points).unwrap();
+
+        let mut polar_index = ferres_db_core::PolarQuantHnswIndex::new(
+            ferres_db_core::DistanceMetric::Euclidean,
+            hnsw_config.clone(),
+            ferres_db_core::PolarQuantConfig::default(),
+        );
+        polar_index.build(&points).unwrap();
+
+        // ── Search benchmarks ─────────────────────────────────────────────────
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("sq8_search_dim{dim}")),
+            &queries,
+            |b, queries| {
+                b.iter(|| {
+                    for q in queries {
+                        let _ = black_box(sq_index.search(q, k, None).unwrap());
+                    }
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("polar_search_dim{dim}")),
+            &queries,
+            |b, queries| {
+                b.iter(|| {
+                    for q in queries {
+                        let _ = black_box(polar_index.search(q, k, None).unwrap());
+                    }
+                });
+            },
+        );
+
+        // ── Recall comparison ─────────────────────────────────────────────────
+        let (sq_recall, polar_recall) = {
+            let mut sq_overlap = 0usize;
+            let mut pq_overlap = 0usize;
+            let mut total = 0usize;
+            for q in &queries {
+                let truth: std::collections::HashSet<&str> = normal_index
+                    .search(q, k, None)
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.0.as_str())
+                    .collect();
+                let sq_ids: std::collections::HashSet<&str> = sq_index
+                    .search(q, k, None)
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.0.as_str())
+                    .collect();
+                let pq_ids: std::collections::HashSet<&str> = polar_index
+                    .search(q, k, None)
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.0.as_str())
+                    .collect();
+                sq_overlap += truth.intersection(&sq_ids).count();
+                pq_overlap += truth.intersection(&pq_ids).count();
+                total += k.min(truth.len());
+            }
+            let denom = total as f64;
+            (sq_overlap as f64 / denom, pq_overlap as f64 / denom)
+        };
+
+        // ── Memory footprint ──────────────────────────────────────────────────
+        let f32_bytes = n * dim * 4;
+        let sq8_bytes = n * dim; // 1 byte per dim
+        let polar_bytes = n * (4 + dim.saturating_sub(1)); // f32 radius + (dim-1) angles
+
+        println!(
+            "\n[quantization_comparison] dim={dim}, n={n}, k={k}"
+        );
+        println!(
+            "  Recall@{k}: SQ8={sq_recall:.3}  PolarQuant={polar_recall:.3}"
+        );
+        println!(
+            "  Memory (per-vector data): f32={f32_bytes}B  SQ8={sq8_bytes}B ({:.1}x)  Polar={polar_bytes}B ({:.1}x)",
+            f32_bytes as f64 / sq8_bytes as f64,
+            f32_bytes as f64 / polar_bytes as f64,
+        );
+    }
+
+    group.finish();
+}
+
+// ─── Benchmark QJL Latency ───────────────────────────────────────────
+
+fn benchmark_qjl_latency(c: &mut Criterion) {
+    use rand::Rng;
+
+    let mut rng = rand::thread_rng();
+    let mut group = c.benchmark_group("qjl_latency");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(15));
+
+    for dim in [128usize, 384] {
+        let n = 1_000usize;
+        let k = 10usize;
+
+        let points: Vec<ferres_db_core::Point> = (0..n)
+            .map(|i| ferres_db_core::Point {
+                id: format!("v{i}"),
+                vector: (0..dim).map(|_| rng.gen_range(-1.0_f32..1.0)).collect(),
+                metadata: serde_json::Value::Null,
+                created_at: 0,
+                namespace: None,
+                expires_at: None,
+                vectors: None,
+                relations: None,
+            })
+            .collect();
+
+        let queries: Vec<Vec<f32>> = (0..50)
+            .map(|_| (0..dim).map(|_| rng.gen_range(-1.0_f32..1.0)).collect())
+            .collect();
+
+        let hnsw_config = ferres_db_core::HnswConfig {
+            max_nb_connection: 16,
+            max_elements: n + 100,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        };
+
+        // Build SQ8 without QJL
+        let mut sq_index = ferres_db_core::QuantizedHnswIndex::new(
+            ferres_db_core::DistanceMetric::Euclidean,
+            hnsw_config.clone(),
+            ferres_db_core::ScalarQuantizationConfig {
+                dtype: ferres_db_core::ScalarType::Int8,
+                always_ram: false,
+                quantile: 99.5,
+                enable_qjl: false,
+                qjl_m: 64,
+                qjl_seed: 42,
+            },
+        );
+        sq_index.build(&points).unwrap();
+
+        // Build SQ8 + QJL (m=64)
+        let mut qjl_index = ferres_db_core::QuantizedHnswIndex::new(
+            ferres_db_core::DistanceMetric::Euclidean,
+            hnsw_config.clone(),
+            ferres_db_core::ScalarQuantizationConfig {
+                dtype: ferres_db_core::ScalarType::Int8,
+                always_ram: false,
+                quantile: 99.5,
+                enable_qjl: true,
+                qjl_m: 64,
+                qjl_seed: 42,
+            },
+        );
+        qjl_index.build(&points).unwrap();
+
+        // Benchmark SQ8 search
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("sq8_search_dim{dim}")),
+            &queries,
+            |b, queries| {
+                b.iter(|| {
+                    for q in queries {
+                        let _ = black_box(sq_index.search(q, k, None).unwrap());
+                    }
+                });
+            },
+        );
+
+        // Benchmark SQ8+QJL search
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("qjl_search_dim{dim}")),
+            &queries,
+            |b, queries| {
+                b.iter(|| {
+                    for q in queries {
+                        let _ = black_box(qjl_index.search(q, k, None).unwrap());
+                    }
+                });
+            },
+        );
+
+        // Recall comparison vs f32 ground truth
+        let mut ref_index = ferres_db_core::HnswIndex::new(
+            ferres_db_core::DistanceMetric::Euclidean,
+            hnsw_config.clone(),
+        );
+        ref_index.build(&points).unwrap();
+
+        let (sq_recall, qjl_recall) = {
+            let mut sq_overlap = 0usize;
+            let mut qjl_overlap = 0usize;
+            let mut total = 0usize;
+            for q in &queries {
+                let truth: std::collections::HashSet<&str> = ref_index
+                    .search(q, k, None)
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.0.as_str())
+                    .collect();
+                let sq_ids: std::collections::HashSet<&str> = sq_index
+                    .search(q, k, None)
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.0.as_str())
+                    .collect();
+                let qjl_ids: std::collections::HashSet<&str> = qjl_index
+                    .search(q, k, None)
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.0.as_str())
+                    .collect();
+                sq_overlap += truth.intersection(&sq_ids).count();
+                qjl_overlap += truth.intersection(&qjl_ids).count();
+                total += k.min(truth.len());
+            }
+            let denom = total as f64;
+            (sq_overlap as f64 / denom, qjl_overlap as f64 / denom)
+        };
+
+        let qjl_overhead_pct = if sq_recall > 0.0 {
+            ((qjl_recall - sq_recall) / sq_recall) * 100.0
+        } else {
+            0.0
+        };
+
+        println!(
+            "\n[qjl_latency] dim={dim}, n={n}, k={k}"
+        );
+        println!(
+            "  Recall@{k}: SQ8={sq_recall:.3}  SQ8+QJL={qjl_recall:.3}  (delta={qjl_overhead_pct:+.1}%)"
+        );
+
+        let qjl_overhead_bytes = n * ((64 + 63) / 64) * 8; // ceil(m/64) u64 words × 8 bytes
+        println!(
+            "  QJL memory overhead: ~{:.1} KB (m=64, {} u64 words per vector)",
+            qjl_overhead_bytes as f64 / 1024.0,
+            (64 + 63) / 64
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_indexing,
     benchmark_search,
     benchmark_upsert,
     benchmark_sq8,
-    benchmark_rrf_two_vs_generic
+    benchmark_rrf_two_vs_generic,
+    benchmark_quantization_comparison,
+    benchmark_qjl_latency
 );
 criterion_main!(benches);

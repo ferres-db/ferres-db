@@ -1,9 +1,18 @@
 // Types for FerresDB Dashboard
 
-/** Backend pode retornar quantization como "None" ou { "Scalar": { dtype, always_ram?, quantile? } } */
+/** Backend pode retornar quantization como "None", { "Scalar": {...} } ou { "Polar": {...} } */
 export type CollectionQuantizationResponse =
   | "None"
-  | { Scalar: { dtype: string; always_ram?: boolean; quantile?: number } };
+  | {
+      Scalar: {
+        dtype: string;
+        always_ram?: boolean;
+        quantile?: number;
+        enable_qjl?: boolean;
+        qjl_m?: number;
+      };
+    }
+  | { Polar: { bits_per_angle: number } };
 
 export interface Collection {
   name: string;
@@ -298,7 +307,7 @@ export interface AuditQueryParams {
   limit?: number;
 }
 
-// ─── Quantization (SQ8) ───────────────────────────────────────────────
+// ─── Quantization ─────────────────────────────────────────────────────
 
 export type ScalarType = "int8";
 
@@ -307,9 +316,23 @@ export interface ScalarQuantizationConfig {
   dtype: ScalarType;
   always_ram?: boolean;
   quantile?: number; // 0.0 – 1.0
+  /** Habilita correção residual QJL. Desabilitado por padrão (opt-in). */
+  enable_qjl?: boolean;
+  /** Dimensões de projeção JL (m). Default: 64. */
+  qjl_m?: number;
+  /** Seed determinístico para gerar a matriz R. Default: 42. */
+  qjl_seed?: number;
 }
 
-export type QuantizationConfig = "none" | ScalarQuantizationConfig;
+export interface PolarQuantizationConfig {
+  type: "polar";
+  bits_per_angle?: number; // 1–8, default 8
+}
+
+export type QuantizationConfig =
+  | "none"
+  | ScalarQuantizationConfig
+  | PolarQuantizationConfig;
 
 // ─── Tiered Storage ──────────────────────────────────────────────────
 

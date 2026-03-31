@@ -57,8 +57,10 @@ pub struct CreateCollectionRequest {
     /// Chave em metadata usada como texto para BM25. Padrão: "text".
     #[serde(default = "default_bm25_text_field")]
     pub bm25_text_field: String,
-    /// Configuração de quantização de vetores. Padrão: None (sem quantização).
-    /// Use `{"Scalar": {"dtype": "Int8"}}` para ativar SQ8.
+    /// Configuração de quantização de vetores. Padrão: `None` (sem quantização).
+    ///
+    /// - SQ8: `{"Scalar": {"dtype": "Int8"}}`
+    /// - PolarQuant: `{"Polar": {"bits_per_angle": 8}}`
     #[serde(default)]
     pub quantization: QuantizationConfig,
     /// Período de retenção em dias (WAL e dados antigos). None = manter indefinidamente.
@@ -114,7 +116,7 @@ pub struct GetCollectionResponse {
     pub last_updated: u64,
     pub distance: DistanceMetric,
     pub stats: CollectionStatsResponse,
-    /// Quantização de vetores (None ou Scalar SQ8).
+    /// Quantização de vetores: `None`, `Scalar` (SQ8) ou `Polar` (PolarQuant).
     pub quantization: QuantizationConfig,
     /// BM25 habilitado para busca híbrida.
     pub enable_bm25: bool,
