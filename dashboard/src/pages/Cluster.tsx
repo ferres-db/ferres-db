@@ -50,7 +50,7 @@ export const Cluster = () => {
               <CardContent>
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge
-                    variant={cluster?.raft_enabled ? 'default' : 'secondary'}
+                    variant="default"
                     className={cn(
                       cluster?.raft_enabled && 'bg-emerald-600/80 hover:bg-emerald-600/90',
                     )}
@@ -58,7 +58,7 @@ export const Cluster = () => {
                     Raft: {cluster?.raft_enabled ? 'Enabled' : 'Standalone'}
                   </Badge>
                   {cluster?.leader_id != null && (
-                    <Badge variant="secondary" className="inline-flex items-center gap-1">
+                    <Badge variant="default" className="inline-flex items-center gap-1">
                       <Crown className="h-3.5 w-3.5" />
                       Leader: {cluster.leader_id}
                     </Badge>
@@ -125,9 +125,7 @@ export const Cluster = () => {
                           </td>
                           <td className="py-2 pr-4">
                             <Badge
-                              variant={
-                                node.role === 'leader' ? 'default' : 'secondary'
-                              }
+                              variant="default"
                               className={cn(
                                 node.role === 'leader' &&
                                   'bg-amber-600/80 hover:bg-amber-600/90',

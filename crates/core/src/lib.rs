@@ -71,7 +71,10 @@ pub use explain::{
 pub use fusion::{reciprocal_rank_fusion, weighted_fusion, FusionStrategy, DEFAULT_RRF_K};
 pub use graph::traverse_bfs;
 pub use point::Point;
-pub use quantization::{QuantizationConfig, ScalarQuantizationConfig, ScalarType};
+pub use quantization::{
+    polar_decode, polar_distance_asymmetric, polar_encode, PolarQuantConfig, PolarQuantParams,
+    PolarQuantized, QjlParams, QuantizationConfig, ScalarQuantizationConfig, ScalarType,
+};
 pub use reindex::{
     apply_delta, build_new_index, estimate_index_size, needs_reindex, tombstone_ratio, ReindexJob,
     ReindexStats, ReindexStatus, AUTO_REINDEX_TOMBSTONE_RATIO,
@@ -79,7 +82,7 @@ pub use reindex::{
 pub use rerank::Reranker;
 pub use search::{
     create_ann_index, distance_between, simd_enabled, ANNIndex, DistanceMetric, HnswConfig,
-    HnswIndex, QuantizedHnswIndex,
+    HnswIndex, PolarQuantHnswIndex, QuantizedHnswIndex,
 };
 pub use storage::{
     CollectionMeta, DiskStorage, FileStorage, StorageCircuitBreaker, StorageOptions,

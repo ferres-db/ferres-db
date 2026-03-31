@@ -8,6 +8,11 @@ Para melhor throughput em buscas vetoriais, o servidor utiliza kernels SIMD quan
 
 **Nota técnica (hardware):** Os kernels de distância (`euclidean_distance`, `dot_product`) e a distância assimétrica para SQ8 são acelerados por instruções **AVX2** (vetores de 8 floats) ou **SSE4.1** (4 floats), com fallback escalar automático. Para performance máxima em produção, utilize processadores que suportem pelo menos AVX2 (Intel Haswell ou posterior, AMD Excavator/Zen ou posterior). Em ambientes sem essas extensões (por exemplo, alguns VMs ou CPUs antigas), o comportamento permanece correto com throughput reduzido.
 
+**Quantização de vetores:** O FerresDB suporta duas estratégias de compressão de vetores para redução de memória (~4× menos que `f32`):
+
+- **SQ8** (`Scalar`): mapeia cada dimensão `f32 → u8` via calibração percentílica por bloco. Requer uma etapa de calibração sobre os dados existentes.
+- **PolarQuant** (`Polar`): converte pares de coordenadas cartesianas em `(raio, ângulo)` recursivamente. Os ângulos são sempre em `[0, 2π]` — não há parâmetros de calibração por bloco. Configurável via `bits_per_angle` (default: 8).
+
 ---
 
 ## Convenções
@@ -303,15 +308,16 @@ Cria uma nova coleção.
 
 **Request body:**
 
-| Campo             | Tipo    | Obrigatório | Descrição                                                        |
-| ----------------- | ------- | ----------- | ---------------------------------------------------------------- |
-| `name`            | string  | sim         | Nome único: apenas `a-zA-Z0-9_-`                                 |
-| `dimension`       | number  | sim         | Dimensão dos vetores (1–4096)                                    |
-| `distance`        | string  | sim         | Métrica: `Cosine`, `Euclidean`, `DotProduct`                     |
-| `enable_bm25`     | boolean | não         | Habilita índice BM25 para busca híbrida (default: false)         |
-| `bm25_text_field` | string  | não         | Chave em metadata usada como texto para BM25 (default: `"text"`) |
-| `tiered_storage`  | object  | não         | Configuração de tiered storage (ver seção Tiered Storage)        |
-| `retention_days`  | number  | não         | Retenção em dias (WAL e histórico); omitido ou null = sem limite |
+| Campo             | Tipo    | Obrigatório | Descrição                                                                                                                      |
+| ----------------- | ------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `name`            | string  | sim         | Nome único: apenas `a-zA-Z0-9_-`                                                                                               |
+| `dimension`       | number  | sim         | Dimensão dos vetores (1–4096)                                                                                                  |
+| `distance`        | string  | sim         | Métrica: `Cosine`, `Euclidean`, `DotProduct`                                                                                   |
+| `enable_bm25`     | boolean | não         | Habilita índice BM25 para busca híbrida (default: false)                                                                       |
+| `bm25_text_field` | string  | não         | Chave em metadata usada como texto para BM25 (default: `"text"`)                                                               |
+| `quantization`    | object  | não         | Compressão de vetores. `"None"` (padrão), `{"Scalar":{"dtype":"Int8"}}` (SQ8) ou `{"Polar":{"bits_per_angle":8}}` (PolarQuant) |
+| `tiered_storage`  | object  | não         | Configuração de tiered storage (ver seção Tiered Storage)                                                                      |
+| `retention_days`  | number  | não         | Retenção em dias (WAL e histórico); omitido ou null = sem limite                                                               |
 
 **Schema de request:**
 
@@ -321,8 +327,22 @@ Cria uma nova coleção.
   "dimension": 384,
   "distance": "Cosine",
   "enable_bm25": false,
-  "bm25_text_field": "text"
+  "bm25_text_field": "text",
+  "quantization": "None"
 }
+```
+
+**Exemplos de `quantization`:**
+
+```json
+// Sem quantização (padrão)
+"quantization": "None"
+
+// Scalar Quantization SQ8 — comprime f32 → u8 por dimensão (~4× menos memória, requer calibração)
+"quantization": {"Scalar": {"dtype": "Int8", "always_ram": false, "quantile": 99.5}}
+
+// PolarQuant — coordenadas polares recursivas (~4× menos memória, sem calibração por bloco)
+"quantization": {"Polar": {"bits_per_angle": 8}}
 ```
 
 **Resposta:** `201 Created`
@@ -428,8 +448,8 @@ Atualiza a configuração de retenção da coleção. Requer autenticação e pe
 
 **Request body:**
 
-| Campo            | Tipo          | Descrição                                                |
-| ---------------- | ------------- | ------------------------------------------------------- |
+| Campo            | Tipo           | Descrição                                                   |
+| ---------------- | -------------- | ----------------------------------------------------------- |
 | `retention_days` | number ou null | Retenção em dias; null ou omitido = manter indefinidamente. |
 
 **Resposta:** `204 No Content` (sem body)
@@ -834,9 +854,9 @@ Retorna um ponto pelo ID.
 }
 ```
 
-| Campo       | Tipo           | Descrição                                                                 |
-| ----------- | -------------- | ------------------------------------------------------------------------- |
-| `relations` | array de string | IDs dos pontos relacionados (grafo não direcionado). Omitido se vazio.   |
+| Campo       | Tipo            | Descrição                                                              |
+| ----------- | --------------- | ---------------------------------------------------------------------- |
+| `relations` | array de string | IDs dos pontos relacionados (grafo não direcionado). Omitido se vazio. |
 
 **Exemplo curl:**
 
@@ -854,10 +874,10 @@ Cria uma relação não direcionada entre dois pontos (persistência de grafos).
 
 **Request body:**
 
-| Campo  | Tipo   | Obrigatório | Descrição                                                                                    |
-| ------ | ------ | ----------- | ------------------------------------------------------------------------------------------- |
-| `from` | string | sim         | ID do ponto de origem (storage_id; para pontos sem namespace, o id lógico do ponto).        |
-| `to`   | string | sim         | ID do ponto de destino (storage_id).                                                        |
+| Campo  | Tipo   | Obrigatório | Descrição                                                                            |
+| ------ | ------ | ----------- | ------------------------------------------------------------------------------------ |
+| `from` | string | sim         | ID do ponto de origem (storage_id; para pontos sem namespace, o id lógico do ponto). |
+| `to`   | string | sim         | ID do ponto de destino (storage_id).                                                 |
 
 ```json
 {
@@ -898,12 +918,12 @@ Retorna um subgrafo da coleção para visualização (ex.: Graph Explorer no das
 
 **Query params:**
 
-| Campo       | Tipo   | Obrigatório | Descrição                                                                                           |
-| ----------- | ------ | ----------- | --------------------------------------------------------------------------------------------------- |
+| Campo       | Tipo   | Obrigatório | Descrição                                                                                             |
+| ----------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------- |
 | `center_id` | string | não         | Centro do subgrafo; usado com `depth` para BFS (tem precedência sobre `seed` quando ambos presentes). |
 | `depth`     | number | não         | Profundidade em saltos para BFS a partir de `center_id` (ex.: 2 = até 2 saltos).                      |
-| `seed`      | string | não         | Se informado (e sem center_id), retorna o nó e seus vizinhos (1-hop).                               |
-| `limit`     | number | não         | Sem center_id/seed: número máximo de nós (default 500, máx. 2000).                                  |
+| `seed`      | string | não         | Se informado (e sem center_id), retorna o nó e seus vizinhos (1-hop).                                 |
+| `limit`     | number | não         | Sem center_id/seed: número máximo de nós (default 500, máx. 2000).                                    |
 
 **Resposta:** `200 OK`
 
@@ -1194,22 +1214,22 @@ Busca vetorial com explicação detalhada de cada resultado. Retorna **por que**
 }
 ```
 
-| Campo                          | Tipo   | Descrição                                                                 |
-| ------------------------------ | ------ | ------------------------------------------------------------------------- |
-| `query_vector_norm`            | number | Norma L2 do vetor de consulta                                             |
-| `distance_metric`              | string | Métrica: `Cosine`, `Euclidean`, `DotProduct`                               |
-| `candidates_scanned`           | number | Total de candidatos escaneados pelo índice                                |
-| `candidates_after_filter`      | number | Candidatos que passaram no filtro de metadata (impacto do pre-filtering)   |
-| `results`                      | array  | Resultados explicados individualmente                                     |
-| `results[].score_breakdown`    | object | Componentes do score (`vector_score`, etc.)                               |
-| `results[].filter_evaluation`  | object | Avaliação detalhada do filtro (presente se filtro foi aplicado)           |
-| `results[].rank_before_filter` | number | Posição no ranking antes de filtros (1-indexed)                           |
-| `results[].rank_after_filter`  | number | Posição após filtros (1-indexed, 0 se não passou)                         |
-| `index_stats`                  | object | Estatísticas do índice HNSW no momento da busca                           |
-| `explain_meta`                 | object | *Opcional.* Metadados do percurso da busca (HNSW). Ausente se o índice não fornecer. |
-| `explain_meta.candidates_visited` | number | Número de comparações de distância realizadas durante a busca             |
-| `explain_meta.layers_traversed`  | number | Número de camadas do grafo HNSW percorridas                               |
-| `explain_meta.tombstones_skipped`| number | Tombstones (pontos removidos) ignorados durante a busca                   |
+| Campo                             | Tipo   | Descrição                                                                            |
+| --------------------------------- | ------ | ------------------------------------------------------------------------------------ |
+| `query_vector_norm`               | number | Norma L2 do vetor de consulta                                                        |
+| `distance_metric`                 | string | Métrica: `Cosine`, `Euclidean`, `DotProduct`                                         |
+| `candidates_scanned`              | number | Total de candidatos escaneados pelo índice                                           |
+| `candidates_after_filter`         | number | Candidatos que passaram no filtro de metadata (impacto do pre-filtering)             |
+| `results`                         | array  | Resultados explicados individualmente                                                |
+| `results[].score_breakdown`       | object | Componentes do score (`vector_score`, etc.)                                          |
+| `results[].filter_evaluation`     | object | Avaliação detalhada do filtro (presente se filtro foi aplicado)                      |
+| `results[].rank_before_filter`    | number | Posição no ranking antes de filtros (1-indexed)                                      |
+| `results[].rank_after_filter`     | number | Posição após filtros (1-indexed, 0 se não passou)                                    |
+| `index_stats`                     | object | Estatísticas do índice HNSW no momento da busca                                      |
+| `explain_meta`                    | object | _Opcional._ Metadados do percurso da busca (HNSW). Ausente se o índice não fornecer. |
+| `explain_meta.candidates_visited` | number | Número de comparações de distância realizadas durante a busca                        |
+| `explain_meta.layers_traversed`   | number | Número de camadas do grafo HNSW percorridas                                          |
+| `explain_meta.tombstones_skipped` | number | Tombstones (pontos removidos) ignorados durante a busca                              |
 
 **Exemplo curl:**
 
@@ -1393,15 +1413,15 @@ Retorna o estado do cluster (nós ativos, líder e status de replicação). Usad
 }
 ```
 
-| Campo            | Tipo    | Descrição                                                                 |
-| ---------------- | ------- | ------------------------------------------------------------------------- |
-| `raft_enabled`   | boolean | Se o consenso Raft está ativo (build com `--features raft` e configurado). |
-| `leader_id`      | string  | *Opcional.* ID do nó líder (ex.: `"1"`). Ausente se ainda não houver líder. |
-| `nodes`          | array   | Lista de nós conhecidos (incluindo este).                                  |
-| `nodes[].id`     | string  | Identificador do nó.                                                       |
-| `nodes[].addr`   | string  | Endereço (host:port).                                                      |
-| `nodes[].role`   | string  | Papel: `"leader"`, `"follower"`, `"learner"` ou `"replica"` (modo réplica). |
-| `nodes[].replication_lag` | number | *Opcional.* Lag de replicação (índice do último log aplicado). Apenas para followers. |
+| Campo                     | Tipo    | Descrição                                                                             |
+| ------------------------- | ------- | ------------------------------------------------------------------------------------- |
+| `raft_enabled`            | boolean | Se o consenso Raft está ativo (build com `--features raft` e configurado).            |
+| `leader_id`               | string  | _Opcional._ ID do nó líder (ex.: `"1"`). Ausente se ainda não houver líder.           |
+| `nodes`                   | array   | Lista de nós conhecidos (incluindo este).                                             |
+| `nodes[].id`              | string  | Identificador do nó.                                                                  |
+| `nodes[].addr`            | string  | Endereço (host:port).                                                                 |
+| `nodes[].role`            | string  | Papel: `"leader"`, `"follower"`, `"learner"` ou `"replica"` (modo réplica).           |
+| `nodes[].replication_lag` | number  | _Opcional._ Lag de replicação (índice do último log aplicado). Apenas para followers. |
 
 **Exemplo curl:**
 

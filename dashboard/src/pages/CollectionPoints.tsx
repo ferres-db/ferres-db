@@ -319,7 +319,14 @@ export const CollectionPoints = () => {
                 {(() => {
                   const q = collection?.quantization as CollectionQuantizationResponse | undefined;
                   const isScalar = q && typeof q === 'object' && 'Scalar' in q;
-                  const scalarConfig = isScalar && typeof q === 'object' && q.Scalar ? q.Scalar : null;
+                  const isPolar = q && typeof q === 'object' && 'Polar' in q;
+                  const scalarConfig = isScalar && typeof q === 'object' && (q as any).Scalar ? (q as any).Scalar : null;
+                  const polarConfig = isPolar && typeof q === 'object' && (q as any).Polar ? (q as any).Polar : null;
+                  const quantizationLabel = isScalar && scalarConfig
+                    ? `Scalar (SQ8)${scalarConfig.always_ram ? ' · re-rank in RAM' : ''}${scalarConfig.quantile != null ? ` · quantile ${scalarConfig.quantile}` : ''}`
+                    : isPolar && polarConfig
+                      ? `PolarQuant · ${polarConfig.bits_per_angle ?? 8} bits/angle`
+                      : 'None';
                   return (
                     <>
                       <div className="flex items-center gap-2 rounded-lg border border-black/20 bg-black/10 px-3 py-2">
@@ -327,9 +334,7 @@ export const CollectionPoints = () => {
                         <div>
                           <p className="text-xs text-gray-400">Quantization</p>
                           <p className="text-sm font-medium text-gray-50">
-                            {isScalar && scalarConfig
-                              ? `Scalar (SQ8)${scalarConfig.always_ram ? ' · re-rank in RAM' : ''}${scalarConfig.quantile != null ? ` · quantile ${scalarConfig.quantile}` : ''}`
-                              : 'None'}
+                            {quantizationLabel}
                           </p>
                         </div>
                       </div>
@@ -829,7 +834,7 @@ export const CollectionPoints = () => {
                         </div>
                       )}
                       {stats.hnsw_auto_tune_enabled && (
-                        <Badge variant="secondary" className="inline-flex items-center gap-1">
+                        <Badge variant="default" className="inline-flex items-center gap-1">
                           <Zap className="h-3 w-3" />
                           Optimized by FerresEngine
                         </Badge>

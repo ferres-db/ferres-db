@@ -90,7 +90,7 @@ export const Settings = () => {
     try {
       const raw = retentionValues[name]?.trim() ?? '';
       const value = raw === '' ? null : Math.max(0, Math.floor(Number(raw)));
-      if (raw !== '' && (Number.isNaN(value) || value < 0)) {
+      if (raw !== '' && value !== null && (Number.isNaN(value) || value < 0)) {
         setRetentionMessage(`Invalid retention value for ${name}`);
         return;
       }
@@ -254,7 +254,7 @@ export const Settings = () => {
                 <Button onClick={handleSaveCloud} disabled={cloudSaving} variant="secondary">
                   {cloudSaving ? 'Saving…' : 'Save cloud settings'}
                 </Button>
-                <Button onClick={handleTestS3} disabled={cloudTestLoading} variant="outline">
+                <Button onClick={handleTestS3} disabled={cloudTestLoading} variant="secondary">
                   {cloudTestLoading ? 'Testing…' : 'Test S3 connection'}
                 </Button>
               </div>
@@ -306,7 +306,7 @@ export const Settings = () => {
                   <span className="text-xs text-gray-500">days</span>
                   <Button
                     size="sm"
-                    variant="outline"
+                    variant="secondary"
                     disabled={retentionSaving !== null}
                     onClick={() => handleSaveRetention(c.name)}
                   >

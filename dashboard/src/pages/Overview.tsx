@@ -48,7 +48,7 @@ export const Overview = () => {
           {!statsLoading && (
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <Badge
-                variant={stats?.role === 'replica' ? 'secondary' : 'default'}
+                variant="default"
                 className="inline-flex items-center gap-1.5"
               >
                 {stats?.role === 'replica' ? 'Role: Replica' : 'Role: Leader'}
@@ -61,13 +61,13 @@ export const Overview = () => {
                 {stats?.simd_enabled ? 'SIMD: Active' : 'SIMD: Scalar'}
               </Badge>
               {(stats?.index_optimization_label ?? stats?.hnsw_auto_tune_enabled) && (
-                <Badge variant="secondary" className="inline-flex items-center gap-1.5">
+                <Badge variant="default" className="inline-flex items-center gap-1.5">
                   <Zap className="h-3.5 w-3.5" />
                   {stats?.index_optimization_label ?? 'Optimized by FerresEngine'}
                 </Badge>
               )}
               {stats?.namespace_physical_isolation && (
-                <Badge variant="secondary" className="inline-flex items-center gap-1.5">
+                <Badge variant="default" className="inline-flex items-center gap-1.5">
                   <Shield className="h-3.5 w-3.5" />
                   Namespace isolation: On
                 </Badge>
