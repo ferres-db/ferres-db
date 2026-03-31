@@ -62,6 +62,13 @@ pub enum WalOperation {
         /// O ID do ponto a remover.
         id: String,
     },
+    /// Cria uma relação entre dois pontos (grafo não direcionado).
+    Link {
+        /// ID (storage_id) do ponto de origem.
+        from: String,
+        /// ID (storage_id) do ponto de destino.
+        to: String,
+    },
 }
 
 // ─── Wal ──────────────────────────────────────────────────────────────
@@ -123,19 +130,13 @@ impl Wal {
             .append(true)
             .open(&wal_path)
             .map_err(|e| {
-                FerresError::Storage(format!(
-                    "failed to open WAL at {}: {e}",
-                    wal_path.display()
-                ))
+                FerresError::Storage(format!("failed to open WAL at {}: {e}", wal_path.display()))
             })?;
 
         // Se compressão ativa e ficheiro novo (0 bytes), escreve magic
         if compress {
             let meta = file.metadata().map_err(|e| {
-                FerresError::Storage(format!(
-                    "failed to stat WAL at {}: {e}",
-                    wal_path.display()
-                ))
+                FerresError::Storage(format!("failed to stat WAL at {}: {e}", wal_path.display()))
             })?;
             if meta.len() == 0 {
                 file.write_all(WAL_ZSTD_MAGIC).map_err(|e| {
@@ -190,6 +191,28 @@ impl Wal {
         let entry = WalEntry {
             timestamp: current_timestamp(),
             operation: WalOperation::Delete { id: id.to_string() },
+        };
+        self.append_entry(&entry)?;
+        self.ops_since_snapshot += 1;
+        Ok(())
+    }
+
+    /// Registra uma operação de link (relação entre dois pontos) no WAL.
+    ///
+    /// Deve ser chamado ANTES da mutação em memória.
+    /// Retorna erro se o WAL já tiver muitas operações (backpressure: snapshot obrigatório).
+    pub fn append_link(&mut self, from: &str, to: &str) -> Result<(), FerresError> {
+        if self.ops_since_snapshot >= MAX_WAL_OPS_BEFORE_BACKPRESSURE {
+            return Err(FerresError::Storage(
+                "WAL too large, snapshot required".to_string(),
+            ));
+        }
+        let entry = WalEntry {
+            timestamp: current_timestamp(),
+            operation: WalOperation::Link {
+                from: from.to_string(),
+                to: to.to_string(),
+            },
         };
         self.append_entry(&entry)?;
         self.ops_since_snapshot += 1;
@@ -254,6 +277,20 @@ impl Wal {
         Ok(())
     }
 
+    /// Lê entradas do WAL a partir de uma posição (índice 0-based) para replicação incremental.
+    ///
+    /// Retorna apenas as entradas com índice >= `position`. Útil para réplicas que consomem
+    /// o WAL do líder a partir de um offset conhecido.
+    /// Detecta automaticamente formato comprimido (magic `WALz`) ou JSONL.
+    pub fn stream_from(collection_dir: &Path, position: u64) -> Result<Vec<WalEntry>, FerresError> {
+        let all = Self::read_entries(collection_dir)?;
+        let from = position as usize;
+        if from >= all.len() {
+            return Ok(Vec::new());
+        }
+        Ok(all[from..].to_vec())
+    }
+
     /// Lê todas as entradas do WAL para replay.
     ///
     /// Detecta automaticamente formato comprimido (magic `WALz`) ou JSONL.
@@ -284,10 +321,7 @@ impl Wal {
             Self::read_entries_compressed(&mut file, &wal_path)?
         } else {
             file.seek(SeekFrom::Start(0)).map_err(|e| {
-                FerresError::Storage(format!(
-                    "failed to seek WAL at {}: {e}",
-                    wal_path.display()
-                ))
+                FerresError::Storage(format!("failed to seek WAL at {}: {e}", wal_path.display()))
             })?;
             Self::read_entries_jsonl(&mut file, &wal_path)?
         };
@@ -317,17 +351,16 @@ impl Wal {
 
     /// Serializa e escreve uma entrada, seguida de flush.
     fn append_entry(&mut self, entry: &WalEntry) -> Result<(), FerresError> {
-        let writer = self.writer.as_mut().ok_or_else(|| {
-            FerresError::Storage("WAL writer is closed".to_string())
-        })?;
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| FerresError::Storage("WAL writer is closed".to_string()))?;
 
         if self.compress {
-            let json = serde_json::to_string(entry).map_err(|e| {
-                FerresError::Storage(format!("failed to serialize WAL entry: {e}"))
-            })?;
-            let compressed = zstd::encode_all(json.as_bytes(), 0).map_err(|e| {
-                FerresError::Storage(format!("failed to compress WAL entry: {e}"))
-            })?;
+            let json = serde_json::to_string(entry)
+                .map_err(|e| FerresError::Storage(format!("failed to serialize WAL entry: {e}")))?;
+            let compressed = zstd::encode_all(json.as_bytes(), 0)
+                .map_err(|e| FerresError::Storage(format!("failed to compress WAL entry: {e}")))?;
             let len = compressed.len() as u32;
             writer.write_all(&len.to_le_bytes()).map_err(|e| {
                 FerresError::Storage(format!("failed to write WAL frame length: {e}"))
@@ -336,20 +369,19 @@ impl Wal {
                 FerresError::Storage(format!("failed to write WAL compressed frame: {e}"))
             })?;
         } else {
-            let json = serde_json::to_string(entry).map_err(|e| {
-                FerresError::Storage(format!("failed to serialize WAL entry: {e}"))
-            })?;
-            writer.write_all(json.as_bytes()).map_err(|e| {
-                FerresError::Storage(format!("failed to write WAL entry: {e}"))
-            })?;
-            writer.write_all(b"\n").map_err(|e| {
-                FerresError::Storage(format!("failed to write WAL newline: {e}"))
-            })?;
+            let json = serde_json::to_string(entry)
+                .map_err(|e| FerresError::Storage(format!("failed to serialize WAL entry: {e}")))?;
+            writer
+                .write_all(json.as_bytes())
+                .map_err(|e| FerresError::Storage(format!("failed to write WAL entry: {e}")))?;
+            writer
+                .write_all(b"\n")
+                .map_err(|e| FerresError::Storage(format!("failed to write WAL newline: {e}")))?;
         }
 
-        writer.flush().map_err(|e| {
-            FerresError::Storage(format!("failed to flush WAL: {e}"))
-        })?;
+        writer
+            .flush()
+            .map_err(|e| FerresError::Storage(format!("failed to flush WAL: {e}")))?;
 
         Ok(())
     }
@@ -397,9 +429,7 @@ impl Wal {
             match zstd::decode_all(compressed.as_slice()) {
                 Ok(decompressed) => {
                     let json = String::from_utf8(decompressed).map_err(|e| {
-                        FerresError::Storage(format!(
-                            "WAL decompressed frame is not UTF-8: {e}"
-                        ))
+                        FerresError::Storage(format!("WAL decompressed frame is not UTF-8: {e}"))
                     })?;
                     match serde_json::from_str::<WalEntry>(&json) {
                         Ok(entry) => entries.push(entry),
@@ -484,10 +514,7 @@ impl Wal {
             Ok(entries.len())
         } else {
             file.seek(SeekFrom::Start(0)).map_err(|e| {
-                FerresError::Storage(format!(
-                    "failed to seek WAL at {}: {e}",
-                    wal_path.display()
-                ))
+                FerresError::Storage(format!("failed to seek WAL at {}: {e}", wal_path.display()))
             })?;
             let reader = BufReader::new(file);
             let mut count = 0;
@@ -501,7 +528,100 @@ impl Wal {
     }
 }
 
+// ─── Retention (WAL compaction) ────────────────────────────────────────
+
+/// Compacta o WAL removendo entradas com timestamp anterior a `cutoff_ts` (Unix segundos).
+/// Reescreve `wal.log` apenas com entradas dentro do período de retenção.
+/// Use quando a coleção tiver `retention_days` configurado; chamar sem WAL aberto (ex.: no worker de retenção).
+pub fn compact_wal_entries_older_than(
+    collection_dir: &Path,
+    cutoff_ts: u64,
+    compress: bool,
+) -> Result<usize, FerresError> {
+    let wal_path = collection_dir.join("wal.log");
+    if !wal_path.exists() {
+        return Ok(0);
+    }
+    let entries = Wal::read_entries(collection_dir)?;
+    let original_count = entries.len();
+    let kept: Vec<WalEntry> = entries
+        .into_iter()
+        .filter(|e| e.timestamp >= cutoff_ts)
+        .collect();
+    let removed = original_count.saturating_sub(kept.len());
+    if removed == 0 {
+        return Ok(0);
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&wal_path)
+        .map_err(|e| {
+            FerresError::Storage(format!(
+                "failed to truncate WAL for compaction at {}: {e}",
+                wal_path.display()
+            ))
+        })?;
+    if compress {
+        file.write_all(WAL_ZSTD_MAGIC).map_err(|e| {
+            FerresError::Storage(format!(
+                "failed to write WAL magic at {}: {e}",
+                wal_path.display()
+            ))
+        })?;
+    }
+    let mut writer = BufWriter::new(file);
+    for entry in &kept {
+        if compress {
+            let json = serde_json::to_string(entry)
+                .map_err(|e| FerresError::Storage(format!("failed to serialize WAL entry: {e}")))?;
+            let compressed = zstd::encode_all(json.as_bytes(), 0)
+                .map_err(|e| FerresError::Storage(format!("failed to compress WAL entry: {e}")))?;
+            let len = compressed.len() as u32;
+            writer.write_all(&len.to_le_bytes()).map_err(|e| {
+                FerresError::Storage(format!("failed to write WAL frame length: {e}"))
+            })?;
+            writer.write_all(&compressed).map_err(|e| {
+                FerresError::Storage(format!("failed to write WAL compressed frame: {e}"))
+            })?;
+        } else {
+            let json = serde_json::to_string(entry)
+                .map_err(|e| FerresError::Storage(format!("failed to serialize WAL entry: {e}")))?;
+            writer
+                .write_all(json.as_bytes())
+                .map_err(|e| FerresError::Storage(format!("failed to write WAL entry: {e}")))?;
+            writer
+                .write_all(b"\n")
+                .map_err(|e| FerresError::Storage(format!("failed to write WAL newline: {e}")))?;
+        }
+    }
+    writer
+        .flush()
+        .map_err(|e| FerresError::Storage(format!("failed to flush WAL after compaction: {e}")))?;
+    debug!(
+        path = %wal_path.display(),
+        removed,
+        kept = kept.len(),
+        "WAL compacted by retention"
+    );
+    Ok(removed)
+}
+
 // ─── Recovery ─────────────────────────────────────────────────────────
+
+/// Lê o timestamp do último snapshot (gravado por `FileStorage::save_collection`).
+/// Retorna 0 se o ficheiro não existir (compatibilidade com instalações antigas).
+pub fn read_last_snapshot_timestamp(collection_dir: &Path) -> u64 {
+    let path = collection_dir.join("last_snapshot_timestamp");
+    if !path.exists() {
+        return 0;
+    }
+    match fs::read_to_string(&path) {
+        Ok(s) => s.trim().parse().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
 
 /// Carrega uma coleção do snapshot e re-aplica entradas pendentes do WAL.
 ///
@@ -537,19 +657,17 @@ pub fn recover_collection(collection_dir: &Path) -> Result<Option<Collection>, F
 
         for entry in &entries {
             match &entry.operation {
-                WalOperation::Upsert { point } => {
-                    match collection.insert(point.clone()) {
-                        Ok(_) => applied += 1,
-                        Err(e) => {
-                            warn!(
-                                id = %point.id,
-                                error = %e,
-                                "failed to replay upsert, skipping"
-                            );
-                            skipped += 1;
-                        }
+                WalOperation::Upsert { point } => match collection.insert(point.clone()) {
+                    Ok(_) => applied += 1,
+                    Err(e) => {
+                        warn!(
+                            id = %point.id,
+                            error = %e,
+                            "failed to replay upsert, skipping"
+                        );
+                        skipped += 1;
                     }
-                }
+                },
                 WalOperation::Delete { id } => {
                     match collection.remove(id) {
                         Ok(_) => applied += 1,
@@ -568,6 +686,18 @@ pub fn recover_collection(collection_dir: &Path) -> Result<Option<Collection>, F
                         }
                     }
                 }
+                WalOperation::Link { from, to } => match collection.add_relation(from, to) {
+                    Ok(_) => applied += 1,
+                    Err(e) => {
+                        warn!(
+                            from = %from,
+                            to = %to,
+                            error = %e,
+                            "failed to replay link, skipping"
+                        );
+                        skipped += 1;
+                    }
+                },
             }
         }
 
@@ -580,6 +710,85 @@ pub fn recover_collection(collection_dir: &Path) -> Result<Option<Collection>, F
     }
 
     Ok(Some(collection))
+}
+
+/// Point-in-Time Recovery: carrega o último snapshot e re-aplica o WAL apenas
+/// até o momento solicitado (`target_timestamp` inclusive).
+///
+/// - O snapshot on-disk representa o estado no momento do último `save_collection`.
+/// - Apenas entradas do WAL com `entry.timestamp <= target_timestamp` são aplicadas.
+/// - Se `target_timestamp` for anterior ao snapshot, apenas o snapshot é carregado
+///   (nenhuma entrada WAL é aplicada); o snapshot já representa um estado anterior.
+///
+/// Retorna erro se a coleção não existir ou não puder ser carregada.
+pub fn recover_collection_to_timestamp(
+    collection_dir: &Path,
+    target_timestamp: u64,
+) -> Result<Option<Collection>, FerresError> {
+    let config_path = collection_dir.join("config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let snapshot_ts = read_last_snapshot_timestamp(collection_dir);
+    let mut collection = FileStorage::load_collection(collection_dir)?;
+
+    let entries = Wal::read_entries(collection_dir)?;
+    // When snapshot_ts is 0 (legacy: file missing), apply all WAL entries up to target.
+    let to_apply: Vec<_> = entries
+        .iter()
+        .filter(|e| {
+            e.timestamp <= target_timestamp && (snapshot_ts == 0 || e.timestamp > snapshot_ts)
+        })
+        .collect();
+
+    if !to_apply.is_empty() {
+        info!(
+            collection = %collection.name(),
+            target_timestamp,
+            applying = to_apply.len(),
+            "PITR: replaying WAL entries up to timestamp"
+        );
+        for entry in to_apply {
+            match &entry.operation {
+                WalOperation::Upsert { point } => {
+                    let _ = collection.insert(point.clone());
+                }
+                WalOperation::Delete { id } => {
+                    let _ = collection.remove(id);
+                }
+                WalOperation::Link { from, to } => {
+                    let _ = collection.add_relation(from, to);
+                }
+            }
+        }
+    }
+
+    Ok(Some(collection))
+}
+
+/// Lista pontos de restauração para PITR: timestamp do último snapshot mais
+/// os timestamps únicos das entradas do WAL (ordenados). Útil para a UI escolher
+/// um momento para restaurar.
+pub fn list_restore_points(collection_dir: &Path) -> Result<RestorePoints, FerresError> {
+    let snapshot_ts = read_last_snapshot_timestamp(collection_dir);
+    let entries = Wal::read_entries(collection_dir)?;
+    let mut wal_timestamps: Vec<u64> = entries.iter().map(|e| e.timestamp).collect();
+    wal_timestamps.sort();
+    wal_timestamps.dedup();
+    Ok(RestorePoints {
+        last_snapshot_timestamp: snapshot_ts,
+        wal_timestamps,
+    })
+}
+
+/// Pontos de restauração disponíveis para uma coleção (PITR).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RestorePoints {
+    /// Timestamp Unix do último snapshot.
+    pub last_snapshot_timestamp: u64,
+    /// Timestamps únicos das entradas no WAL (ordenados).
+    pub wal_timestamps: Vec<u64>,
 }
 
 /// Helper: timestamp Unix atual em segundos.
@@ -610,6 +819,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         }
     }
 
@@ -677,11 +887,28 @@ mod tests {
     fn wal_delete_entry_format() {
         let entry = WalEntry {
             timestamp: 1234567890,
-            operation: WalOperation::Delete { id: "point-123".to_string() },
+            operation: WalOperation::Delete {
+                id: "point-123".to_string(),
+            },
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"op\":\"delete\""));
         assert!(json.contains("\"point-123\""));
+    }
+
+    #[test]
+    fn wal_link_entry_format() {
+        let entry = WalEntry {
+            timestamp: 1234567890,
+            operation: WalOperation::Link {
+                from: "id_A".to_string(),
+                to: "id_B".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"op\":\"link\""));
+        assert!(json.contains("\"id_A\""));
+        assert!(json.contains("\"id_B\""));
     }
 
     #[test]
@@ -787,11 +1014,12 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Escreve WAL com 1 upsert adicional
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
-        wal.append_upsert(&make_point("c", vec![0.0, 0.0, 1.0])).unwrap();
+        wal.append_upsert(&make_point("c", vec![0.0, 0.0, 1.0]))
+            .unwrap();
 
         // Recupera
         let recovered = recover_collection(&dir).unwrap().unwrap();
@@ -811,7 +1039,7 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Cria wal.log vazio
         fs::write(dir.join("wal.log"), "").unwrap();
@@ -829,7 +1057,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Garante que não há wal.log
         let wal_path = dir.join("wal.log");
@@ -861,11 +1089,12 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert A(v2)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
-        wal.append_upsert(&make_point("a", vec![0.0, 1.0, 0.0])).unwrap();
+        wal.append_upsert(&make_point("a", vec![0.0, 1.0, 0.0]))
+            .unwrap();
 
         // Recupera — A deve ter v2
         let recovered = recover_collection(&dir).unwrap().unwrap();
@@ -883,7 +1112,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com delete(A)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -903,7 +1132,7 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com delete(X) — X não existe
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
@@ -913,6 +1142,31 @@ mod tests {
         let recovered = recover_collection(&dir).unwrap().unwrap();
         assert_eq!(recovered.len(), 1);
         assert!(recovered.get("a").is_some());
+    }
+
+    #[test]
+    fn recovery_link_replay() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("test_col");
+
+        // Snapshot com A, B (sem relações)
+        let config = test_config("test_col");
+        let mut col = Collection::new(config);
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
+
+        // WAL com link(a, b)
+        let mut wal = Wal::open(&dir, 1000, false).unwrap();
+        wal.append_link("a", "b").unwrap();
+
+        // Recovery deve aplicar o link
+        let recovered = recover_collection(&dir).unwrap().unwrap();
+        assert_eq!(recovered.len(), 2);
+        let pa = recovered.get("a").unwrap();
+        let pb = recovered.get("b").unwrap();
+        assert_eq!(pa.relations.as_deref(), Some(&["b".to_string()][..]));
+        assert_eq!(pb.relations.as_deref(), Some(&["a".to_string()][..]));
     }
 
     // ─── Crash Simulation Tests ───────────────────────────────────────
@@ -927,7 +1181,7 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert(C) válido + linha truncada (simula crash)
         let p = make_point("c", vec![0.0, 0.0, 1.0]);
@@ -959,12 +1213,13 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL tem upsert(C) — mas a coleção em memória NÃO foi mutada
         // (simula crash entre WAL append e collection.insert)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
-        wal.append_upsert(&make_point("c", vec![0.0, 0.0, 1.0])).unwrap();
+        wal.append_upsert(&make_point("c", vec![0.0, 0.0, 1.0]))
+            .unwrap();
         drop(wal);
         // NÃO chamamos col.insert — simulando crash
 
@@ -983,16 +1238,17 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert(B)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
-        wal.append_upsert(&make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
+        wal.append_upsert(&make_point("b", vec![0.0, 1.0, 0.0]))
+            .unwrap();
         drop(wal);
 
         // Novo snapshot com {A, B} — mas NÃO trunca WAL (simula crash)
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
         // WAL ainda tem upsert(B)
 
         // Recovery: snapshot {A,B} + replay upsert(B) = idempotente
@@ -1013,13 +1269,15 @@ mod tests {
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
         col.insert(make_point("c", vec![0.0, 0.0, 1.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL: delete(B), upsert(D), upsert(A com novo vetor)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
         wal.append_delete("b").unwrap();
-        wal.append_upsert(&make_point("d", vec![1.0, 1.0, 0.0])).unwrap();
-        wal.append_upsert(&make_point("a", vec![0.5, 0.5, 0.0])).unwrap();
+        wal.append_upsert(&make_point("d", vec![1.0, 1.0, 0.0]))
+            .unwrap();
+        wal.append_upsert(&make_point("a", vec![0.5, 0.5, 0.0]))
+            .unwrap();
         drop(wal);
 
         // Recovery: {A(v2), C, D}
@@ -1041,11 +1299,12 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert(C)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
-        wal.append_upsert(&make_point("c", vec![0.0, 0.0, 1.0])).unwrap();
+        wal.append_upsert(&make_point("c", vec![0.0, 0.0, 1.0]))
+            .unwrap();
         drop(wal);
 
         // Simula crash durante snapshot: corrompe points.jsonl parcialmente
@@ -1062,7 +1321,7 @@ mod tests {
         // o snapshot anterior. Na prática, precisamos de um snapshot válido.
         // Este teste valida que o sistema detecta corrupção.
         let result = recover_collection(&dir);
-        
+
         // Se o snapshot estiver corrompido, o recovery pode falhar
         // Mas isso é esperado - o sistema detecta corrupção
         // Em produção, teríamos backups ou snapshots anteriores
@@ -1070,7 +1329,7 @@ mod tests {
             // Corrupção detectada - comportamento esperado
             return;
         }
-        
+
         // Se conseguir recuperar, deve ter A, B do snapshot + C do WAL
         let recovered = result.unwrap().unwrap();
         assert_eq!(recovered.len(), 3);
@@ -1084,12 +1343,13 @@ mod tests {
         // Snapshot inicial vazio
         let config = test_config("test_col");
         let col = Collection::new(config);
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Simula batch de 50 operações, crash após 30
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
         for i in 0..30 {
-            wal.append_upsert(&make_point(&format!("p{i}"), vec![i as f32, 0.0, 0.0])).unwrap();
+            wal.append_upsert(&make_point(&format!("p{i}"), vec![i as f32, 0.0, 0.0]))
+                .unwrap();
         }
         drop(wal);
 
@@ -1114,18 +1374,20 @@ mod tests {
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com operações
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
         wal.append_delete("b").unwrap();
-        wal.append_upsert(&make_point("c", vec![0.0, 0.0, 1.0])).unwrap();
-        wal.append_upsert(&make_point("d", vec![0.5, 0.5, 0.0])).unwrap();
+        wal.append_upsert(&make_point("c", vec![0.0, 0.0, 1.0]))
+            .unwrap();
+        wal.append_upsert(&make_point("d", vec![0.5, 0.5, 0.0]))
+            .unwrap();
         drop(wal);
 
         // Recovery
         let recovered = recover_collection(&dir).unwrap().unwrap();
-        
+
         // Valida consistência: estado final deve ser {A, C, D}
         assert_eq!(recovered.len(), 3);
         assert!(recovered.get("a").is_some());
@@ -1149,12 +1411,13 @@ mod tests {
         // Snapshot inicial
         let config = test_config("test_col");
         let col = Collection::new(config);
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com exatamente 1000 operações (threshold)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
         for i in 0..1000 {
-            wal.append_upsert(&make_point(&format!("p{i}"), vec![i as f32, 0.0, 0.0])).unwrap();
+            wal.append_upsert(&make_point(&format!("p{i}"), vec![i as f32, 0.0, 0.0]))
+                .unwrap();
         }
         assert!(wal.should_snapshot());
         drop(wal);
@@ -1176,16 +1439,17 @@ mod tests {
         let config = test_config("test_col");
         let mut col = Collection::new(config);
         col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL com upsert(B)
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
-        wal.append_upsert(&make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
+        wal.append_upsert(&make_point("b", vec![0.0, 1.0, 0.0]))
+            .unwrap();
         drop(wal);
 
         // Novo snapshot com {A, B}
         col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Simula crash durante truncate: WAL ainda existe mas deveria ter sido truncado
         // (não chamamos truncate_after_snapshot)
@@ -1205,7 +1469,7 @@ mod tests {
         // Snapshot inicial
         let config = test_config("test_col");
         let col = Collection::new(config);
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // Escreve WAL manualmente com entradas válidas + parcialmente escrita
         let wal_path = dir.join("wal.log");
@@ -1231,7 +1495,8 @@ mod tests {
         let _json3 = serde_json::to_string(&entry3).unwrap();
 
         // Simula crash: última entrada parcialmente escrita
-        let content = format!("{json1}\n{json2}\n{{\"timestamp\":3,\"operation\":{{\"op\":\"upsert\"");
+        let content =
+            format!("{json1}\n{json2}\n{{\"timestamp\":3,\"operation\":{{\"op\":\"upsert\"");
         fs::write(&wal_path, content).unwrap();
 
         // Recovery deve aplicar apenas as 2 entradas válidas
@@ -1250,21 +1515,28 @@ mod tests {
         // Cria coleção com pontos conhecidos
         let config = test_config("test_col");
         let mut col = Collection::new(config);
-        
+
         // Insere pontos com vetores distintos para busca
-        col.insert(make_point("near_origin", vec![0.1, 0.1, 0.1])).unwrap();
-        col.insert(make_point("far_away", vec![10.0, 10.0, 10.0])).unwrap();
-        FileStorage::save_collection(&col, &dir, false).unwrap();
+        col.insert(make_point("near_origin", vec![0.1, 0.1, 0.1]))
+            .unwrap();
+        col.insert(make_point("far_away", vec![10.0, 10.0, 10.0]))
+            .unwrap();
+        FileStorage::save_collection(&col, &dir, false, false).unwrap();
 
         // WAL adiciona mais pontos
         let mut wal = Wal::open(&dir, 1000, false).unwrap();
-        wal.append_upsert(&make_point("near_origin2", vec![0.2, 0.2, 0.2])).unwrap();
+        wal.append_upsert(&make_point("near_origin2", vec![0.2, 0.2, 0.2]))
+            .unwrap();
         wal.append_delete("far_away").unwrap();
         drop(wal);
 
         // Recovery
         let recovered = recover_collection(&dir).unwrap().unwrap();
-        assert_eq!(recovered.len(), 2, "recovery must yield near_origin and near_origin2");
+        assert_eq!(
+            recovered.len(),
+            2,
+            "recovery must yield near_origin and near_origin2"
+        );
 
         // Valida que busca funciona corretamente após recovery
         let query = vec![0.0, 0.0, 0.0];

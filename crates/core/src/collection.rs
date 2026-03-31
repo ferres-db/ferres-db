@@ -34,9 +34,13 @@ use rayon::prelude::*;
 use crate::bm25::BM25Index;
 use crate::error::FerresError;
 use crate::explain::ExplainMeta;
+use crate::graph;
 use crate::point::Point;
 use crate::quantization::QuantizationConfig;
-use crate::search::{normalize_vectors_parallel, ANNIndex, DistanceMetric, HnswConfig, create_ann_index};
+use crate::search::{
+    create_ann_index, distance_between, normalize_vectors_parallel, ANNIndex, DistanceMetric,
+    HnswConfig,
+};
 use crate::tiered::TieredStorageConfig;
 
 // ─── CollectionConfig ───────────────────────────────────────────────
@@ -71,6 +75,10 @@ pub struct CollectionConfig {
     /// Hot (RAM), Warm (mmap) e Cold (disco) baseado na frequência de acesso.
     #[serde(default)]
     pub tiered_storage: TieredStorageConfig,
+    /// Período de retenção em dias para snapshots e WAL. None = manter indefinidamente.
+    /// O worker de retenção remove entradas do WAL mais antigas que este período.
+    #[serde(default)]
+    pub retention_days: Option<u32>,
 }
 
 fn default_cache_size() -> usize {
@@ -136,6 +144,7 @@ fn synthetic_point_with_vector(p: &Point, vector: Vec<f32>) -> Point {
         namespace: p.namespace.clone(),
         expires_at: p.expires_at.clone(),
         vectors: None,
+        relations: p.relations.clone(),
     }
 }
 
@@ -282,12 +291,11 @@ impl Collection {
             if synthetic.is_empty() {
                 continue;
             }
-            let mut idx =
-                create_ann_index(
-                    collection.config.distance,
-                    collection.config.hnsw.clone(),
-                    &collection.config.quantization,
-                );
+            let mut idx = create_ann_index(
+                collection.config.distance,
+                collection.config.hnsw.clone(),
+                &collection.config.quantization,
+            );
             idx.build(&synthetic)?;
             collection.vector_indices.insert(field_name, idx);
         }
@@ -653,7 +661,8 @@ impl Collection {
                     points = self.points.len(),
                     dimension = self.config.dimension,
                     vector_field = ?index_to_use,
-                ).entered();
+                )
+                .entered();
                 match index_to_use {
                     None => self.index.search(query, k, None)?,
                     Some(f) => self.vector_indices.get(f).unwrap().search(query, k, None)?,
@@ -672,11 +681,91 @@ impl Collection {
             points = self.points.len(),
             dimension = self.config.dimension,
             vector_field = ?index_to_use,
-        ).entered();
+        )
+        .entered();
         match index_to_use {
             None => self.index.search(query, k, predicate),
-            Some(f) => self.vector_indices.get(f).unwrap().search(query, k, predicate),
+            Some(f) => self
+                .vector_indices
+                .get(f)
+                .unwrap()
+                .search(query, k, predicate),
         }
+    }
+
+    /// Busca com re-ranking opcional via Cross-Encoder (ex.: BGE-Reranker).
+    ///
+    /// Quando `reranker` é `Some`, recupera `limit * 5` candidatos via HNSW, re-pontua cada um
+    /// com o modelo Cross-Encoder (query + vetor do documento) e retorna os top `limit` ordenados
+    /// pelo score do reranker (maior = mais relevante). Quando `reranker` é `None`, equivale a
+    /// [`search`](Self::search).
+    pub fn search_with_rerank(
+        &self,
+        query: &[f32],
+        k: usize,
+        predicate: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+        vector_field: Option<&str>,
+        reranker: Option<&dyn crate::rerank::Reranker>,
+    ) -> Result<Vec<(String, f32)>, FerresError> {
+        self.validate_dimension(query)?;
+        let r = match reranker {
+            Some(r) => r,
+            None => return self.search(query, k, predicate, vector_field),
+        };
+        if r.dimension() != self.config.dimension {
+            return Err(FerresError::InvalidVector {
+                reason: format!(
+                    "reranker dimension {} does not match collection dimension {}",
+                    r.dimension(),
+                    self.config.dimension
+                ),
+            });
+        }
+        let index_to_use = match vector_field {
+            None | Some("default") => None,
+            Some(f) => {
+                if !self.vector_indices.contains_key(f) {
+                    return Err(FerresError::UnknownVectorField(f.to_string()));
+                }
+                Some(f)
+            }
+        };
+        let k_candidates = (k * 5).min(self.points.len().max(1));
+        let candidates = match index_to_use {
+            None => self.index.search(query, k_candidates, predicate)?,
+            Some(f) => {
+                self.vector_indices
+                    .get(f)
+                    .unwrap()
+                    .search(query, k_candidates, predicate)?
+            }
+        };
+        if candidates.is_empty() {
+            return Ok(candidates);
+        }
+        let mut scored: Vec<(String, f32)> = Vec::with_capacity(candidates.len());
+        for (storage_id, _) in candidates {
+            let doc_vec = match index_to_use {
+                None => self.points.get(&storage_id).map(|p| p.vector.as_slice()),
+                Some(f) => self
+                    .points
+                    .get(&storage_id)
+                    .and_then(|p| p.vectors.as_ref())
+                    .and_then(|m| m.get(f))
+                    .map(|v| v.as_slice()),
+            };
+            let doc_vec = match doc_vec {
+                Some(v) => v,
+                None => continue,
+            };
+            match r.score(query, doc_vec) {
+                Ok(score) => scored.push((storage_id, score)),
+                Err(_) => continue,
+            }
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        Ok(scored)
     }
 
     /// Busca os `k` vizinhos mais próximos com metadados de explicação.
@@ -703,8 +792,44 @@ impl Collection {
         };
         match index_to_use {
             None => self.index.search_explain(query, k, predicate),
-            Some(f) => self.vector_indices.get(f).unwrap().search_explain(query, k, predicate),
+            Some(f) => self
+                .vector_indices
+                .get(f)
+                .unwrap()
+                .search_explain(query, k, predicate),
         }
+    }
+
+    /// Busca conectada (graph + vetor): restringe candidatos ao subgrafo e ordena por similaridade.
+    ///
+    /// 1. Executa BFS a partir de `center_point_id` com `hops` saltos (subconjunto conectado).
+    /// 2. Dentro desse subconjunto, calcula a distância vetorial (Cosine/Euclidean/DotProduct)
+    ///    contra `query_vector`.
+    /// 3. Retorna os top `k` mais similares semanticamente e estruturalmente conectados.
+    pub fn search_connected(
+        &self,
+        query_vector: &[f32],
+        center_point_id: &str,
+        hops: u32,
+        k: usize,
+    ) -> Result<Vec<(String, f32)>, FerresError> {
+        self.validate_dimension(query_vector)?;
+        let get_point = |id: &str| self.points.get(id).cloned();
+        let candidates = graph::traverse_bfs(get_point, center_point_id, hops)?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let metric = self.config.distance;
+        let mut scored: Vec<(String, f32)> = candidates
+            .iter()
+            .map(|p| {
+                let dist = distance_between(query_vector, &p.vector, metric);
+                (p.storage_id(), dist)
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        Ok(scored)
     }
 
     /// Busca híbrida: combina resultados vetoriais e BM25 via estratégia de fusão.
@@ -723,10 +848,11 @@ impl Collection {
         strategy: &FusionStrategy,
     ) -> Result<Vec<(String, f32)>, FerresError> {
         self.validate_dimension(query_vector)?;
-        let bm25 = self
-            .bm25_index
-            .as_ref()
-            .ok_or_else(|| FerresError::Storage("hybrid search requires BM25 index enabled for this collection".to_string()))?;
+        let bm25 = self.bm25_index.as_ref().ok_or_else(|| {
+            FerresError::Storage(
+                "hybrid search requires BM25 index enabled for this collection".to_string(),
+            )
+        })?;
 
         let k_expanded = (limit * 3).max(50).min(self.points.len().max(1));
         let vec_results = self.search(query_vector, k_expanded, None, None)?;
@@ -787,6 +913,44 @@ impl Collection {
         if let Some(ref mut bm25) = self.bm25_index {
             bm25.remove_document(id);
         }
+        self.invalidate_search_cache();
+        self.dirty.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Adiciona uma relação entre dois pontos (grafo não direcionado).
+    ///
+    /// Atualiza a lista `relations` em ambos os pontos: `from_id` ganha `to_id`
+    /// e `to_id` ganha `from_id`. Os IDs devem ser as chaves de armazenamento
+    /// (storage_id), ou seja, o mesmo usado em `get(id)`.
+    pub fn add_relation(&mut self, from_id: &str, to_id: &str) -> Result<(), FerresError> {
+        if from_id == to_id {
+            return Err(FerresError::InvalidPointId(
+                "from and to must be different points".into(),
+            ));
+        }
+        let mut from_point = self
+            .points
+            .get(from_id)
+            .ok_or_else(|| FerresError::PointNotFound(from_id.to_string()))?
+            .clone();
+        let mut to_point = self
+            .points
+            .get(to_id)
+            .ok_or_else(|| FerresError::PointNotFound(to_id.to_string()))?
+            .clone();
+
+        fn ensure_contains(relations: &mut Option<Vec<String>>, id: &str) {
+            let list = relations.get_or_insert_with(Vec::new);
+            if !list.contains(&id.to_string()) {
+                list.push(id.to_string());
+            }
+        }
+        ensure_contains(&mut from_point.relations, to_id);
+        ensure_contains(&mut to_point.relations, from_id);
+
+        self.points.insert(from_id.to_string(), from_point);
+        self.points.insert(to_id.to_string(), to_point);
         self.invalidate_search_cache();
         self.dirty.store(true, Ordering::Release);
         Ok(())
@@ -873,6 +1037,60 @@ impl Collection {
         &self.config
     }
 
+    /// Define o período de retenção em dias (None = manter indefinidamente).
+    /// Persistência: chamar `FileStorage::save_collection` após alterar para gravar config.json.
+    pub fn set_retention_days(&mut self, days: Option<u32>) {
+        self.config.retention_days = days;
+    }
+
+    /// Valor atual de ef_search usado nas buscas (pode estar auto-ajustado).
+    pub fn current_hnsw_ef_search(&self) -> usize {
+        self.index.current_ef_search()
+    }
+
+    /// Define ef_search em runtime (para auto-tune). Aplica ao índice principal e aos índices de vetores nomeados.
+    pub fn set_hnsw_ef_search(&self, v: usize) {
+        self.index.set_ef_search(v);
+        for idx in self.vector_indices.values() {
+            idx.set_ef_search(v);
+        }
+    }
+
+    /// Ajusta ef_search dinamicamente com base na latência P95 observada (Auto-Tune FerresEngine).
+    ///
+    /// - Latência muito baixa e recall prioridade → aumenta ef_search (melhor recall).
+    /// - Latência alta (proxy para CPU sob estresse) → diminui ef_search (menor carga).
+    pub fn apply_hnsw_auto_tune(&self, p95_latency_ms: f64, recall_priority: bool) {
+        const EF_MIN: usize = 10;
+        const EF_MAX: usize = 200;
+        const STEP: usize = 10;
+        const P95_LOW_MS: f64 = 10.0;
+        const P95_HIGH_MS: f64 = 50.0;
+
+        let current = self.index.current_ef_search();
+        let base = self.config.hnsw.ef_search;
+        let (min_ef, max_ef) = ((base / 2).max(EF_MIN), (base * 2).min(EF_MAX));
+
+        let new_ef = if p95_latency_ms < P95_LOW_MS && recall_priority && current < max_ef {
+            (current + STEP).min(max_ef)
+        } else if p95_latency_ms > P95_HIGH_MS && current > min_ef {
+            current.saturating_sub(STEP).max(min_ef)
+        } else {
+            current
+        };
+
+        if new_ef != current {
+            self.set_hnsw_ef_search(new_ef);
+            tracing::debug!(
+                collection = %self.config.name,
+                p95_ms = p95_latency_ms,
+                previous_ef = current,
+                new_ef,
+                "hnsw auto-tune applied"
+            );
+        }
+    }
+
     /// Número de pontos na coleção.
     pub fn len(&self) -> usize {
         self.points.len()
@@ -926,8 +1144,7 @@ impl Collection {
     /// For a 1M × 384 collection (~1.5 GB), expect ~3 GB peak usage.
     pub fn points_snapshot(&self) -> (Vec<Point>, std::collections::HashSet<String>) {
         let points: Vec<Point> = self.points.values().cloned().collect();
-        let ids: std::collections::HashSet<String> =
-            self.points.keys().cloned().collect();
+        let ids: std::collections::HashSet<String> = self.points.keys().cloned().collect();
         (points, ids)
     }
 
@@ -992,6 +1209,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         }
     }
 
@@ -1116,6 +1334,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         };
         let mut col = Collection::new(config);
 
@@ -1133,7 +1352,9 @@ mod tests {
         assert_eq!(col.len(), 150);
 
         // Verifica que os pontos são buscáveis após rebuild
-        let results = col.search(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 5, None, None).unwrap();
+        let results = col
+            .search(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 5, None, None)
+            .unwrap();
         assert!(!results.is_empty());
     }
 
@@ -1143,8 +1364,10 @@ mod tests {
         let mut col = Collection::new(test_config());
 
         // Primeiro, insere alguns pontos individuais
-        col.insert(make_point("existing1", vec![1.0, 0.0, 0.0])).unwrap();
-        col.insert(make_point("existing2", vec![0.0, 1.0, 0.0])).unwrap();
+        col.insert(make_point("existing1", vec![1.0, 0.0, 0.0]))
+            .unwrap();
+        col.insert(make_point("existing2", vec![0.0, 1.0, 0.0]))
+            .unwrap();
         assert_eq!(col.len(), 2);
 
         // Depois, insere um batch pequeno
@@ -1186,6 +1409,50 @@ mod tests {
         let mut col = Collection::new(test_config());
         let result = col.remove("ghost");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_relation_updates_both_points() {
+        let mut col = Collection::new(test_config());
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        col.insert(make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
+
+        col.add_relation("a", "b").unwrap();
+
+        let pa = col.get("a").unwrap();
+        let pb = col.get("b").unwrap();
+        assert_eq!(pa.relations.as_deref(), Some(&["b".to_string()][..]));
+        assert_eq!(pb.relations.as_deref(), Some(&["a".to_string()][..]));
+    }
+
+    #[test]
+    fn add_relation_same_id_returns_error() {
+        let mut col = Collection::new(test_config());
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        let result = col.add_relation("a", "a");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_relation_nonexistent_returns_error() {
+        let mut col = Collection::new(test_config());
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        let result = col.add_relation("a", "ghost");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn search_connected_returns_similar_within_hops() {
+        let mut col = Collection::new(test_config());
+        col.insert(make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
+        col.insert(make_point("b", vec![0.9, 0.1, 0.0])).unwrap();
+        col.insert(make_point("c", vec![0.0, 0.0, 1.0])).unwrap();
+        col.add_relation("a", "b").unwrap();
+        col.add_relation("a", "c").unwrap();
+        let results = col.search_connected(&[1.0, 0.0, 0.0], "a", 1, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "a");
+        assert_eq!(results[1].0, "b");
     }
 
     #[test]
@@ -1243,6 +1510,7 @@ mod tests {
             bm25_text_field: "text".to_string(),
             quantization: QuantizationConfig::default(),
             tiered_storage: TieredStorageConfig::default(),
+            retention_days: None,
         };
         let mut col = Collection::new(config);
         col.insert(
@@ -1309,6 +1577,7 @@ mod tests {
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
                 tiered_storage: TieredStorageConfig::default(),
+                retention_days: None,
             };
 
             let mut col = Collection::new(config);
@@ -1333,7 +1602,9 @@ mod tests {
 
         /// Propriedade: o número de pontos na coleção deve ser igual ao número de inserções.
         #[quickcheck]
-        fn prop_collection_length_matches_insertions(points: Vec<(String, Vec<f32>)>) -> TestResult {
+        fn prop_collection_length_matches_insertions(
+            points: Vec<(String, Vec<f32>)>,
+        ) -> TestResult {
             if points.is_empty() || points.len() > 100 {
                 return TestResult::discard();
             }
@@ -1362,6 +1633,7 @@ mod tests {
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
                 tiered_storage: TieredStorageConfig::default(),
+                retention_days: None,
             };
 
             let mut col = Collection::new(config);
@@ -1416,6 +1688,7 @@ mod tests {
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
                 tiered_storage: TieredStorageConfig::default(),
+                retention_days: None,
             };
 
             let mut col = Collection::new(config);
@@ -1480,6 +1753,7 @@ mod tests {
                 bm25_text_field: "text".to_string(),
                 quantization: QuantizationConfig::default(),
                 tiered_storage: TieredStorageConfig::default(),
+                retention_days: None,
             };
 
             let mut col = Collection::new(config);

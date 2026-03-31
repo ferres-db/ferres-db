@@ -24,6 +24,7 @@
 //!   tombstones.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hnsw_rs::prelude::*;
 use rayon::prelude::*;
@@ -133,6 +134,12 @@ pub trait ANNIndex: Send + Sync {
         0
     }
 
+    /// Current ef_search used at search time (for HNSW: runtime value, may be auto-tuned).
+    fn current_ef_search(&self) -> usize;
+
+    /// Set ef_search at runtime (for HNSW auto-tuning). No-op for backends that do not support it.
+    fn set_ef_search(&self, v: usize);
+
     /// Busca os `k` vizinhos mais próximos com metadados de explicação.
     ///
     /// Retorna tuplas `(point_id, distância, ExplainMeta)` com informações
@@ -232,10 +239,8 @@ fn normalize_vector(v: &[f32]) -> Result<Vec<f32>, FerresError> {
 /// Útil para batch insert quando a métrica é Cosine.
 /// Pública para uso em otimizações de batch insert.
 pub fn normalize_vectors_parallel(vectors: &[Vec<f32>]) -> Result<Vec<Vec<f32>>, FerresError> {
-    let results: Vec<Result<Vec<f32>, FerresError>> = vectors
-        .par_iter()
-        .map(|v| normalize_vector(v))
-        .collect();
+    let results: Vec<Result<Vec<f32>, FerresError>> =
+        vectors.par_iter().map(|v| normalize_vector(v)).collect();
     results.into_iter().collect()
 }
 
@@ -435,6 +440,8 @@ pub struct HnswIndex {
     tombstones: HashSet<String>,
     distance: DistanceMetric,
     config: HnswConfig,
+    /// ef_search usado na busca; pode ser ajustado em runtime (auto-tune).
+    ef_search_runtime: AtomicUsize,
 }
 
 impl HnswIndex {
@@ -459,6 +466,7 @@ impl HnswIndex {
         );
 
         let inner = Self::create_variant(distance, &config);
+        let ef_search = config.ef_search;
 
         Self {
             inner,
@@ -467,6 +475,7 @@ impl HnswIndex {
             tombstones: HashSet::new(),
             distance,
             config,
+            ef_search_runtime: AtomicUsize::new(ef_search),
         }
     }
 
@@ -530,6 +539,14 @@ impl Drop for HnswIndex {
 impl ANNIndex for HnswIndex {
     fn tombstone_count(&self) -> usize {
         self.tombstones.len()
+    }
+
+    fn current_ef_search(&self) -> usize {
+        self.ef_search_runtime.load(Ordering::Relaxed)
+    }
+
+    fn set_ef_search(&self, v: usize) {
+        self.ef_search_runtime.store(v, Ordering::Relaxed);
     }
 
     fn build(&mut self, points: &[Point]) -> Result<(), FerresError> {
@@ -599,21 +616,11 @@ impl ANNIndex for HnswIndex {
                 tombstones: &self.tombstones,
                 predicate: pred,
             };
-            let mut ef = self
-                .config
-                .ef_search
-                .max(k.saturating_mul(5))
-                .min(max_points);
+            let ef_search = self.ef_search_runtime.load(Ordering::Relaxed);
+            let mut ef = ef_search.max(k.saturating_mul(5)).min(max_points);
             const MAX_ITER: usize = 20;
             let mut best = Vec::new();
             for _ in 0..MAX_ITER {
-                let _search_span = tracing::info_span!(
-                    "hnsw.search_filter",
-                    candidates = max_points,
-                    ef = ef,
-                    tombstones = self.tombstones.len(),
-                )
-                .entered();
                 let neighbours = match &self.inner {
                     IndexVariant::Cosine(hnsw) => {
                         hnsw.search_filter(&prepared, k, ef, Some(&adapter))
@@ -652,14 +659,7 @@ impl ANNIndex for HnswIndex {
 
         // Sem predicado: busca normal; pedimos mais para compensar tombstones.
         let extra = k.saturating_add(self.tombstones.len()).min(max_points);
-        let ef = self.config.ef_search.max(extra);
-        let _search_span = tracing::info_span!(
-            "hnsw.search",
-            candidates = max_points,
-            ef = ef,
-            tombstones = self.tombstones.len(),
-        )
-        .entered();
+        let ef = self.ef_search_runtime.load(Ordering::Relaxed).max(extra);
         let neighbours = match &self.inner {
             IndexVariant::Cosine(hnsw) => hnsw.search(&prepared, extra, ef),
             IndexVariant::DotProduct(hnsw) => hnsw.search(&prepared, extra, ef),
@@ -888,8 +888,15 @@ impl QuantizedHnswIndex {
     }
 }
 
-/// Calcula distância entre dois vetores f32 para re-ranking.
+/// Calcula distância entre dois vetores f32 para re-ranking (uso interno).
 fn compute_distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
+    distance_between(a, b, metric)
+}
+
+/// Distância entre dois vetores segundo a métrica (público para busca conectada, etc.).
+///
+/// Retorna valor tal que menor = mais similar (Euclidean L2², Cosine 1-cos, DotProduct 1-dot).
+pub fn distance_between(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
     match metric {
         DistanceMetric::Euclidean => euclidean_distance(a, b),
         DistanceMetric::Cosine => {
@@ -912,6 +919,14 @@ impl ANNIndex for QuantizedHnswIndex {
         self.inner.tombstone_count()
     }
 
+    fn current_ef_search(&self) -> usize {
+        self.inner.current_ef_search()
+    }
+
+    fn set_ef_search(&self, v: usize) {
+        self.inner.set_ef_search(v);
+    }
+
     fn build(&mut self, points: &[Point]) -> Result<(), FerresError> {
         if points.is_empty() {
             self.params = None;
@@ -930,10 +945,7 @@ impl ANNIndex for QuantizedHnswIndex {
         let params = ScalarQuantizationParams::calibrate(&vectors, self.config.quantile);
 
         // 2. Quantiza todos os vetores
-        self.quantized_vectors = points
-            .iter()
-            .map(|p| params.quantize(&p.vector))
-            .collect();
+        self.quantized_vectors = points.iter().map(|p| params.quantize(&p.vector)).collect();
 
         // 3. Mantém originais se always_ram
         if self.config.always_ram {
@@ -958,6 +970,7 @@ impl ANNIndex for QuantizedHnswIndex {
                 namespace: p.namespace.clone(),
                 expires_at: p.expires_at,
                 vectors: None,
+                relations: p.relations.clone(),
             })
             .collect();
 
@@ -1046,6 +1059,7 @@ impl ANNIndex for QuantizedHnswIndex {
             namespace: point.namespace.clone(),
             expires_at: point.expires_at,
             vectors: None,
+            relations: point.relations.clone(),
         };
 
         self.inner.add_point(&dq_point)
@@ -1082,9 +1096,11 @@ pub fn create_ann_index(
 ) -> Box<dyn ANNIndex> {
     match quantization {
         QuantizationConfig::None => Box::new(HnswIndex::new(distance, hnsw_config)),
-        QuantizationConfig::Scalar(sq_config) => {
-            Box::new(QuantizedHnswIndex::new(distance, hnsw_config, sq_config.clone()))
-        }
+        QuantizationConfig::Scalar(sq_config) => Box::new(QuantizedHnswIndex::new(
+            distance,
+            hnsw_config,
+            sq_config.clone(),
+        )),
     }
 }
 
@@ -1092,8 +1108,8 @@ pub fn create_ann_index(
 
 #[cfg(test)]
 mod tests {
-    use crate::error::FerresError;
     use super::*;
+    use crate::error::FerresError;
 
     /// Helper para criar pontos de teste sem validação (bypass do `new`).
     fn make_point(id: &str, vector: Vec<f32>) -> Point {
@@ -1105,6 +1121,7 @@ mod tests {
             namespace: None,
             expires_at: None,
             vectors: None,
+            relations: None,
         }
     }
 
@@ -1112,9 +1129,15 @@ mod tests {
     fn insert_and_search_returns_nearest() {
         let mut index = HnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default());
 
-        index.add_point(&make_point("a", vec![1.0, 0.0, 0.0])).unwrap();
-        index.add_point(&make_point("b", vec![0.0, 1.0, 0.0])).unwrap();
-        index.add_point(&make_point("c", vec![0.9, 0.1, 0.0])).unwrap();
+        index
+            .add_point(&make_point("a", vec![1.0, 0.0, 0.0]))
+            .unwrap();
+        index
+            .add_point(&make_point("b", vec![0.0, 1.0, 0.0]))
+            .unwrap();
+        index
+            .add_point(&make_point("c", vec![0.9, 0.1, 0.0]))
+            .unwrap();
 
         let results = index.search(&[1.0, 0.0, 0.0], 2, None).unwrap();
         assert_eq!(results.len(), 2);
@@ -1147,8 +1170,12 @@ mod tests {
     fn remove_point_excludes_from_search() {
         let mut index = HnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default());
 
-        index.add_point(&make_point("keep", vec![1.0, 0.0, 0.0])).unwrap();
-        index.add_point(&make_point("remove", vec![0.9, 0.1, 0.0])).unwrap();
+        index
+            .add_point(&make_point("keep", vec![1.0, 0.0, 0.0]))
+            .unwrap();
+        index
+            .add_point(&make_point("remove", vec![0.9, 0.1, 0.0]))
+            .unwrap();
 
         index.remove_point("remove");
 
@@ -1304,11 +1331,8 @@ mod tests {
             always_ram: false,
             quantile: 99.5,
         };
-        let mut quantized_index = QuantizedHnswIndex::new(
-            DistanceMetric::Euclidean,
-            hnsw_config,
-            sq_config,
-        );
+        let mut quantized_index =
+            QuantizedHnswIndex::new(DistanceMetric::Euclidean, hnsw_config, sq_config);
         quantized_index.build(&points).unwrap();
 
         // Compara recall para queries aleatórias
@@ -1321,8 +1345,10 @@ mod tests {
             let normal_results = normal_index.search(query, K, None).unwrap();
             let quantized_results = quantized_index.search(query, K, None).unwrap();
 
-            let normal_ids: std::collections::HashSet<&str> = normal_results.iter().map(|r| r.0.as_str()).collect();
-            let quantized_ids: std::collections::HashSet<&str> = quantized_results.iter().map(|r| r.0.as_str()).collect();
+            let normal_ids: std::collections::HashSet<&str> =
+                normal_results.iter().map(|r| r.0.as_str()).collect();
+            let quantized_ids: std::collections::HashSet<&str> =
+                quantized_results.iter().map(|r| r.0.as_str()).collect();
 
             total_overlap += normal_ids.intersection(&quantized_ids).count();
             total_possible += K.min(normal_results.len());
@@ -1340,11 +1366,8 @@ mod tests {
     #[test]
     fn test_quantized_hnsw_basic() {
         let sq_config = ScalarQuantizationConfig::default();
-        let mut index = QuantizedHnswIndex::new(
-            DistanceMetric::Euclidean,
-            HnswConfig::default(),
-            sq_config,
-        );
+        let mut index =
+            QuantizedHnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default(), sq_config);
 
         let points = vec![
             make_point("a", vec![1.0, 0.0, 0.0]),
@@ -1368,11 +1391,8 @@ mod tests {
             always_ram: true,
             quantile: 99.5,
         };
-        let mut index = QuantizedHnswIndex::new(
-            DistanceMetric::Euclidean,
-            HnswConfig::default(),
-            sq_config,
-        );
+        let mut index =
+            QuantizedHnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default(), sq_config);
 
         let points = vec![
             make_point("a", vec![1.0, 0.0, 0.0]),
@@ -1395,11 +1415,8 @@ mod tests {
     #[test]
     fn test_quantized_hnsw_add_point() {
         let sq_config = ScalarQuantizationConfig::default();
-        let mut index = QuantizedHnswIndex::new(
-            DistanceMetric::Euclidean,
-            HnswConfig::default(),
-            sq_config,
-        );
+        let mut index =
+            QuantizedHnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default(), sq_config);
 
         // Build inicial para calibrar com mais pontos para estabilidade
         let initial = vec![
@@ -1411,10 +1428,16 @@ mod tests {
         index.build(&initial).unwrap();
 
         // Adiciona ponto incremental
-        index.add_point(&make_point("e", vec![0.9, 0.1, 0.0])).unwrap();
+        index
+            .add_point(&make_point("e", vec![0.9, 0.1, 0.0]))
+            .unwrap();
 
         let results = index.search(&[1.0, 0.0, 0.0], 3, None).unwrap();
-        assert!(results.len() >= 2, "expected at least 2 results, got {}", results.len());
+        assert!(
+            results.len() >= 2,
+            "expected at least 2 results, got {}",
+            results.len()
+        );
         // O mais próximo de [1,0,0] deve ser "a"
         assert_eq!(results[0].0, "a");
     }
@@ -1423,11 +1446,8 @@ mod tests {
     #[test]
     fn test_quantized_hnsw_remove_point() {
         let sq_config = ScalarQuantizationConfig::default();
-        let mut index = QuantizedHnswIndex::new(
-            DistanceMetric::Euclidean,
-            HnswConfig::default(),
-            sq_config,
-        );
+        let mut index =
+            QuantizedHnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default(), sq_config);
 
         let points = vec![
             make_point("keep", vec![1.0, 0.0, 0.0]),
@@ -1459,14 +1479,15 @@ mod tests {
             .collect();
 
         let sq_config = ScalarQuantizationConfig::default();
-        let mut index = QuantizedHnswIndex::new(
-            DistanceMetric::Euclidean,
-            HnswConfig::default(),
-            sq_config,
-        );
+        let mut index =
+            QuantizedHnswIndex::new(DistanceMetric::Euclidean, HnswConfig::default(), sq_config);
 
         index.build(&points).unwrap();
-        assert_eq!(index.tombstone_memory_waste(), 0, "no tombstones after build");
+        assert_eq!(
+            index.tombstone_memory_waste(),
+            0,
+            "no tombstones after build"
+        );
 
         for i in 0..50 {
             index.remove_point(&format!("p{i}"));

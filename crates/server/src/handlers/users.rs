@@ -1,11 +1,11 @@
 //! # Handlers — usuários do dashboard (listar, criar, remover, alterar senha, permissões). Apenas Admin.
 
-use axum::extract::{State, Path};
+use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::auth::{AuthenticatedUser, RequireAdmin};
 use crate::audit::{self, AuditResult};
+use crate::auth::{AuthenticatedUser, RequireAdmin};
 use crate::error::{ApiError, ApiResult};
 use crate::permissions::Permission;
 use crate::state::AppState;
@@ -67,9 +67,13 @@ pub async fn create_user(
     // Audit trail
     {
         let entry = audit::audit_entry(
-            &admin_user.username, "create_user", &format!("user:{username}"),
+            &admin_user.username,
+            "create_user",
+            &format!("user:{username}"),
             serde_json::json!({"role": role.map(|r| r.as_str())}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         state.audit_logger.log(&entry);
     }
@@ -93,9 +97,13 @@ pub async fn delete_user(
     // Audit trail
     {
         let entry = audit::audit_entry(
-            &admin_user.username, "delete_user", &format!("user:id={id}"),
+            &admin_user.username,
+            "delete_user",
+            &format!("user:id={id}"),
             serde_json::json!({}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         state.audit_logger.log(&entry);
     }
@@ -128,9 +136,13 @@ pub async fn update_user_password(
     {
         let target_user = username.trim();
         let entry = audit::audit_entry(
-            &admin_user.username, "update_password", &format!("user:{target_user}"),
+            &admin_user.username,
+            "update_password",
+            &format!("user:{target_user}"),
             serde_json::json!({}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         state.audit_logger.log(&entry);
     }
@@ -165,12 +177,18 @@ pub async fn update_user_permissions(
         let target_user = username.trim();
         let perms_count = body.permissions.as_ref().map(|p| p.len()).unwrap_or(0);
         let entry = audit::audit_entry(
-            &admin_user.username, "update_permissions", &format!("user:{target_user}"),
+            &admin_user.username,
+            "update_permissions",
+            &format!("user:{target_user}"),
             serde_json::json!({"permissions_count": perms_count}),
-            AuditResult::Success, None, None,
+            AuditResult::Success,
+            None,
+            None,
         );
         state.audit_logger.log(&entry);
     }
 
-    Ok(Json(serde_json::json!({ "updated": true, "username": username.trim() })))
+    Ok(Json(
+        serde_json::json!({ "updated": true, "username": username.trim() }),
+    ))
 }

@@ -19,6 +19,8 @@ export interface Collection {
   enable_bm25?: boolean;
   bm25_text_field?: string;
   tiered_storage?: TieredStorageConfig;
+  /** Retenção em dias (WAL e dados antigos). Opcional. */
+  retention_days?: number | null;
 }
 
 export interface Point {
@@ -32,6 +34,32 @@ export interface Point {
   ttl?: number;
   /** Named vectors (e.g. title_vector, content_vector). Optional; search can target one via vector_field. */
   vectors?: Record<string, number[]>;
+  /** Related point IDs (graph edges). Returned by API when present. */
+  relations?: string[];
+}
+
+/** Graph node from subgraph API (id = storage_id). */
+export interface GraphNode {
+  id: string;
+  metadata?: Record<string, unknown>;
+  namespace?: string;
+  created_at?: number;
+  relations?: string[];
+  vector?: number[];
+}
+
+export interface GraphLink {
+  source: string;
+  target: string;
+}
+
+/** Alias for API "edges" response (same shape as GraphLink). */
+export type GraphEdge = GraphLink;
+
+export interface SubgraphResponse {
+  nodes: GraphNode[];
+  /** Edges (links) of the subgraph. */
+  edges: GraphEdge[];
 }
 
 export interface SearchResult {
@@ -40,6 +68,15 @@ export interface SearchResult {
   metadata?: Record<string, unknown>;
   /** Set when the point was stored with a namespace (multitenancy). */
   namespace?: string;
+}
+
+/** Response from POST /api/v1/collections/{name}/search (includes optional rerank_ms). */
+export interface SearchPointsResponse {
+  results: SearchResult[];
+  took_ms?: number;
+  query_id?: string;
+  /** Present when rerank=true was used and server applied re-ranking. */
+  rerank_ms?: number;
 }
 
 export interface QueriesPerMinuteBucket {
@@ -54,6 +91,29 @@ export interface GlobalStats {
   avg_latency_ms: number;
   queries_per_minute: QueriesPerMinuteBucket[];
   simd_enabled: boolean;
+  /** Replication role: "leader" or "replica" (experimental). */
+  role?: string;
+  /** Namespace physical isolation (multitenancy storage). */
+  namespace_physical_isolation?: boolean;
+  /** HNSW ef_search auto-tuning active (FerresEngine). */
+  hnsw_auto_tune_enabled?: boolean;
+  /** Dashboard label: e.g. "Optimized by FerresEngine". */
+  index_optimization_label?: string;
+}
+
+/** Cluster node (Raft foundation). */
+export interface ClusterNodeInfo {
+  id: string;
+  addr: string;
+  role: string;
+  replication_lag?: number;
+}
+
+/** Cluster status from GET /api/v1/cluster (nodes, leader, replication). */
+export interface ClusterStatus {
+  raft_enabled: boolean;
+  leader_id?: string;
+  nodes: ClusterNodeInfo[];
 }
 
 export interface QueryEntry {
@@ -88,6 +148,10 @@ export interface CollectionStats {
   p99_latency_ms: number;
   tombstone_count?: number;
   tombstone_memory_waste_bytes?: number;
+  /** Current HNSW ef_search (may be auto-tuned). */
+  ef_search_current?: number;
+  /** HNSW auto-tune enabled for this instance. */
+  hnsw_auto_tune_enabled?: boolean;
 }
 
 // Analytics (GET /api/v1/stats/analytics)
@@ -142,6 +206,13 @@ export interface TimeSeries10m {
   recent_latencies: RecentLatencyEntry[];
 }
 
+/** Top namespace por armazenamento (tenant que mais consome recursos). */
+export interface TopNamespaceByStorage {
+  namespace: string;
+  point_count: number;
+  storage_bytes_estimate: number;
+}
+
 export interface AnalyticsResponse {
   tier_distribution: AnalyticsTierDistribution;
   latency: AnalyticsLatency;
@@ -149,6 +220,10 @@ export interface AnalyticsResponse {
   circuit_breaker: AnalyticsCircuitBreaker;
   time_series_10m: TimeSeries10m;
   cache_hit_rate_pct: number | null;
+  /** Top namespaces por armazenamento (identificar tenants que mais consomem). */
+  top_namespaces_by_storage?: TopNamespaceByStorage[];
+  /** Média do tempo de re-ranking (ms) nas queries recentes que usaram rerank. */
+  rerank_overhead_ms_avg?: number | null;
 }
 
 export interface ApiKeyInfo {
@@ -156,6 +231,8 @@ export interface ApiKeyInfo {
   name: string;
   key_prefix: string;
   created_at: number;
+  /** Namespaces permitidos (vazio/undefined = todos). */
+  allowed_namespaces?: string[] | null;
 }
 
 export interface CreateApiKeyResponse {
@@ -315,6 +392,16 @@ export interface ExplainedResult {
   metadata?: Record<string, unknown>;
 }
 
+/** Metadados do percurso da busca (HNSW): camadas percorridas e comparações de distância. */
+export interface ExplainMeta {
+  /** Número de candidatos visitados (comparações de distância realizadas). */
+  candidates_visited: number;
+  /** Número de camadas do grafo HNSW percorridas. */
+  layers_traversed: number;
+  /** Número de tombstones (pontos removidos) ignorados durante a busca. */
+  tombstones_skipped: number;
+}
+
 export interface SearchExplainResponse {
   query_vector_norm: number;
   distance_metric: string;
@@ -327,6 +414,8 @@ export interface SearchExplainResponse {
     ef_search_used: number;
     tombstones_skipped: number;
   };
+  /** Metadados do percurso da busca (camadas, comparações). Presente quando o índice retorna (ex.: HNSW). */
+  explain_meta?: ExplainMeta;
 }
 
 // ─── Search Estimate ──────────────────────────────────────────────────

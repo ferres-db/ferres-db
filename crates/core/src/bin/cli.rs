@@ -7,9 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use ferres_db_core::{
-    CollectionConfig, DistanceMetric, FerresError, Point, VectorDB,
-};
+use ferres_db_core::{CollectionConfig, DistanceMetric, FerresError, Point, VectorDB};
 
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -115,7 +113,7 @@ fn main() {
 
 fn init_storage(path: &PathBuf) -> Result<(), FerresError> {
     info!(path = %path.display(), "initializing storage directory");
-    
+
     fs::create_dir_all(path).map_err(|e| {
         FerresError::Storage(format!(
             "failed to create storage directory {}: {e}",
@@ -147,6 +145,7 @@ fn create_collection(
         bm25_text_field: "text".to_string(),
         quantization: Default::default(),
         tiered_storage: Default::default(),
+        retention_days: None,
     };
 
     db.create_collection(config)?;
@@ -238,7 +237,10 @@ fn insert_points(
             })
             .collect::<Result<Vec<f32>, FerresError>>()?;
 
-        let metadata = json.get("metadata").cloned().unwrap_or(serde_json::Value::Null);
+        let metadata = json
+            .get("metadata")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         let point = Point::new(id, vector, metadata)?;
         points.push(point);
@@ -253,7 +255,11 @@ fn insert_points(
 
     db.upsert_points(&collection, points.clone())?;
 
-    println!("✓ Inserted {} points into collection '{}'", points.len(), collection);
+    println!(
+        "✓ Inserted {} points into collection '{}'",
+        points.len(),
+        collection
+    );
     Ok(())
 }
 
@@ -303,11 +309,13 @@ fn show_stats(storage_path: &Path, collection: String) -> Result<(), FerresError
     println!("\nCollection: {collection}");
     println!("{:-<50}", "");
     println!("Points:           {}", stats.num_points);
-    println!("Index size:       {} bytes ({:.2} MB)", 
+    println!(
+        "Index size:       {} bytes ({:.2} MB)",
         stats.index_size_bytes,
         stats.index_size_bytes as f64 / 1_048_576.0
     );
-    println!("Last updated:     {}", 
+    println!(
+        "Last updated:     {}",
         chrono::DateTime::from_timestamp(stats.last_updated as i64, 0)
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             .unwrap_or_else(|| "unknown".to_string())
@@ -336,4 +344,3 @@ fn parse_distance(s: &str) -> Result<DistanceMetric, FerresError> {
         ))),
     }
 }
-

@@ -3,6 +3,8 @@
 //! Middleware aceita: API key (Bearer <key>) ou JWT (Bearer <jwt>).
 //! JWT é usado após login do dashboard (usuários em SQLite).
 
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 use axum::{
     extract::Request,
     http::StatusCode,
@@ -10,8 +12,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -48,8 +48,8 @@ pub fn validate_jwt(token: &str) -> bool {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JwtClaims {
-    pub sub: String,   // username
-    pub role: String,  // admin | editor | viewer
+    pub sub: String,  // username
+    pub role: String, // admin | editor | viewer
     pub exp: i64,
     pub iat: i64,
 }
@@ -61,6 +61,8 @@ pub struct AuthUser {
     pub role: crate::users::Role,
     /// Permissões granulares (RBAC). Se None, aplica-se comportamento legado baseado em role.
     pub permissions: Option<Vec<crate::permissions::Permission>>,
+    /// Restrição de namespace (API key ou usuário). None = acesso a todos os namespaces.
+    pub namespace_allowance: Option<crate::permissions::NamespaceAllowance>,
 }
 
 fn looks_like_jwt(token: &str) -> bool {
@@ -95,10 +97,7 @@ fn is_valid_legacy(key: &str) -> bool {
 
 /// Middleware que requer API key válida no header `Authorization: Bearer <key>`.
 /// Aceita chaves do SQLite (api_keys) ou do legacy static (testes).
-pub async fn require_api_key(
-    req: Request,
-    next: Next,
-) -> Result<Response, impl IntoResponse> {
+pub async fn require_api_key(req: Request, next: Next) -> Result<Response, impl IntoResponse> {
     let auth_header = req
         .headers()
         .get("Authorization")
@@ -119,14 +118,24 @@ pub async fn require_api_key(
 
     use crate::users::Role;
 
-    // 1) API key (programática ou legacy) → full access (admin, sem restrições)
+    // 1) API key (programática ou legacy) → full access (admin), com possível restrição de namespace
     if crate::api_keys::ApiKeyStore::validate(api_key) || is_valid_legacy(api_key) {
-        let mut req = req;
-        req.extensions_mut().insert(AuthUser {
+        let namespace_allowance = crate::api_keys::get_meta_global(api_key).and_then(|meta| {
+            meta.allowed_namespaces
+                .map(|list| crate::permissions::NamespaceAllowance::Only(list))
+        });
+        let user = AuthUser {
             username: "api_key".to_string(),
             role: Role::Admin,
-            permissions: None, // Admin via API key: todas as permissões
-        });
+            permissions: None,
+            namespace_allowance,
+        };
+        // Validar namespace solicitado na query ou no header antes de prosseguir
+        if let Err(resp) = check_request_namespace(&req, &user) {
+            return Err(resp);
+        }
+        let mut req = req;
+        req.extensions_mut().insert(user);
         return Ok(next.run(req).await);
     }
 
@@ -157,19 +166,93 @@ pub async fn require_api_key(
                     username: token_data.claims.sub.clone(),
                     role,
                     permissions,
+                    namespace_allowance: None, // JWT: sem restrição de namespace por chave
                 });
                 return Ok(next.run(req).await);
             }
         }
+        // Token parece JWT mas falhou na validação (expirado ou assinatura inválida).
+        // Retorna 401 para que o cliente limpe o token e redirecione para login.
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "message": "Session expired or invalid. Please log in again.",
+                "code": "unauthorized"
+            })),
+        ));
     }
 
     Err((
         StatusCode::FORBIDDEN,
         Json(json!({
-            "message": "Invalid API key or session. Use a valid API key or log in to the dashboard.",
+            "message": "Invalid API key. Use a valid API key or log in to the dashboard.",
             "code": "forbidden"
         })),
     ))
+}
+
+/// Extrai o namespace solicitado na request (query param `namespace` ou header `X-Namespace`).
+fn requested_namespace_from_request(req: &Request) -> Option<String> {
+    if let Some(q) = req.uri().query() {
+        for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
+            if k == "namespace" && !v.is_empty() {
+                return Some(v.into_owned());
+            }
+        }
+    }
+    req.headers()
+        .get("x-namespace")
+        .or_else(|| req.headers().get("X-Namespace"))
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Valida se o usuário pode acessar o namespace solicitado na request (query/header).
+/// Retorna Err(403) se a chave tem restrição de namespace e o namespace solicitado não está permitido.
+fn check_request_namespace(
+    req: &Request,
+    user: &AuthUser,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let allowance = match &user.namespace_allowance {
+        None => return Ok(()),
+        Some(a) => a,
+    };
+    let requested = requested_namespace_from_request(req);
+    if allowance.allows(requested.as_deref()) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "message": "API key does not have access to the requested namespace.",
+                "code": "forbidden_namespace"
+            })),
+        ))
+    }
+}
+
+/// Verifica se o usuário pode acessar o namespace indicado (ex.: extraído do body).
+/// Use em handlers que recebem namespace no body. Retorna Err com ApiError para 403.
+pub fn check_namespace_access(
+    user: &AuthUser,
+    requested: Option<&str>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let allowance = match &user.namespace_allowance {
+        None => return Ok(()),
+        Some(a) => a,
+    };
+    if allowance.allows(requested) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "message": "API key does not have access to this namespace.",
+                "code": "forbidden_namespace"
+            })),
+        ))
+    }
 }
 
 fn forbidden_role() -> (StatusCode, Json<serde_json::Value>) {
@@ -285,7 +368,7 @@ pub fn check_user_permission(
     collection: &str,
     action: &crate::permissions::Action,
 ) -> crate::permissions::PermissionResult {
-    use crate::permissions::{PermissionResult, Action};
+    use crate::permissions::{Action, PermissionResult};
     use crate::users::Role;
 
     // Admin bypassa tudo

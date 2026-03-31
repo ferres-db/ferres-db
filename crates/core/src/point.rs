@@ -50,6 +50,9 @@ pub struct Point {
     /// contra o vetor principal (`vector`) ou contra um destes campos.
     #[serde(default)]
     pub vectors: Option<HashMap<String, Vec<f32>>>,
+    /// IDs dos pontos relacionados (grafo não direcionado). Usado para persistência de grafos.
+    #[serde(default)]
+    pub relations: Option<Vec<String>>,
 }
 
 impl Point {
@@ -113,6 +116,7 @@ impl Point {
             namespace: None,
             expires_at: None,
             vectors: None,
+            relations: None,
         })
     }
 
@@ -278,6 +282,27 @@ mod tests {
     }
 
     #[test]
+    fn point_deserialize_legacy_without_relations_field() {
+        let json = r#"{"id":"legacy","vector":[1.0],"metadata":null,"created_at":1}"#;
+        let point: Point = serde_json::from_str(json).unwrap();
+        assert_eq!(point.id, "legacy");
+        assert_eq!(point.relations, None);
+    }
+
+    #[test]
+    fn point_serialization_roundtrip_with_relations() {
+        let mut point = Point::new("p1", vec![0.1, 0.2], serde_json::Value::Null).unwrap();
+        point.relations = Some(vec!["p2".into(), "p3".into()]);
+
+        let json = serde_json::to_string(&point).unwrap();
+        let restored: Point = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(point.id, restored.id);
+        assert_eq!(point.relations, restored.relations);
+        assert_eq!(restored.relations, Some(vec!["p2".into(), "p3".into()]));
+    }
+
+    #[test]
     fn point_vector_for_field_default_and_named() {
         let mut vectors = HashMap::new();
         vectors.insert("title_vector".to_string(), vec![2.0, 3.0]);
@@ -290,11 +315,21 @@ mod tests {
             namespace: None,
             expires_at: None,
             vectors: Some(vectors),
+            relations: None,
         };
         assert_eq!(point.vector_for_field(None).unwrap(), &[1.0_f32, 0.0_f32]);
-        assert_eq!(point.vector_for_field(Some("default")).unwrap(), &[1.0_f32, 0.0_f32]);
-        assert_eq!(point.vector_for_field(Some("title_vector")).unwrap(), &[2.0_f32, 3.0_f32]);
-        assert_eq!(point.vector_for_field(Some("content_vector")).unwrap(), &[4.0_f32, 5.0_f32]);
+        assert_eq!(
+            point.vector_for_field(Some("default")).unwrap(),
+            &[1.0_f32, 0.0_f32]
+        );
+        assert_eq!(
+            point.vector_for_field(Some("title_vector")).unwrap(),
+            &[2.0_f32, 3.0_f32]
+        );
+        assert_eq!(
+            point.vector_for_field(Some("content_vector")).unwrap(),
+            &[4.0_f32, 5.0_f32]
+        );
         assert!(point.vector_for_field(Some("other")).is_none());
     }
 

@@ -6,10 +6,10 @@ use std::net::SocketAddr;
 
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
+use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tempfile::TempDir;
 
 use ferres_db_server::auth;
 use ferres_db_server::middleware;
@@ -47,11 +47,12 @@ async fn setup_server() -> TestServer {
         storage_path: storage_path.clone(),
         log_level: "error".to_string(),
         api_keys: Some(TEST_API_KEY.to_string()),
+        ..Default::default()
     };
 
-    let app_state = AppState::new(config.clone(), None, None).unwrap();
+    let app_state = AppState::new(config.clone(), None, None, None, None).unwrap();
 
-    let app = routes::create_router()
+    let app = routes::create_router(&config)
         .layer(axum::middleware::from_fn(middleware::request_logger))
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -67,10 +68,9 @@ async fn setup_server() -> TestServer {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let _server_handle = tokio::spawn(async move {
-        let server = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            });
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            shutdown_rx.await.ok();
+        });
         server.await.unwrap();
     });
 
@@ -116,9 +116,7 @@ async fn rest_upsert_points(
 ) -> reqwest::Response {
     let client = reqwest::Client::new();
     client
-        .post(format!(
-            "{base_url}/api/v1/collections/{collection}/points"
-        ))
+        .post(format!("{base_url}/api/v1/collections/{collection}/points"))
         .header("Authorization", format!("Bearer {TEST_API_KEY}"))
         .json(&json!({ "points": points }))
         .send()
@@ -134,10 +132,7 @@ async fn test_ws_upsert_10_points() {
     let server = setup_server().await;
     create_collection(&server.base_url, "ws-test-upsert", 3).await;
 
-    let url = format!(
-        "{}/api/v1/ws?token={}",
-        server.ws_url, TEST_API_KEY
-    );
+    let url = format!("{}/api/v1/ws?token={}", server.ws_url, TEST_API_KEY);
 
     let (ws_stream, _response) = connect_async(&url).await.expect("failed to connect");
     let (mut write, mut read) = ws_stream.split();
@@ -169,8 +164,7 @@ async fn test_ws_upsert_10_points() {
         loop {
             if let Some(Ok(msg)) = read.next().await {
                 let text = msg.into_text().unwrap_or_default();
-                let json: serde_json::Value =
-                    serde_json::from_str(&text).unwrap_or_default();
+                let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
                 if json["type"] == "ack" {
                     return json;
                 }
@@ -193,10 +187,7 @@ async fn test_ws_upsert_10_points() {
 async fn test_ws_ping_pong() {
     let server = setup_server().await;
 
-    let url = format!(
-        "{}/api/v1/ws?token={}",
-        server.ws_url, TEST_API_KEY
-    );
+    let url = format!("{}/api/v1/ws?token={}", server.ws_url, TEST_API_KEY);
 
     let (ws_stream, _) = connect_async(&url).await.expect("failed to connect");
     let (mut write, mut read) = ws_stream.split();
@@ -213,8 +204,7 @@ async fn test_ws_ping_pong() {
         loop {
             if let Some(Ok(msg)) = read.next().await {
                 let text = msg.into_text().unwrap_or_default();
-                let json: serde_json::Value =
-                    serde_json::from_str(&text).unwrap_or_default();
+                let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
                 if json["type"] == "pong" {
                     return json;
                 }
@@ -234,10 +224,7 @@ async fn test_ws_ping_pong() {
 async fn test_ws_upsert_collection_not_found() {
     let server = setup_server().await;
 
-    let url = format!(
-        "{}/api/v1/ws?token={}",
-        server.ws_url, TEST_API_KEY
-    );
+    let url = format!("{}/api/v1/ws?token={}", server.ws_url, TEST_API_KEY);
 
     let (ws_stream, _) = connect_async(&url).await.expect("failed to connect");
     let (mut write, mut read) = ws_stream.split();
@@ -258,8 +245,7 @@ async fn test_ws_upsert_collection_not_found() {
         loop {
             if let Some(Ok(msg)) = read.next().await {
                 let text = msg.into_text().unwrap_or_default();
-                let json: serde_json::Value =
-                    serde_json::from_str(&text).unwrap_or_default();
+                let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
                 if json["type"] == "error" {
                     return json;
                 }
@@ -283,10 +269,7 @@ async fn test_ws_subscribe_and_receive_event() {
     let coll_name = "ws-test-subscribe";
     create_collection(&server.base_url, coll_name, 3).await;
 
-    let url = format!(
-        "{}/api/v1/ws?token={}",
-        server.ws_url, TEST_API_KEY
-    );
+    let url = format!("{}/api/v1/ws?token={}", server.ws_url, TEST_API_KEY);
 
     let (ws_stream, _) = connect_async(&url).await.expect("failed to connect");
     let (mut write, mut read) = ws_stream.split();
@@ -360,7 +343,10 @@ async fn test_ws_unauthenticated_rejected() {
 
     // Tentativa de conexão sem token — deve falhar
     let result = connect_async(&url).await;
-    assert!(result.is_err(), "connection should be rejected without token");
+    assert!(
+        result.is_err(),
+        "connection should be rejected without token"
+    );
 }
 
 /// Testa mensagem inválida.
@@ -368,10 +354,7 @@ async fn test_ws_unauthenticated_rejected() {
 async fn test_ws_invalid_message() {
     let server = setup_server().await;
 
-    let url = format!(
-        "{}/api/v1/ws?token={}",
-        server.ws_url, TEST_API_KEY
-    );
+    let url = format!("{}/api/v1/ws?token={}", server.ws_url, TEST_API_KEY);
 
     let (ws_stream, _) = connect_async(&url).await.expect("failed to connect");
     let (mut write, mut read) = ws_stream.split();
@@ -387,8 +370,7 @@ async fn test_ws_invalid_message() {
         loop {
             if let Some(Ok(msg)) = read.next().await {
                 let text = msg.into_text().unwrap_or_default();
-                let json: serde_json::Value =
-                    serde_json::from_str(&text).unwrap_or_default();
+                let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
                 if json["type"] == "error" {
                     return json;
                 }

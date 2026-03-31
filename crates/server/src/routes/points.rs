@@ -5,6 +5,7 @@ use axum::{
     Router,
 };
 
+use crate::handlers::graph::{get_subgraph, link_points};
 use crate::handlers::points::{
     delete_points, estimate_search, explain_search, get_point, list_points, search_hybrid,
     search_points, upsert_points,
@@ -18,10 +19,7 @@ pub fn create_points_routes() -> Router<AppState> {
             "/api/v1/collections/{name}/points",
             get(list_points).post(upsert_points).delete(delete_points),
         )
-        .route(
-            "/api/v1/collections/{name}/search",
-            post(search_points),
-        )
+        .route("/api/v1/collections/{name}/search", post(search_points))
         .route(
             "/api/v1/collections/{name}/search/hybrid",
             post(search_hybrid),
@@ -34,9 +32,10 @@ pub fn create_points_routes() -> Router<AppState> {
             "/api/v1/collections/{name}/search/estimate",
             post(estimate_search),
         )
+        .route("/api/v1/collections/{name}/points/link", post(link_points))
         .route(
-            "/api/v1/collections/{name}/points/{id}",
-            get(get_point),
+            "/api/v1/collections/{name}/graph/subgraph",
+            get(get_subgraph),
         )
+        .route("/api/v1/collections/{name}/points/{id}", get(get_point))
 }
-

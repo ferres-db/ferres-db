@@ -26,6 +26,9 @@ struct LogLine {
     #[serde(default)]
     results_count: Option<usize>,
     took_ms: u64,
+    /// Vetor completo (opcional); presente quando o log foi escrito com suporte a warmup.
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
 }
 
 /// Entrada parseada para uso nos endpoints (últimas 24h por padrão).
@@ -39,6 +42,8 @@ pub struct ParsedQueryEntry {
     pub took_ms: u64,
     pub results_count: usize,
     pub query_id: String,
+    /// Vetor completo (opcional); usado pelo warmup para replay.
+    pub vector: Option<Vec<f32>>,
 }
 
 /// Cache em memória do log parseado com TTL de 1h.
@@ -109,6 +114,7 @@ impl QueryLogCache {
                 query_id: log
                     .query_id
                     .unwrap_or_else(|| format!("legacy-{}", out.len())),
+                vector: log.vector,
             });
         }
         out
@@ -128,6 +134,7 @@ impl QueryLogCache {
     }
 
     /// Entradas das últimas 10 minutos (para séries temporais de monitoramento).
+    /// Usa o cache com TTL de 1h; para dados sempre frescos no analytics use `entries_10m_fresh`.
     pub fn entries_10m(&self) -> Vec<ParsedQueryEntry> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -140,9 +147,35 @@ impl QueryLogCache {
             .collect()
     }
 
-    /// P95 da latência de busca (ms) nas últimas 10 minutos.
+    /// Entradas das últimas 10 minutos lendo o arquivo diretamente (sem cache).
+    /// Garante que o endpoint de analytics veja as queries recém-logadas mesmo antes do cache atualizar.
+    pub fn entries_10m_fresh(&self) -> Vec<ParsedQueryEntry> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cutoff = now_secs.saturating_sub(10 * 60);
+        Self::load_log(&self.log_path)
+            .into_iter()
+            .filter(|e| e.timestamp_secs >= cutoff)
+            .collect()
+    }
+
+    /// P95 da latência de busca (ms) nas últimas 10 minutos (usa cache).
     pub fn p95_latency_10m(&self) -> f64 {
         let entries = self.entries_10m();
+        if entries.is_empty() {
+            return 0.0;
+        }
+        let mut sorted_ms: Vec<u64> = entries.iter().map(|e| e.took_ms).collect();
+        sorted_ms.sort();
+        let len = sorted_ms.len();
+        sorted_ms[(len * 95 / 100).min(len.saturating_sub(1))] as f64
+    }
+
+    /// P95 da latência (ms) nas últimas 10 min com leitura fresca do arquivo (para analytics).
+    pub fn p95_latency_10m_fresh(&self) -> f64 {
+        let entries = self.entries_10m_fresh();
         if entries.is_empty() {
             return 0.0;
         }
@@ -187,10 +220,7 @@ impl QueryLogCache {
         let mut buckets: HashMap<u64, Vec<u64>> = HashMap::new();
         for e in &entries {
             let minute = e.timestamp_secs / 60;
-            buckets
-                .entry(minute)
-                .or_default()
-                .push(e.took_ms);
+            buckets.entry(minute).or_default().push(e.took_ms);
         }
         let mut out: Vec<(u64, f64, f64)> = buckets
             .into_iter()
@@ -239,6 +269,17 @@ impl QueryLogCache {
         entries.retain(|e| e.took_ms >= threshold_ms);
         entries.sort_by(|a, b| b.took_ms.cmp(&a.took_ms));
         entries.into_iter().take(limit).collect()
+    }
+
+    /// Últimas N entradas do log que possuem vetor (para warmup no startup).
+    /// Lê o arquivo diretamente (sem cache). Retorna no ordem cronológica (mais antigas primeiro).
+    pub fn last_n_entries_for_warmup(&self, n: usize) -> Vec<ParsedQueryEntry> {
+        let all = Self::load_log(&self.log_path);
+        let last_n: Vec<ParsedQueryEntry> = all.into_iter().rev().take(n).rev().collect();
+        last_n
+            .into_iter()
+            .filter(|e| e.vector.as_ref().map_or(false, |v| !v.is_empty()))
+            .collect()
     }
 }
 

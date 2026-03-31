@@ -3,6 +3,11 @@
 //! Mostra como usar o SDK em modo "VectorStore": garantir coleção, inserir
 //! vetores com metadados (ex. texto) e consultar por similaridade.
 //!
+//! A API de pontos também suporta: `namespace` (multitenancy), `vectors` (multi-vector por ponto),
+//! `ttl` (expiração em segundos) e filtros de metadata na busca. Inserção via `upsert_points`
+//! com body `{ "points": [{ "id", "vector", "metadata?", "namespace?", "ttl?", "vectors?" }] }`;
+//! busca via `search_points` com `query_vector`, `limit` e opcionalmente `filter`, `namespace`, `vector_field`.
+//!
 //! Requer servidor FerresDB rodando em `http://localhost:8080`:
 //!
 //! ```bash
@@ -21,13 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = FerresDbClient::new(&base_url);
 
     // Cria o VectorStore e a coleção se não existir (interface LangChain/LlamaIndex-style)
-    let store = FerresDbVectorStore::ensure_collection(
-        client.clone(),
-        COLLECTION,
-        DIM,
-        "Cosine",
-    )
-    .await?;
+    let store =
+        FerresDbVectorStore::ensure_collection(client.clone(), COLLECTION, DIM, "Cosine").await?;
     println!("VectorStore pronto: coleção '{}' (dim={})", COLLECTION, DIM);
 
     // Ingestão: vetores + metadados (ex. texto para RAG)
@@ -45,9 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::json!({ "text": "Segundo documento sobre monitoramento e logs." }),
         serde_json::json!({ "text": "Terceiro documento sobre CI/CD e pipelines." }),
     ];
-    let n = store
-        .add_vectors(&ids, &vectors, Some(&metadatas))
-        .await?;
+    let n = store.add_vectors(&ids, &vectors, Some(&metadatas)).await?;
     println!("Inseridos {} documentos.", n);
 
     // Consulta por similaridade (como em LangChain VectorStore.similarity_search)

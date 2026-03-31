@@ -6,10 +6,10 @@ import type {
   TierDistribution,
 } from "@/types";
 
-export const useCollections = () => {
+export const useCollections = (options?: { namespace?: string }) => {
   return useQuery({
-    queryKey: ["collections"],
-    queryFn: collectionsApi.list,
+    queryKey: ["collections", options?.namespace ?? null],
+    queryFn: () => collectionsApi.list(options),
   });
 };
 

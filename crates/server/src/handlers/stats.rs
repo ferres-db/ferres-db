@@ -10,6 +10,7 @@ use ferres_db_core::simd_enabled;
 
 use crate::api_err;
 use crate::error::{ApiError, ApiResult};
+use crate::raft;
 use crate::state::AppState;
 
 /// Resposta de estatísticas de uma coleção.
@@ -25,6 +26,12 @@ pub struct CollectionStatsResponse {
     pub tombstone_count: usize,
     /// Estimated bytes held by tombstoned points until next reindex (quantized index only).
     pub tombstone_memory_waste_bytes: usize,
+    /// Current HNSW ef_search (may be auto-tuned by FerresEngine).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ef_search_current: Option<usize>,
+    /// Whether HNSW auto-tune is active for this instance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hnsw_auto_tune_enabled: Option<bool>,
 }
 
 // ─── Global stats (analytics: lê de queries.log, cache 1h) ───────────────
@@ -46,6 +53,16 @@ pub struct GlobalStatsResponse {
     pub queries_per_minute: Vec<QueriesPerMinuteBucket>,
     /// Whether SIMD (AVX2/SSE4.1) acceleration is active at runtime for distance kernels.
     pub simd_enabled: bool,
+    /// Replication role: "leader" or "replica" (experimental).
+    pub role: String,
+    /// Whether namespace physical isolation is enabled (points per namespace in separate dirs).
+    pub namespace_physical_isolation: bool,
+    /// HNSW index optimization: dynamic ef_search auto-tuning is active (FerresEngine).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hnsw_auto_tune_enabled: Option<bool>,
+    /// Label for dashboard: "Optimized by FerresEngine" when auto-tune is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_optimization_label: Option<String>,
 }
 
 // ─── Queries list (GET /api/v1/stats/queries) ─────────────────────────────
@@ -166,6 +183,14 @@ pub struct TimeSeries10m {
     pub recent_latencies: Vec<RecentLatencyEntry>,
 }
 
+/// Um namespace com contagem de pontos e estimativa de armazenamento (para Top Namespaces by Storage).
+#[derive(Debug, Serialize)]
+pub struct TopNamespaceByStorage {
+    pub namespace: String,
+    pub point_count: usize,
+    pub storage_bytes_estimate: usize,
+}
+
 /// Resposta de GET /api/v1/stats/analytics.
 #[derive(Debug, Serialize)]
 pub struct AnalyticsResponse {
@@ -177,6 +202,10 @@ pub struct AnalyticsResponse {
     pub time_series_10m: TimeSeries10m,
     /// Cache hit rate % (search_cache do core, agregado em todas as coleções). None se nenhuma busca.
     pub cache_hit_rate_pct: Option<f64>,
+    /// Top namespaces por armazenamento (pontos + bytes estimados), para identificar tenants que mais consomem recursos.
+    pub top_namespaces_by_storage: Vec<TopNamespaceByStorage>,
+    /// Média do tempo gasto em re-ranking (ms) nas queries recentes que usaram rerank. None se nenhuma.
+    pub rerank_overhead_ms_avg: Option<f64>,
 }
 
 /// Handler para GET /api/v1/collections/{name}/stats
@@ -188,22 +217,27 @@ pub async fn get_collection_stats(
     Path(name): Path<String>,
 ) -> ApiResult<Json<CollectionStatsResponse>> {
     // Verifica se a coleção existe
-    let collection_arc = app_state.collections.get(&name)
+    let collection_arc = app_state
+        .collections
+        .get(&name)
         .ok_or_else(|| ApiError::collection_not_found(&name))?;
 
-    // Obtém número de pontos, tombstone count e waste
-    let (num_points, tombstone_count, tombstone_memory_waste_bytes) = {
+    // Obtém número de pontos, tombstone count, waste e ef_search atual (um único lock).
+    let (num_points, tombstone_count, tombstone_memory_waste_bytes, ef_search_current) = {
         let collection = api_err!(collection_arc.read(), "failed to acquire read lock")?;
         (
             collection.len(),
             collection.tombstone_count(),
             collection.tombstone_memory_waste(),
+            Some(collection.current_hnsw_ef_search()),
         )
     };
 
     // Obtém estatísticas de queries
     let (num_queries, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms) = {
-        let stats = app_state.query_stats.get(&name)
+        let stats = app_state
+            .query_stats
+            .get(&name)
             .map(|s| {
                 let num_queries = s.num_queries.load(std::sync::atomic::Ordering::Relaxed);
                 let (avg, p50, p95, p99) = s.calculate_percentiles();
@@ -212,6 +246,8 @@ pub async fn get_collection_stats(
             .unwrap_or((0, 0.0, 0.0, 0.0, 0.0));
         stats
     };
+
+    let hnsw_auto_tune_enabled = Some(true);
 
     Ok(Json(CollectionStatsResponse {
         num_points,
@@ -222,7 +258,28 @@ pub async fn get_collection_stats(
         p99_latency_ms,
         tombstone_count,
         tombstone_memory_waste_bytes,
+        ef_search_current,
+        hnsw_auto_tune_enabled,
     }))
+}
+
+/// Handler para GET /api/v1/cluster
+///
+/// Retorna nós ativos, leader e status da replicação (fundação para Raft).
+pub async fn get_cluster(
+    State(app_state): State<AppState>,
+) -> ApiResult<Json<raft::ClusterStatus>> {
+    let this_addr = format!("{}:{}", app_state.config.host, app_state.config.port);
+    let is_replica = app_state.config.replica_of.is_some();
+    #[cfg(feature = "raft")]
+    let status = app_state
+        .raft_handle
+        .as_ref()
+        .map(|h| h.current_status(&this_addr))
+        .unwrap_or_else(|| raft::cluster_status_standalone(&this_addr, is_replica));
+    #[cfg(not(feature = "raft"))]
+    let status = raft::cluster_status_standalone(&this_addr, is_replica);
+    Ok(Json(status))
 }
 
 /// Handler para GET /api/v1/stats/global
@@ -236,13 +293,7 @@ pub async fn get_global_stats(
     let total_points: usize = app_state
         .collections
         .iter()
-        .map(|entry| {
-            entry
-                .value()
-                .read()
-                .map(|c| c.len())
-                .unwrap_or(0)
-        })
+        .map(|entry| entry.value().read().map(|c| c.len()).unwrap_or(0))
         .sum();
 
     let cache = &app_state.query_log_cache;
@@ -254,6 +305,12 @@ pub async fn get_global_stats(
         .map(|(timestamp, count)| QueriesPerMinuteBucket { timestamp, count })
         .collect();
 
+    let role = if app_state.config.replica_of.is_some() {
+        "replica"
+    } else {
+        "leader"
+    };
+
     Ok(Json(GlobalStatsResponse {
         total_collections,
         total_points,
@@ -261,7 +318,32 @@ pub async fn get_global_stats(
         avg_latency_ms,
         queries_per_minute,
         simd_enabled: simd_enabled(),
+        role: role.to_string(),
+        namespace_physical_isolation: app_state.config.namespace_physical_isolation,
+        hnsw_auto_tune_enabled: Some(true),
+        index_optimization_label: Some("Optimized by FerresEngine".to_string()),
     }))
+}
+
+/// Runs one cycle of HNSW auto-tune: for each collection, reads P95 latency from query_stats
+/// and applies dynamic ef_search adjustment (FerresEngine).
+pub fn run_hnsw_auto_tune_cycle(app_state: &AppState) {
+    for entry in app_state.collections.iter() {
+        let name = entry.key().clone();
+        let collection_arc = entry.value();
+        let (p95_ms, recall_priority) = match app_state.query_stats.get(&name) {
+            Some(stats) => {
+                let (_avg, _p50, p95, _p99) = stats.calculate_percentiles();
+                (p95, true)
+            }
+            None => continue,
+        };
+        let collection = match collection_arc.read() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        collection.apply_hnsw_auto_tune(p95_ms, recall_priority);
+    }
 }
 
 /// Handler para GET /api/v1/stats/analytics
@@ -355,12 +437,14 @@ pub async fn get_analytics(
     };
     let failure_count = cb.failure_count();
 
-    // Séries temporais (10 min): throughput e P95 latência
+    // Séries temporais (10 min): throughput e P95 latência (leitura fresca do log para analytics)
     let (avg_points_per_second, throughput_raw) = app_state.time_series_ingest_10m();
-    let p95_latency_10m = cache.p95_latency_10m();
-    let entries_10m = cache.entries_10m();
+    let p95_latency_10m = cache.p95_latency_10m_fresh();
+    let entries_10m = cache.entries_10m_fresh();
     let start = entries_10m.len().saturating_sub(100);
-    let recent_latencies: Vec<RecentLatencyEntry> = entries_10m[start..]
+    let recent_latencies: Vec<RecentLatencyEntry> = entries_10m
+        .get(start..)
+        .unwrap_or_default()
         .iter()
         .map(|e| RecentLatencyEntry {
             timestamp: e.timestamp_secs,
@@ -385,6 +469,64 @@ pub async fn get_analytics(
     let cache_hit_rate_pct = match total_hits + total_misses {
         0 => None,
         total => Some((total_hits as f64 / total as f64) * 100.0),
+    };
+
+    // Top namespaces by storage: aggregate point count and storage estimate per namespace across all collections
+    let mut namespace_point_count: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut namespace_storage_bytes: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for entry in app_state.collections.iter() {
+        let (points, dimension) = match entry.value().read() {
+            Ok(c) => (c.points_owned(), c.config().dimension),
+            Err(_) => continue,
+        };
+        let bytes_per_point = dimension * 4 + 200; // vector (f32) + metadata estimate
+        for point in points {
+            let ns = point
+                .namespace
+                .as_deref()
+                .unwrap_or("(default)")
+                .to_string();
+            *namespace_point_count.entry(ns.clone()).or_insert(0) += 1;
+            *namespace_storage_bytes.entry(ns).or_insert(0) += bytes_per_point;
+        }
+    }
+    let mut top_namespaces_by_storage: Vec<TopNamespaceByStorage> = namespace_point_count
+        .into_iter()
+        .map(|(namespace, point_count)| {
+            let storage_bytes_estimate = namespace_storage_bytes
+                .get(&namespace)
+                .copied()
+                .unwrap_or(0);
+            TopNamespaceByStorage {
+                namespace,
+                point_count,
+                storage_bytes_estimate,
+            }
+        })
+        .collect();
+    top_namespaces_by_storage
+        .sort_by(|a, b| b.storage_bytes_estimate.cmp(&a.storage_bytes_estimate));
+    top_namespaces_by_storage.truncate(30);
+
+    // Re-ranking overhead: média da fase "rerank" nos perfis de query recentes
+    let rerank_overhead_ms_avg = {
+        let mut sum_ms: u64 = 0;
+        let mut count: usize = 0;
+        for entry in app_state.query_profiles.iter() {
+            for phase in &entry.value().phases {
+                if phase.name == "rerank" {
+                    sum_ms += phase.duration_ms;
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            Some(sum_ms as f64 / count as f64)
+        } else {
+            None
+        }
     };
 
     Ok(Json(AnalyticsResponse {
@@ -419,6 +561,8 @@ pub async fn get_analytics(
             recent_latencies,
         },
         cache_hit_rate_pct,
+        top_namespaces_by_storage,
+        rerank_overhead_ms_avg,
     }))
 }
 
@@ -507,8 +651,14 @@ pub struct FeedbackStatsResponse {
 /// Handler para GET /api/v1/stats/feedback
 ///
 /// Lê feedback.jsonl (log_dir/feedback.jsonl). Retorna contagens e últimas entradas para gráfico de satisfação.
-pub async fn get_feedback(State(app_state): State<AppState>) -> ApiResult<Json<FeedbackStatsResponse>> {
-    let feedback_path = app_state.config.storage_path.join("logs").join("feedback.jsonl");
+pub async fn get_feedback(
+    State(app_state): State<AppState>,
+) -> ApiResult<Json<FeedbackStatsResponse>> {
+    let feedback_path = app_state
+        .config
+        .storage_path
+        .join("logs")
+        .join("feedback.jsonl");
     let content = match std::fs::read_to_string(&feedback_path) {
         Ok(c) => c,
         Err(_) => {
@@ -553,4 +703,3 @@ pub async fn get_feedback(State(app_state): State<AppState>) -> ApiResult<Json<F
         entries,
     }))
 }
-

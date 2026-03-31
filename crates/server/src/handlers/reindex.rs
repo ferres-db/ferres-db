@@ -13,18 +13,20 @@ use axum::{
     response::Json,
 };
 use serde::Serialize;
-use tracing::{debug, info, warn, error};
+use serde_json::json;
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use ferres_db_core::{
-    ReindexJob, ReindexStatus, ReindexStats,
-    apply_delta, build_new_index, estimate_index_size, needs_reindex, tombstone_ratio,
-    Point,
+    apply_delta, build_new_index, compact_wal_entries_older_than, estimate_index_size,
+    needs_reindex, tombstone_ratio, Point, ReindexJob, ReindexStats, ReindexStatus,
 };
 
 use dashmap::DashMap;
 
 use crate::api_err;
+use crate::audit::{self, AuditResult};
+use crate::auth::AuthenticatedUser;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -102,10 +104,7 @@ fn has_running_job(app_state: &AppState, collection: &str) -> bool {
 /// Jobs with status `Queued`, `Building`, or `Swapping` are **never** removed.
 /// Among finished jobs (Completed/Failed), the oldest ones (by `completed_at`)
 /// are evicted first.
-fn cleanup_old_reindex_jobs(
-    jobs: &DashMap<String, Arc<RwLock<ReindexJob>>>,
-    max_completed: usize,
-) {
+fn cleanup_old_reindex_jobs(jobs: &DashMap<String, Arc<RwLock<ReindexJob>>>, max_completed: usize) {
     // 1. Collect all finished jobs with their completed_at timestamps
     let mut finished: Vec<(String, u64)> = Vec::new();
 
@@ -145,6 +144,7 @@ fn cleanup_old_reindex_jobs(
 /// and one for the new index being built from the snapshot.
 /// For a 1M × 384 collection (~1.5 GB), expect ~3 GB peak usage.
 pub async fn start_reindex(
+    AuthenticatedUser(user): AuthenticatedUser,
     State(app_state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<(StatusCode, Json<StartReindexResponse>)> {
@@ -191,8 +191,11 @@ pub async fn start_reindex(
     // Populate initial stats
     job.stats.points_total = snapshot_points.len();
     job.stats.tombstones_cleaned = tombstone_count_before;
-    job.stats.old_index_size_bytes =
-        estimate_index_size(snapshot_points.len(), config.dimension, config.hnsw.max_nb_connection);
+    job.stats.old_index_size_bytes = estimate_index_size(
+        snapshot_points.len(),
+        config.dimension,
+        config.hnsw.max_nb_connection,
+    );
 
     // Store job in AppState
     let job_arc = Arc::new(RwLock::new(job));
@@ -202,6 +205,20 @@ pub async fn start_reindex(
 
     // Evict old completed/failed jobs to prevent unbounded memory growth
     cleanup_old_reindex_jobs(&app_state.reindex_jobs, MAX_COMPLETED_REINDEX_JOBS);
+
+    // Audit: record reindex started (e.g. from Dashboard)
+    {
+        let entry = audit::audit_entry(
+            &user.username,
+            "reindex",
+            &format!("collection:{name}"),
+            json!({ "job_id": job_id, "collection": name, "points": snapshot_points.len(), "tombstones_cleaned": tombstone_count_before }),
+            AuditResult::Success,
+            None,
+            None,
+        );
+        app_state.audit_logger.log(&entry);
+    }
 
     info!(
         job_id = %job_id,
@@ -228,10 +245,9 @@ pub async fn start_reindex(
         let config_clone = config.clone();
         let snapshot_clone = snapshot_points.clone();
 
-        let build_result = tokio::task::spawn_blocking(move || {
-            build_new_index(&config_clone, &snapshot_clone)
-        })
-        .await;
+        let build_result =
+            tokio::task::spawn_blocking(move || build_new_index(&config_clone, &snapshot_clone))
+                .await;
 
         let mut new_index = match build_result {
             Ok(Ok(idx)) => idx,
@@ -311,8 +327,11 @@ pub async fn start_reindex(
                 if let Ok(mut j) = job_arc_bg.write() {
                     let coll = collection_arc_bg.read().ok();
                     let new_point_count = coll.as_ref().map(|c| c.len()).unwrap_or(0);
-                    j.stats.new_index_size_bytes =
-                        estimate_index_size(new_point_count, config.dimension, config.hnsw.max_nb_connection);
+                    j.stats.new_index_size_bytes = estimate_index_size(
+                        new_point_count,
+                        config.dimension,
+                        config.hnsw.max_nb_connection,
+                    );
                     j.set_completed();
                 }
 
@@ -445,21 +464,24 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
     let job_id = Uuid::new_v4().to_string();
     let mut job = ReindexJob::new(job_id.clone(), collection_name.to_string());
 
-    let (snapshot_points, snapshot_ids, config, tombstone_count_before) = match collection_arc.read()
-    {
-        Ok(coll) => {
-            let (pts, ids) = coll.points_snapshot();
-            let cfg = coll.config().clone();
-            let tc = coll.tombstone_count();
-            (pts, ids, cfg, tc)
-        }
-        Err(_) => return,
-    };
+    let (snapshot_points, snapshot_ids, config, tombstone_count_before) =
+        match collection_arc.read() {
+            Ok(coll) => {
+                let (pts, ids) = coll.points_snapshot();
+                let cfg = coll.config().clone();
+                let tc = coll.tombstone_count();
+                (pts, ids, cfg, tc)
+            }
+            Err(_) => return,
+        };
 
     job.stats.points_total = snapshot_points.len();
     job.stats.tombstones_cleaned = tombstone_count_before;
-    job.stats.old_index_size_bytes =
-        estimate_index_size(snapshot_points.len(), config.dimension, config.hnsw.max_nb_connection);
+    job.stats.old_index_size_bytes = estimate_index_size(
+        snapshot_points.len(),
+        config.dimension,
+        config.hnsw.max_nb_connection,
+    );
 
     let job_arc = Arc::new(RwLock::new(job));
     app_state
@@ -586,10 +608,7 @@ pub fn maybe_auto_reindex(app_state: &AppState, collection_name: &str) {
 /// Called from the background task in main every 30 minutes.
 pub fn run_auto_reindex_cycle(app_state: &AppState) {
     let num_collections = app_state.collections.len();
-    info!(
-        num_collections,
-        "auto-reindex worker cycle started"
-    );
+    info!(num_collections, "auto-reindex worker cycle started");
 
     for entry in app_state.collections.iter() {
         let name = entry.key().clone();
@@ -631,12 +650,16 @@ pub fn run_auto_reindex_cycle(app_state: &AppState) {
 /// Called from the background task in main every 60 seconds.
 pub fn run_auto_vacuum_cycle(app_state: &AppState) {
     let mut total_removed = 0usize;
+    let mut skipped = 0usize;
     for entry in app_state.collections.iter() {
         let name = entry.key().clone();
         let collection_arc = entry.value().clone();
-        let removed = match collection_arc.write() {
+        let removed = match collection_arc.try_write() {
             Ok(mut coll) => coll.vacuum_expired_points(),
-            Err(_) => continue,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
         if removed > 0 {
             total_removed += removed;
@@ -647,8 +670,68 @@ pub fn run_auto_vacuum_cycle(app_state: &AppState) {
             );
         }
     }
+    if skipped > 0 {
+        info!(
+            skipped,
+            "auto-vacuum skipped locked collections (will retry next cycle)"
+        );
+    }
     if total_removed > 0 {
         info!(total_removed, "auto-vacuum cycle finished");
+    }
+}
+
+/// Run one cycle of the retention policy worker: compact WAL for collections
+/// that have `retention_days` set, removing entries older than the configured period.
+///
+/// Called from the background task in main (e.g. every hour).
+pub fn run_retention_cycle(app_state: &AppState) {
+    let collections_dir = app_state.config.storage_path.join("collections");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let wal_compress = app_state.config.wal_compression;
+    let mut total_removed = 0usize;
+
+    for entry in app_state.collections.iter() {
+        let name = entry.key();
+        let collection_arc = entry.value();
+        let retention_days = match collection_arc.read() {
+            Ok(coll) => coll.config().retention_days,
+            Err(_) => continue,
+        };
+        let Some(days) = retention_days else { continue };
+        let cutoff_ts = now_secs.saturating_sub(days as u64 * 86400);
+        let collection_dir = collections_dir.join(name);
+
+        match app_state
+            .storage_circuit_breaker
+            .call(|| compact_wal_entries_older_than(&collection_dir, cutoff_ts, wal_compress))
+        {
+            Ok(removed) => {
+                if removed > 0 {
+                    total_removed += removed;
+                    info!(
+                        collection = %name,
+                        removed,
+                        retention_days = days,
+                        "retention policy compacted WAL"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    collection = %name,
+                    error = %e,
+                    "retention policy WAL compaction failed"
+                );
+            }
+        }
+    }
+
+    if total_removed > 0 {
+        info!(total_removed, "retention cycle finished");
     }
 }
 
@@ -727,11 +810,17 @@ mod tests {
 
         let mut building_job = ReindexJob::new("building-1".to_string(), "test_col".to_string());
         building_job.status = ReindexStatus::Building;
-        jobs.insert("building-1".to_string(), Arc::new(RwLock::new(building_job)));
+        jobs.insert(
+            "building-1".to_string(),
+            Arc::new(RwLock::new(building_job)),
+        );
 
         let mut swapping_job = ReindexJob::new("swapping-1".to_string(), "test_col".to_string());
         swapping_job.status = ReindexStatus::Swapping;
-        jobs.insert("swapping-1".to_string(), Arc::new(RwLock::new(swapping_job)));
+        jobs.insert(
+            "swapping-1".to_string(),
+            Arc::new(RwLock::new(swapping_job)),
+        );
 
         // Also add a few failed jobs
         for i in 0..5 {
@@ -746,9 +835,18 @@ mod tests {
         cleanup_old_reindex_jobs(&jobs, 50);
 
         // Active jobs must still be present
-        assert!(jobs.contains_key("queued-1"), "queued job must not be removed");
-        assert!(jobs.contains_key("building-1"), "building job must not be removed");
-        assert!(jobs.contains_key("swapping-1"), "swapping job must not be removed");
+        assert!(
+            jobs.contains_key("queued-1"),
+            "queued job must not be removed"
+        );
+        assert!(
+            jobs.contains_key("building-1"),
+            "building job must not be removed"
+        );
+        assert!(
+            jobs.contains_key("swapping-1"),
+            "swapping job must not be removed"
+        );
 
         // Count remaining finished jobs
         let finished_count: usize = jobs

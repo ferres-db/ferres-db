@@ -3,8 +3,10 @@ import type {
   Collection,
   Point,
   SearchResult,
+  SearchPointsResponse,
   GlobalStats,
   QueryEntry,
+  ClusterStatus,
   CollectionStats,
   AnalyticsResponse,
   ApiKeyInfo,
@@ -23,6 +25,7 @@ import type {
   SearchEstimateResponse,
   ReindexJob,
   StartReindexResponse,
+  SubgraphResponse,
 } from "@/types";
 
 // Runtime (Docker): window.__RUNTIME_CONFIG__ é preenchido pelo entrypoint.
@@ -99,6 +102,10 @@ apiClient.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       clearStoredToken();
+      // Redireciona para login se não estiver já na página de login
+      if (!window.location.pathname.startsWith("/login")) {
+        window.location.href = "/login";
+      }
     }
     console.error("API Error:", error.response?.data || error.message);
     return Promise.reject(error);
@@ -107,8 +114,13 @@ apiClient.interceptors.response.use(
 
 // Collections API
 export const collectionsApi = {
-  list: async (): Promise<Collection[]> => {
-    const response = await apiClient.get("/api/v1/collections");
+  list: async (options?: { namespace?: string }): Promise<Collection[]> => {
+    const params = new URLSearchParams();
+    if (options?.namespace != null && options.namespace !== "")
+      params.append("namespace", options.namespace);
+    const queryString = params.toString();
+    const url = `/api/v1/collections${queryString ? `?${queryString}` : ""}`;
+    const response = await apiClient.get(url);
     // A API retorna { collections: [...] }
     const collections = response.data.collections || [];
     // Mapeia para o formato esperado pelo frontend
@@ -117,6 +129,7 @@ export const collectionsApi = {
       vector_size: c.dimension,
       point_count: c.num_points,
       distance_metric: c.distance || c.distance_metric, // Backend retorna "distance"
+      retention_days: c.retention_days ?? undefined,
     }));
   },
 
@@ -136,7 +149,16 @@ export const collectionsApi = {
       enable_bm25: data.enable_bm25,
       bm25_text_field: data.bm25_text_field,
       tiered_storage: data.tiered_storage,
+      retention_days: data.retention_days ?? undefined,
     };
+  },
+
+  /** Atualiza apenas retention_days da coleção (PATCH). */
+  patchRetention: async (
+    name: string,
+    retention_days: number | null,
+  ): Promise<void> => {
+    await apiClient.patch(`/api/v1/collections/${name}`, { retention_days });
   },
 
   create: async (
@@ -270,18 +292,25 @@ export const pointsApi = {
     vector: number[],
     limit: number = 10,
     filter?: Record<string, unknown>,
-    options?: { namespace?: string; vector_field?: string },
-  ): Promise<SearchResult[]> => {
+    options?: { namespace?: string; vector_field?: string; rerank?: boolean },
+  ): Promise<SearchPointsResponse> => {
     const body: Record<string, unknown> = { vector, limit, filter };
     if (options?.namespace != null && options.namespace !== "")
       body.namespace = options.namespace;
     if (options?.vector_field != null && options.vector_field !== "")
       body.vector_field = options.vector_field;
+    if (options?.rerank === true) body.rerank = true;
     const response = await apiClient.post(
       `/api/v1/collections/${collection}/search`,
       body,
     );
-    return response.data.results || [];
+    const data = response.data || {};
+    return {
+      results: data.results || [],
+      took_ms: data.took_ms,
+      query_id: data.query_id,
+      rerank_ms: data.rerank_ms,
+    };
   },
 
   hybridSearch: async (
@@ -345,6 +374,11 @@ export const statsApi = {
     const response = await apiClient.get(`/api/v1/collections/${name}/stats`);
     return response.data;
   },
+
+  cluster: async (): Promise<ClusterStatus> => {
+    const response = await apiClient.get("/api/v1/cluster");
+    return response.data;
+  },
 };
 
 // Health API
@@ -377,10 +411,27 @@ export const keysApi = {
     return Array.isArray(response.data) ? response.data : [];
   },
 
-  create: async (name: string): Promise<CreateApiKeyResponse> => {
+  create: async (
+    name: string,
+    allowed_namespaces?: string[] | null,
+  ): Promise<CreateApiKeyResponse> => {
     const response = await apiClient.post<CreateApiKeyResponse>(
       "/api/v1/keys",
-      { name: name.trim() },
+      {
+        name: name.trim(),
+        ...(allowed_namespaces != null && { allowed_namespaces }),
+      },
+    );
+    return response.data;
+  },
+
+  updateNamespaces: async (
+    id: number,
+    allowed_namespaces: string[] | null,
+  ): Promise<{ updated: boolean; id: number }> => {
+    const response = await apiClient.put<{ updated: boolean; id: number }>(
+      `/api/v1/keys/${id}`,
+      { allowed_namespaces },
     );
     return response.data;
   },
@@ -439,6 +490,26 @@ export const usersApi = {
   },
 };
 
+// Graph API (subgraph for Graph Explorer)
+export const graphApi = {
+  getSubgraph: async (
+    collection: string,
+    options?: { seed?: string; center_id?: string; depth?: number; limit?: number }
+  ): Promise<SubgraphResponse> => {
+    const params = new URLSearchParams();
+    if (options?.seed != null && options.seed !== "")
+      params.append("seed", options.seed);
+    if (options?.center_id != null && options.center_id !== "")
+      params.append("center_id", options.center_id);
+    if (options?.depth != null) params.append("depth", options.depth.toString());
+    if (options?.limit != null) params.append("limit", options.limit.toString());
+    const queryString = params.toString();
+    const url = `/api/v1/collections/${encodeURIComponent(collection)}/graph/subgraph${queryString ? `?${queryString}` : ""}`;
+    const response = await apiClient.get<SubgraphResponse>(url);
+    return response.data;
+  },
+};
+
 // Reindex API
 export const reindexApi = {
   start: async (collection: string): Promise<StartReindexResponse> => {
@@ -470,6 +541,94 @@ export const auditApi = {
       params: params ?? {},
     });
     return Array.isArray(response.data) ? response.data : [];
+  },
+};
+
+// Cloud settings (Admin only — S3 backup configuration stored in SQLite)
+export interface CloudSettings {
+  region?: string | null;
+  bucket?: string | null;
+  endpoint?: string | null;
+  access_key_id?: string | null;
+}
+
+export const settingsApi = {
+  getCloud: async (): Promise<CloudSettings> => {
+    const response = await apiClient.get<CloudSettings>(
+      "/api/v1/admin/settings/cloud",
+    );
+    return response.data;
+  },
+
+  putCloud: async (body: {
+    region?: string | null;
+    bucket?: string | null;
+    endpoint?: string | null;
+    access_key_id?: string | null;
+    secret_access_key?: string | null;
+  }): Promise<{ ok: boolean }> => {
+    const response = await apiClient.put<{ ok: boolean }>(
+      "/api/v1/admin/settings/cloud",
+      body,
+    );
+    return response.data;
+  },
+
+  testS3: async (): Promise<{ ok: boolean; message?: string }> => {
+    const response = await apiClient.post<{ ok: boolean; message?: string }>(
+      "/api/v1/admin/settings/test-s3",
+    );
+    return response.data;
+  },
+};
+
+// Backup API (Admin only — export snapshot to S3)
+export const backupApi = {
+  exportToCloud: async (): Promise<{
+    ok: boolean;
+    key: string;
+    bucket: string;
+    size_bytes: number;
+    region?: string;
+  }> => {
+    const response = await apiClient.post<{
+      ok: boolean;
+      key: string;
+      bucket: string;
+      size_bytes: number;
+      region?: string;
+    }>("/api/v1/admin/backup");
+    return response.data;
+  },
+};
+
+// Restore API (Admin only — Point-in-Time Recovery)
+export interface CollectionRestorePoints {
+  last_snapshot_timestamp: number;
+  wal_timestamps: number[];
+}
+
+export const restoreApi = {
+  getRestorePoints: async (
+    collection?: string,
+  ): Promise<Record<string, CollectionRestorePoints>> => {
+    const params = collection ? { collection } : {};
+    const response = await apiClient.get<{
+      collections: Record<string, CollectionRestorePoints>;
+    }>("/api/v1/admin/restore/points", { params });
+    return response.data.collections ?? {};
+  },
+
+  restoreToTimestamp: async (
+    timestamp: number,
+    collection?: string,
+  ): Promise<{ ok: boolean; restored: string[]; errors: string[] }> => {
+    const response = await apiClient.post<{
+      ok: boolean;
+      restored: string[];
+      errors: string[];
+    }>("/api/v1/admin/restore", { timestamp, collection: collection ?? null });
+    return response.data;
   },
 };
 

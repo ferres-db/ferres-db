@@ -8,10 +8,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
-use std::sync::Mutex;
 
 /// Resultado de uma ação auditada.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,6 +23,8 @@ pub enum AuditResult {
     Denied,
     /// Ação falhou com erro.
     Error,
+    /// Ação executada parcialmente (ex.: restore com alguns erros).
+    Partial,
 }
 
 /// Entrada de auditoria.
@@ -373,14 +375,9 @@ mod tests {
 
         // Re-create logger to query (original tx is closed)
         let logger2 = AuditLogger::new(temp_dir.path().to_path_buf()).unwrap();
-        let results = logger2.query(
-            Some("testuser"),
-            Some("search"),
-            None,
-            None,
-            None,
-            100,
-        ).await;
+        let results = logger2
+            .query(Some("testuser"), Some("search"), None, None, None, 100)
+            .await;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].user_id, "testuser");
@@ -411,9 +408,33 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let logger = AuditLogger::new(temp_dir.path().to_path_buf()).unwrap();
 
-        let entry1 = audit_entry("user1", "search", "collection:docs", serde_json::json!({}), AuditResult::Success, None, None);
-        let entry2 = audit_entry("user1", "upsert", "collection:docs", serde_json::json!({}), AuditResult::Success, None, None);
-        let entry3 = audit_entry("user2", "search", "collection:other", serde_json::json!({}), AuditResult::Denied, None, None);
+        let entry1 = audit_entry(
+            "user1",
+            "search",
+            "collection:docs",
+            serde_json::json!({}),
+            AuditResult::Success,
+            None,
+            None,
+        );
+        let entry2 = audit_entry(
+            "user1",
+            "upsert",
+            "collection:docs",
+            serde_json::json!({}),
+            AuditResult::Success,
+            None,
+            None,
+        );
+        let entry3 = audit_entry(
+            "user2",
+            "search",
+            "collection:other",
+            serde_json::json!({}),
+            AuditResult::Denied,
+            None,
+            None,
+        );
 
         logger.log(&entry1);
         logger.log(&entry2);
@@ -426,15 +447,21 @@ mod tests {
         let logger2 = AuditLogger::new(temp_dir.path().to_path_buf()).unwrap();
 
         // Filter by action "search"
-        let results = logger2.query(None, Some("search"), None, None, None, 100).await;
+        let results = logger2
+            .query(None, Some("search"), None, None, None, 100)
+            .await;
         assert_eq!(results.len(), 2);
 
         // Filter by user "user1"
-        let results = logger2.query(Some("user1"), None, None, None, None, 100).await;
+        let results = logger2
+            .query(Some("user1"), None, None, None, None, 100)
+            .await;
         assert_eq!(results.len(), 2);
 
         // Filter by action "upsert"
-        let results = logger2.query(None, Some("upsert"), None, None, None, 100).await;
+        let results = logger2
+            .query(None, Some("upsert"), None, None, None, 100)
+            .await;
         assert_eq!(results.len(), 1);
     }
 
@@ -469,8 +496,8 @@ mod tests {
 
         // Verifica que cada linha é um JSON válido de AuditEntry
         for line in &lines {
-            let entry: AuditEntry = serde_json::from_str(line)
-                .expect("each line must be a valid AuditEntry JSON");
+            let entry: AuditEntry =
+                serde_json::from_str(line).expect("each line must be a valid AuditEntry JSON");
             assert_eq!(entry.action, "search");
         }
     }

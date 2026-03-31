@@ -221,9 +221,7 @@ pub fn estimate_search_cost(params: &CostEstimateParams) -> QueryCostEstimate {
     let mut recommendations = Vec::new();
 
     if limit > 100 {
-        recommendations.push(
-            "Consider reducing limit for better performance".to_string(),
-        );
+        recommendations.push("Consider reducing limit for better performance".to_string());
     }
 
     if params.has_filter && params.collection_size > 100_000 {
@@ -246,7 +244,8 @@ pub fn estimate_search_cost(params: &CostEstimateParams) -> QueryCostEstimate {
 
     if params.collection_size > 1_000_000 && !params.has_filter {
         recommendations.push(
-            "Collection with over 1M points: consider adding filters to reduce the search space".to_string(),
+            "Collection with over 1M points: consider adding filters to reduce the search space"
+                .to_string(),
         );
     }
 
@@ -300,12 +299,30 @@ mod tests {
         let estimate = estimate_search_cost(&params);
 
         assert!(estimate.estimated_ms > 0.0, "estimated_ms must be positive");
-        assert!(estimate.confidence_range.0 > 0.0, "confidence min must be positive");
-        assert!(estimate.confidence_range.1 > estimate.confidence_range.0, "confidence max > min");
-        assert!(estimate.estimated_memory_bytes > 0, "memory must be positive");
-        assert!(estimate.estimated_nodes_visited > 0, "nodes visited must be positive");
-        assert!(estimate.breakdown.index_scan_cost > 0.0, "index scan cost must be positive");
-        assert!(estimate.breakdown.network_overhead > 0.0, "network overhead must be positive");
+        assert!(
+            estimate.confidence_range.0 > 0.0,
+            "confidence min must be positive"
+        );
+        assert!(
+            estimate.confidence_range.1 > estimate.confidence_range.0,
+            "confidence max > min"
+        );
+        assert!(
+            estimate.estimated_memory_bytes > 0,
+            "memory must be positive"
+        );
+        assert!(
+            estimate.estimated_nodes_visited > 0,
+            "nodes visited must be positive"
+        );
+        assert!(
+            estimate.breakdown.index_scan_cost > 0.0,
+            "index scan cost must be positive"
+        );
+        assert!(
+            estimate.breakdown.network_overhead > 0.0,
+            "network overhead must be positive"
+        );
     }
 
     #[test]
@@ -447,7 +464,10 @@ mod tests {
 
         let estimate = estimate_search_cost(&params);
         assert!(
-            estimate.recommendations.iter().any(|r| r.contains("Filters") || r.contains("filters")),
+            estimate
+                .recommendations
+                .iter()
+                .any(|r| r.contains("Filters") || r.contains("filters")),
             "should warn about filters on large collections"
         );
     }
@@ -461,7 +481,10 @@ mod tests {
 
         let estimate = estimate_search_cost(&params);
         assert!(
-            estimate.recommendations.iter().any(|r| r.contains("dimension") || r.contains("dimensionality")),
+            estimate
+                .recommendations
+                .iter()
+                .any(|r| r.contains("dimension") || r.contains("dimensionality")),
             "should recommend reducing dimension when > 1024"
         );
     }
@@ -542,7 +565,10 @@ mod tests {
 
         let estimate = estimate_search_cost(&params);
         assert!(
-            estimate.recommendations.iter().any(|r| r.contains("ef_search")),
+            estimate
+                .recommendations
+                .iter()
+                .any(|r| r.contains("ef_search")),
             "should recommend reviewing ef_search when > 200"
         );
     }
@@ -562,10 +588,19 @@ mod tests {
         let restored: QueryCostEstimate = serde_json::from_str(&json).unwrap();
 
         assert!((restored.estimated_ms - estimate.estimated_ms).abs() < f64::EPSILON);
-        assert_eq!(restored.estimated_memory_bytes, estimate.estimated_memory_bytes);
-        assert_eq!(restored.estimated_nodes_visited, estimate.estimated_nodes_visited);
+        assert_eq!(
+            restored.estimated_memory_bytes,
+            estimate.estimated_memory_bytes
+        );
+        assert_eq!(
+            restored.estimated_nodes_visited,
+            estimate.estimated_nodes_visited
+        );
         assert_eq!(restored.is_expensive, estimate.is_expensive);
-        assert_eq!(restored.recommendations.len(), estimate.recommendations.len());
+        assert_eq!(
+            restored.recommendations.len(),
+            estimate.recommendations.len()
+        );
     }
 
     #[test]
@@ -636,9 +671,10 @@ mod tests {
         };
 
         let estimate = estimate_search_cost(&params);
-        let has_sq8_rec = estimate.recommendations.iter().any(|r| {
-            r.contains("Scalar Quantization") || r.contains("SQ8")
-        });
+        let has_sq8_rec = estimate
+            .recommendations
+            .iter()
+            .any(|r| r.contains("Scalar Quantization") || r.contains("SQ8"));
         assert!(
             !has_sq8_rec,
             "should NOT recommend SQ8 when collection is already quantized"

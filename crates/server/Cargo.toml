@@ -15,12 +15,16 @@ path = "src/main.rs"
 
 [features]
 default = []
+# Cross-Encoder re-ranking (ONNX). Requires ferres-db-core/rerank and FERRESDB_RERANK_MODEL (or config).
+rerank = ["ferres-db-core/rerank"]
 # Distributed tracing: export spans to OpenTelemetry (Jaeger, OTLP). Requires OTEL_EXPORTER_OTLP_ENDPOINT.
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry", "dep:opentelemetry-otlp"]
 # Native gRPC API (served on port 50051 alongside REST on 8080).
 grpc = ["dep:tonic", "dep:prost", "dep:tonic-build"]
 # Embedded MCP server via STDIO (--mcp or FERRESDB_ENABLE_MCP=true).
 mcp = ["dep:rmcp"]
+# Raft-based distributed consensus: WAL replicated to majority before commit; cluster API and dashboard.
+raft = ["dep:openraft"]
 
 [dependencies]
 ferres-db-core = { workspace = true }
@@ -51,11 +55,18 @@ uuid = { workspace = true }
 sysinfo = "0.31"
 fs4 = "0.6"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# S3 backup upload
+aws-sdk-s3 = "1"
+aws-config = "1"
+aws-credential-types = "1"
+tar = "0.4"
+flate2 = "1.0"
 sha2 = "0.10"
 getrandom = "0.2"
 argon2 = "0.5"
 jsonwebtoken = "9.2"
 rand_core = { version = "0.6", features = ["getrandom"] }
+url = "2.5"
 
 # Optional: OpenTelemetry export (feature "otel"); build with --features otel
 opentelemetry = { version = "0.28", optional = true }
@@ -70,6 +81,10 @@ async-stream = "0.3"
 
 # Optional: MCP server (feature "mcp"); build with --features mcp
 rmcp = { version = "0.14", features = ["server", "macros"], optional = true }
+
+# Optional: Raft-based distributed consensus (feature "raft"); WAL replicated to majority before commit
+openraft = { version = "0.9", optional = true }
+num_cpus = "1.17.0"
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

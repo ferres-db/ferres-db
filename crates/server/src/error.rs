@@ -77,6 +77,11 @@ pub enum ApiError {
         /// Mensagem de erro.
         message: String,
     },
+    /// Método não permitido (ex.: escrita em nó réplica).
+    MethodNotAllowed {
+        /// Mensagem de erro.
+        message: String,
+    },
 }
 
 impl ApiError {
@@ -144,6 +149,13 @@ impl ApiError {
         }
     }
 
+    /// Cria um erro de método não permitido (405 Method Not Allowed).
+    pub fn method_not_allowed(message: impl Into<String>) -> Self {
+        Self::MethodNotAllowed {
+            message: message.into(),
+        }
+    }
+
     /// Retorna o código de status HTTP correspondente.
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -151,13 +163,12 @@ impl ApiError {
                 StatusCode::NOT_FOUND
             }
             Self::CollectionAlreadyExists { .. } => StatusCode::CONFLICT,
-            Self::InvalidDimension { .. } | Self::InvalidPayload { .. } => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::InvalidDimension { .. } | Self::InvalidPayload { .. } => StatusCode::BAD_REQUEST,
             Self::InternalError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ApiKeyStoreUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::BudgetExceeded { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Forbidden { .. } => StatusCode::FORBIDDEN,
+            Self::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
         }
     }
 
@@ -173,6 +184,7 @@ impl ApiError {
             Self::ApiKeyStoreUnavailable { .. } => "api_key_store_unavailable",
             Self::BudgetExceeded { .. } => "budget_exceeded",
             Self::Forbidden { .. } => "forbidden",
+            Self::MethodNotAllowed { .. } => "method_not_allowed",
         }
     }
 
@@ -188,6 +200,7 @@ impl ApiError {
             Self::ApiKeyStoreUnavailable { message } => message,
             Self::BudgetExceeded { message, .. } => message,
             Self::Forbidden { message } => message,
+            Self::MethodNotAllowed { message } => message,
         }
     }
 }
@@ -234,35 +247,27 @@ impl IntoResponse for ApiError {
 impl From<FerresError> for ApiError {
     fn from(err: FerresError) -> Self {
         match &err {
-            FerresError::CollectionNotFound(name) => {
-                ApiError::collection_not_found(name.clone())
-            }
+            FerresError::CollectionNotFound(name) => ApiError::collection_not_found(name.clone()),
             FerresError::CollectionAlreadyExists(name) => {
                 ApiError::collection_already_exists(name.clone())
             }
             FerresError::PointNotFound(id) => {
                 ApiError::collection_not_found(format!("point '{id}' not found"))
             }
-            FerresError::DimensionMismatch { expected, got } => {
-                ApiError::invalid_dimension(format!(
-                    "dimension mismatch: expected {expected}, got {got}"
-                ))
-            }
+            FerresError::DimensionMismatch { expected, got } => ApiError::invalid_dimension(
+                format!("dimension mismatch: expected {expected}, got {got}"),
+            ),
             FerresError::InvalidVector { reason } => {
                 ApiError::invalid_dimension(format!("invalid vector: {reason}"))
             }
-            FerresError::Storage(msg) => {
-                ApiError::internal_error(format!("storage error: {msg}"))
-            }
+            FerresError::Storage(msg) => ApiError::internal_error(format!("storage error: {msg}")),
             FerresError::IndexNotBuilt => {
                 ApiError::internal_error("index not built: call build() before searching")
             }
             FerresError::InvalidPointId(id) => {
                 ApiError::invalid_payload(format!("invalid point id: {id}"))
             }
-            FerresError::EmptyVector => {
-                ApiError::invalid_dimension("vector cannot be empty")
-            }
+            FerresError::EmptyVector => ApiError::invalid_dimension("vector cannot be empty"),
             FerresError::UnknownVectorField(name) => {
                 ApiError::invalid_payload(format!("unknown vector field: {name}"))
             }
@@ -301,9 +306,7 @@ mod tests {
     /// Helper para extrair JSON de uma resposta.
     async fn extract_json(response: Response) -> Value {
         let (_parts, body) = response.into_parts();
-        let body_bytes = axum::body::to_bytes(body, usize::MAX)
-            .await
-            .unwrap();
+        let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
         serde_json::from_slice(&body_bytes).unwrap()
     }
 

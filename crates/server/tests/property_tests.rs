@@ -4,19 +4,19 @@
 //! e testes de concorrência para detectar race conditions.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use futures::future::join_all;
 use quickcheck::{Arbitrary, Gen};
 use rand::{Rng, SeedableRng};
-use tokio::sync::oneshot;
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
 use ferres_db_server::auth;
+use ferres_db_server::middleware;
 use ferres_db_server::routes;
 use ferres_db_server::state::{AppState, ServerConfig};
-use ferres_db_server::middleware;
 
 /// API key usada em todos os testes de propriedade.
 const TEST_API_KEY: &str = "test-key-property";
@@ -51,11 +51,12 @@ async fn setup_server() -> TestServer {
         storage_path: storage_path.clone(),
         log_level: "error".to_string(),
         api_keys: Some(TEST_API_KEY.to_string()),
+        ..Default::default()
     };
 
-    let app_state = AppState::new(config.clone(), None, None).unwrap();
+    let app_state = AppState::new(config.clone(), None, None, None, None).unwrap();
 
-    let app = routes::create_router()
+    let app = routes::create_router(&config)
         .layer(axum::middleware::from_fn(middleware::request_logger))
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -71,10 +72,9 @@ async fn setup_server() -> TestServer {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let _server_handle = tokio::spawn(async move {
-        let server = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            });
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            shutdown_rx.await.ok();
+        });
         server.await.unwrap();
     });
 
@@ -124,9 +124,7 @@ async fn create_collection(
 
 /// Gera um ponto determinístico para testes de propriedade (id e vetor de dimensão fixa).
 fn create_random_point(i: usize, dimension: usize) -> serde_json::Value {
-    let vector: Vec<f32> = (0..dimension)
-        .map(|j| (i * dimension + j) as f32)
-        .collect();
+    let vector: Vec<f32> = (0..dimension).map(|j| (i * dimension + j) as f32).collect();
     serde_json::json!({
         "id": format!("point-{}", i),
         "vector": vector,
@@ -158,11 +156,7 @@ async fn upsert_point(
 }
 
 /// Retorna o número de pontos da coleção (GET /api/v1/collections/{name}).
-async fn get_collection_stats(
-    client: &reqwest::Client,
-    base_url: &str,
-    name: &str,
-) -> usize {
+async fn get_collection_stats(client: &reqwest::Client, base_url: &str, name: &str) -> usize {
     let url = format!("{base_url}/api/v1/collections/{name}");
     let resp = client.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
@@ -217,7 +211,11 @@ impl ValidVector {
         let vector: Vec<f32> = (0..dim)
             .map(|_| {
                 let v = f32::arbitrary(g);
-                if v.is_finite() { v } else { 0.0 }
+                if v.is_finite() {
+                    v
+                } else {
+                    0.0
+                }
             })
             .collect();
         ValidVector(vector)
@@ -306,7 +304,10 @@ async fn prop_create_get_roundtrip_async(
 fn quickcheck_create_get_roundtrip() {
     quickcheck::QuickCheck::new()
         .tests(QUICKCHECK_TESTS)
-        .quickcheck(prop_create_get_roundtrip_impl as fn(ValidCollectionName, ValidDimension, ValidDistance) -> bool);
+        .quickcheck(
+            prop_create_get_roundtrip_impl
+                as fn(ValidCollectionName, ValidDimension, ValidDistance) -> bool,
+        );
 }
 
 /// Propriedade (quickcheck): criar N coleções com nomes únicos e listar deve retornar exatamente N.
@@ -445,7 +446,10 @@ async fn prop_concurrent_upserts_are_safe_async(
 fn quickcheck_concurrent_upserts_are_safe() {
     quickcheck::QuickCheck::new()
         .tests(QUICKCHECK_TESTS)
-        .quickcheck(prop_concurrent_upserts_are_safe_impl as fn(Vec<ValidCollectionName>, usize) -> quickcheck::TestResult);
+        .quickcheck(
+            prop_concurrent_upserts_are_safe_impl
+                as fn(Vec<ValidCollectionName>, usize) -> quickcheck::TestResult,
+        );
 }
 
 // ─── Property Tests (invariants, fixed iterations) ───────────────────────
@@ -481,12 +485,7 @@ async fn prop_create_get_collection_roundtrip() {
         assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
 
         // Busca a coleção
-        let get_response = server
-            .client
-            .get(&get_url)
-            .send()
-            .await
-            .unwrap();
+        let get_response = server.client.get(&get_url).send().await.unwrap();
 
         assert_eq!(get_response.status(), reqwest::StatusCode::OK);
 
@@ -531,7 +530,10 @@ async fn prop_insert_search_points_consistency() {
         }));
     }
 
-    let upsert_url = format!("{}/api/v1/collections/{}/points", server.base_url, collection_name);
+    let upsert_url = format!(
+        "{}/api/v1/collections/{}/points",
+        server.base_url, collection_name
+    );
     let upsert_response = server
         .client
         .post(&upsert_url)
@@ -546,7 +548,10 @@ async fn prop_insert_search_points_consistency() {
     assert_eq!(body["upserted"], num_points);
 
     // Propriedade: busca deve retornar no máximo k resultados
-    let search_url = format!("{}/api/v1/collections/{}/search", server.base_url, collection_name);
+    let search_url = format!(
+        "{}/api/v1/collections/{}/search",
+        server.base_url, collection_name
+    );
 
     for k in [1, 5, 10, 20, 100] {
         let query_vector: Vec<f32> = (0..dimension).map(|_| rng.gen_range(-1.0..1.0)).collect();
@@ -577,10 +582,7 @@ async fn prop_insert_search_points_consistency() {
             .collect();
 
         for i in 1..scores.len() {
-            assert!(
-                scores[i - 1] <= scores[i],
-                "Scores not sorted: {scores:?}"
-            );
+            assert!(scores[i - 1] <= scores[i], "Scores not sorted: {scores:?}");
         }
     }
 }
@@ -606,7 +608,10 @@ async fn prop_dimension_validation() {
         .await
         .unwrap();
 
-    let upsert_url = format!("{}/api/v1/collections/{}/points", server.base_url, collection_name);
+    let upsert_url = format!(
+        "{}/api/v1/collections/{}/points",
+        server.base_url, collection_name
+    );
 
     // Testa com diferentes dimensões incorretas
     for wrong_dim in [1, 8, 15, 17, 32, 64] {
@@ -634,7 +639,10 @@ async fn prop_dimension_validation() {
             "Wrong dimension {wrong_dim} should not be inserted for collection dimension {dimension}"
         );
         let failed = body["failed"].as_array().unwrap();
-        assert!(!failed.is_empty(), "Wrong dimension should appear in failed list");
+        assert!(
+            !failed.is_empty(),
+            "Wrong dimension should appear in failed list"
+        );
     }
 
     // Vetor com dimensão correta deve ser aceito
@@ -677,7 +685,10 @@ async fn prop_point_id_uniqueness() {
         .await
         .unwrap();
 
-    let upsert_url = format!("{}/api/v1/collections/{}/points", server.base_url, collection_name);
+    let upsert_url = format!(
+        "{}/api/v1/collections/{}/points",
+        server.base_url, collection_name
+    );
     let get_url = format!("{}/api/v1/collections/{}", server.base_url, collection_name);
 
     // Insere ponto inicial
@@ -857,7 +868,10 @@ async fn test_concurrent_read_write() {
 
     server
         .client
-        .post(format!("{}/api/v1/collections/{}/points", server.base_url, collection_name))
+        .post(format!(
+            "{}/api/v1/collections/{}/points",
+            server.base_url, collection_name
+        ))
         .json(&serde_json::json!({ "points": initial_points }))
         .send()
         .await
@@ -885,7 +899,8 @@ async fn test_concurrent_read_write() {
             let mut rng = rand::rngs::StdRng::from_entropy();
 
             for _ in 0..ops_per_task {
-                let query_vector: Vec<f32> = (0..dimension).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                let query_vector: Vec<f32> =
+                    (0..dimension).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
                 let response = client
                     .post(&search_url)
@@ -1051,8 +1066,14 @@ async fn test_load_rapid_operations() {
         .await
         .unwrap();
 
-    let upsert_url = format!("{}/api/v1/collections/{}/points", server.base_url, collection_name);
-    let search_url = format!("{}/api/v1/collections/{}/search", server.base_url, collection_name);
+    let upsert_url = format!(
+        "{}/api/v1/collections/{}/points",
+        server.base_url, collection_name
+    );
+    let search_url = format!(
+        "{}/api/v1/collections/{}/search",
+        server.base_url, collection_name
+    );
 
     let mut rng = rand::thread_rng();
     let num_batches = 20;
@@ -1096,7 +1117,8 @@ async fn test_load_rapid_operations() {
             }
         }
         assert!(
-            response.status() == reqwest::StatusCode::OK || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS,
+            response.status() == reqwest::StatusCode::OK
+                || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS,
             "Upsert should return 200 or 429 (rate limit), got {}",
             response.status()
         );
@@ -1118,7 +1140,8 @@ async fn test_load_rapid_operations() {
 
             let status = response.status();
             assert!(
-                status == reqwest::StatusCode::OK || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+                status == reqwest::StatusCode::OK
+                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
                 "Search should return 200 or 429 (rate limit), got {status}"
             );
         }
@@ -1170,7 +1193,10 @@ async fn test_load_large_batch_insert() {
         .await
         .unwrap();
 
-    let upsert_url = format!("{}/api/v1/collections/{}/points", server.base_url, collection_name);
+    let upsert_url = format!(
+        "{}/api/v1/collections/{}/points",
+        server.base_url, collection_name
+    );
 
     let mut rng = rand::thread_rng();
     let batch_size = 500; // Batch grande para testar insert_batch otimizado
@@ -1213,7 +1239,10 @@ async fn test_load_large_batch_insert() {
     );
 
     // Verifica que os pontos são buscáveis
-    let search_url = format!("{}/api/v1/collections/{}/search", server.base_url, collection_name);
+    let search_url = format!(
+        "{}/api/v1/collections/{}/search",
+        server.base_url, collection_name
+    );
     let query_vector: Vec<f32> = (0..dimension).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
     let search_response = server
@@ -1267,7 +1296,10 @@ async fn test_stress_parallel_requests() {
 
     server
         .client
-        .post(format!("{}/api/v1/collections/{}/points", server.base_url, collection_name))
+        .post(format!(
+            "{}/api/v1/collections/{}/points",
+            server.base_url, collection_name
+        ))
         .json(&serde_json::json!({ "points": initial_points }))
         .send()
         .await

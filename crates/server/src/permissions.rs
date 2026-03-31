@@ -53,6 +53,34 @@ impl fmt::Display for Action {
     }
 }
 
+/// Restrição de acesso por namespace (multitenancy).
+///
+/// Usado por API keys e usuários para limitar acesso a namespaces específicos.
+/// Quando `Only(list)` está vazio, nenhum namespace é permitido.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NamespaceAllowance {
+    /// Acesso a todos os namespaces (e a pontos sem namespace).
+    All,
+    /// Acesso apenas aos namespaces listados.
+    Only(Vec<String>),
+}
+
+impl NamespaceAllowance {
+    /// Retorna true se o namespace solicitado é permitido.
+    /// `requested: None` = nenhum namespace no request (ex.: listar coleções sem filtro); permitido sempre.
+    /// Para `Only(list)`, `requested: Some(ns)` deve estar na lista.
+    pub fn allows(&self, requested: Option<&str>) -> bool {
+        match self {
+            NamespaceAllowance::All => true,
+            NamespaceAllowance::Only(list) => {
+                let Some(ns) = requested else { return true }; // Sem namespace no request: não restringe
+                list.iter().any(|n| n == ns)
+            }
+        }
+    }
+}
+
 /// Restrição opcional baseada em metadata.
 ///
 /// Quando presente em uma permissão, resultados de busca são filtrados
@@ -128,9 +156,7 @@ pub fn check_permission(
 
         if matches_resource && perm.actions.contains(action) {
             return match &perm.metadata_restriction {
-                Some(restriction) => {
-                    PermissionResult::AllowedWithRestriction(restriction.clone())
-                }
+                Some(restriction) => PermissionResult::AllowedWithRestriction(restriction.clone()),
                 None => PermissionResult::Allowed,
             };
         }
@@ -140,9 +166,7 @@ pub fn check_permission(
     for perm in permissions {
         if perm.resource == Resource::AllCollections && perm.actions.contains(action) {
             return match &perm.metadata_restriction {
-                Some(restriction) => {
-                    PermissionResult::AllowedWithRestriction(restriction.clone())
-                }
+                Some(restriction) => PermissionResult::AllowedWithRestriction(restriction.clone()),
                 None => PermissionResult::Allowed,
             };
         }
@@ -292,7 +316,10 @@ mod tests {
 
         // "docs" collection: wildcard match, has restriction
         let result = check_permission(&perms, "docs", &Action::Read);
-        assert!(matches!(result, PermissionResult::AllowedWithRestriction(_)));
+        assert!(matches!(
+            result,
+            PermissionResult::AllowedWithRestriction(_)
+        ));
     }
 
     #[test]

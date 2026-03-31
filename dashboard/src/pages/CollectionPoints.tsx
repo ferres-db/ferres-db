@@ -11,7 +11,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
 import { DropdownMenu, DropdownMenuItem } from '@/components/ui/DropdownMenu';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs';
-import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive, RefreshCw, Loader2 } from 'lucide-react';
+import { ArrowLeft, FileText, Copy, Eye, ChevronLeft, ChevronRight, X, Plus, BarChart3, Layers, Cpu, Search, HardDrive, RefreshCw, Loader2, Zap, Network } from 'lucide-react';
 import type { CollectionQuantizationResponse } from '@/types';
 import { format } from 'date-fns';
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -265,6 +265,15 @@ export const CollectionPoints = () => {
             <p className="mt-1 text-sm text-gray-400">Collection details and points</p>
           </div>
         </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => navigate(`/collections/${name}/graph`)}
+          className="gap-2"
+        >
+          <Network className="h-4 w-4" />
+          View Graph
+        </Button>
       </div>
 
       {/* Collection Info */}
@@ -624,6 +633,24 @@ export const CollectionPoints = () => {
                               <div className="text-xs text-gray-400 mb-1">ID</div>
                               <div className="font-mono text-sm text-gray-50 break-all">{point.id}</div>
                             </div>
+                            {point.vector && point.vector.length > 0 && (
+                              <div className="mb-3">
+                                <div className="text-xs text-gray-400 mb-1">Vector</div>
+                                <div className="font-mono text-xs text-gray-400 bg-bg-tertiary/50 rounded px-2 py-1.5 leading-relaxed">
+                                  [
+                                  {point.vector.slice(0, 4).map((v, i) => (
+                                    <span key={i}>
+                                      <span className="text-orange-400/80">{v.toFixed(4)}</span>
+                                      {i < 3 && <span className="text-gray-600">, </span>}
+                                    </span>
+                                  ))}
+                                  {point.vector.length > 4 && (
+                                    <span className="text-gray-600"> &hellip; +{point.vector.length - 4} more</span>
+                                  )}
+                                  ]
+                                </div>
+                              </div>
+                            )}
                             {(point.namespace != null && point.namespace !== '') && (
                               <div className="mb-2">
                                 <div className="text-xs text-gray-400 mb-0.5">Namespace</div>
@@ -784,6 +811,32 @@ export const CollectionPoints = () => {
                     </CardContent>
                   </Card>
                 </div>
+
+                {/* HNSW index (ef_search, auto-tune) */}
+                {(stats.ef_search_current != null || stats.hnsw_auto_tune_enabled) && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-sm font-medium text-gray-400">
+                        <Search className="h-4 w-4" />
+                        Index (HNSW)
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="flex flex-wrap items-center gap-4">
+                      {stats.ef_search_current != null && (
+                        <div>
+                          <p className="text-xs text-gray-500">ef_search (current)</p>
+                          <p className="text-lg font-semibold text-gray-50">{stats.ef_search_current}</p>
+                        </div>
+                      )}
+                      {stats.hnsw_auto_tune_enabled && (
+                        <Badge variant="secondary" className="inline-flex items-center gap-1">
+                          <Zap className="h-3 w-3" />
+                          Optimized by FerresEngine
+                        </Badge>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
 
                 {/* Reindex: Tombstones + manual reindex + jobs */}
                 <Card>

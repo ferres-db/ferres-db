@@ -6,6 +6,7 @@ import { Overview } from '@/pages/Overview';
 import { Collections } from '@/pages/Collections';
 import { CollectionDetails } from '@/pages/CollectionDetails';
 import { CollectionPoints } from '@/pages/CollectionPoints';
+import { GraphExplorer } from '@/pages/GraphExplorer';
 import { QueryTester } from '@/pages/QueryTester';
 import { Embeddings } from '@/pages/Embeddings';
 import { Streaming } from '@/pages/Streaming';
@@ -13,6 +14,9 @@ import { ApiKeys } from '@/pages/ApiKeys';
 import { Users } from '@/pages/Users';
 import { Audit } from '@/pages/Audit';
 import { Analytics } from '@/pages/Analytics';
+import { Settings } from '@/pages/Settings';
+import { SnapshotsRecovery } from '@/pages/SnapshotsRecovery';
+import { Cluster } from '@/pages/Cluster';
 import { Login } from '@/pages/Login';
 
 const queryClient = new QueryClient({
@@ -36,6 +40,7 @@ function App() {
               <Route path="/collections" element={<Collections />} />
               <Route path="/collections/:name" element={<CollectionDetails />} />
               <Route path="/collections/:name/points" element={<CollectionPoints />} />
+              <Route path="/collections/:name/graph" element={<GraphExplorer />} />
               <Route path="/embeddings" element={<Embeddings />} />
               <Route path="/streaming" element={<Streaming />} />
               <Route path="/query-tester" element={<QueryTester />} />
@@ -43,6 +48,9 @@ function App() {
               <Route path="/users" element={<Users />} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/analytics" element={<Analytics />} />
+              <Route path="/snapshots-recovery" element={<SnapshotsRecovery />} />
+              <Route path="/cluster" element={<Cluster />} />
+              <Route path="/settings" element={<Settings />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

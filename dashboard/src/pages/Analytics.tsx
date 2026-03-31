@@ -2,6 +2,7 @@ import { useAnalytics } from '@/hooks/useStats';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table';
 import {
   PieChart,
   Pie,
@@ -10,6 +11,8 @@ import {
   Line,
   AreaChart,
   Area,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -17,7 +20,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
-import { Activity, Gauge, ShieldAlert, BarChart3, TrendingUp, Database } from 'lucide-react';
+import { Activity, Gauge, ShieldAlert, BarChart3, TrendingUp, Database, Layers } from 'lucide-react';
 import { format } from 'date-fns';
 
 const TIER_COLORS = ['#f97316', '#eab308', '#3b82f6']; // Hot, Warm, Cold
@@ -83,6 +86,24 @@ export const Analytics = () => {
     took_ms: e.took_ms,
   }));
 
+  // Histograma de latência (P95): buckets para distribuição das últimas consultas (10 min)
+  const latencyBuckets = [
+    { range: '0-5ms', min: 0, max: 5 },
+    { range: '5-10ms', min: 5, max: 10 },
+    { range: '10-25ms', min: 10, max: 25 },
+    { range: '25-50ms', min: 25, max: 50 },
+    { range: '50-100ms', min: 50, max: 100 },
+    { range: '100ms+', min: 100, max: Infinity },
+  ];
+  const latencyHistogramData = latencyBuckets.map(({ range, min, max }) => ({
+    range,
+    count: recentLatencies.filter((e) => {
+      const ms = e.took_ms;
+      return ms >= min && ms < max;
+    }).length,
+  }));
+
+  const topNamespacesByStorage = data?.top_namespaces_by_storage ?? [];
   const circuitVariant =
     circuitState === 'closed' ? 'success' : circuitState === 'open' ? 'danger' : 'warning';
   const circuitLabel =
@@ -178,7 +199,110 @@ export const Analytics = () => {
             )}
           </CardContent>
         </Card>
+
+        <Card className="overflow-hidden">
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium text-gray-400">Re-ranking Overhead (ms)</CardTitle>
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
+              <BarChart3 className="h-4 w-4 text-violet-500" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <Skeleton className="h-8 w-16 rounded" />
+            ) : data?.rerank_overhead_ms_avg != null ? (
+              <p className="text-2xl font-semibold tabular-nums text-gray-50">
+                {Number(data.rerank_overhead_ms_avg).toFixed(2)}
+              </p>
+            ) : (
+              <p className="text-sm text-gray-400">No rerank queries yet</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
+
+      {/* Top Namespaces by Storage */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Layers className="h-5 w-5 text-orange-500" />
+            Top Namespaces by Storage
+          </CardTitle>
+          <p className="text-sm text-gray-400">
+            Tenants/namespaces que mais consomem recursos (pontos e armazenamento estimado).
+          </p>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <Skeleton className="h-[220px] w-full rounded" />
+          ) : topNamespacesByStorage.length > 0 ? (
+            <>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Namespace</TableHead>
+                      <TableHead className="text-right">Points</TableHead>
+                      <TableHead className="text-right">Storage (est.)</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {topNamespacesByStorage.map((row) => (
+                      <TableRow key={row.namespace}>
+                        <TableCell className="font-medium">
+                          <Badge variant="default" className="font-mono">
+                            {row.namespace}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.point_count.toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-gray-400">
+                          {(row.storage_bytes_estimate / 1024).toFixed(1)} KB
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="mt-4 h-[200px]">
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart
+                    data={topNamespacesByStorage.slice(0, 15).map((r) => ({
+                      name: r.namespace.length > 12 ? r.namespace.slice(0, 12) + '…' : r.namespace,
+                      points: r.point_count,
+                      storage_kb: Math.round(r.storage_bytes_estimate / 1024),
+                    }))}
+                    layout="vertical"
+                    margin={{ top: 4, right: 24, left: 0, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#3f3f3f" />
+                    <XAxis type="number" stroke="#9ca3af" />
+                    <YAxis type="category" dataKey="name" width={80} stroke="#9ca3af" />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#2d2d2d',
+                        border: '1px solid #3f3f3f',
+                        borderRadius: '8px',
+                      }}
+                      formatter={(value: number, _name: string, props: { payload?: { storage_kb?: number } }) =>
+                        typeof value === 'number' && props?.payload?.storage_kb != null
+                          ? [`${value.toLocaleString()} pts · ${props.payload.storage_kb} KB`, 'Storage']
+                          : [value, 'Points']
+                      }
+                    />
+                    <Bar dataKey="points" fill="#f97316" name="Points" radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </>
+          ) : (
+            <p className="py-12 text-center text-sm text-gray-400">
+              No namespace data yet. Add points with a <code className="text-gray-300">namespace</code> field to see tenant usage.
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Circuit breaker */}
       <Card>
@@ -201,13 +325,13 @@ export const Analytics = () => {
         </CardContent>
       </Card>
 
-      {/* Real-time: Throughput (Line) + Latency (Area) */}
+      {/* Real-time: Ingestão (pontos/min) + Latência (área + histograma P95) */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <TrendingUp className="h-5 w-5 text-orange-500" />
-              Ingestão (Throughput) — últimos 10 min
+              Ingestão — Pontos por minuto (últimos 10 min)
             </CardTitle>
             <p className="text-sm text-gray-400">
               Média: {typeof avgPointsPerSecond === 'number' ? avgPointsPerSecond.toFixed(2) : 0} pts/s
@@ -249,7 +373,7 @@ export const Analytics = () => {
 
         <Card>
           <CardHeader>
-            <CardTitle>Latência de Busca (ms) — últimas consultas</CardTitle>
+            <CardTitle>Latência de Busca — últimas consultas</CardTitle>
             <p className="text-sm text-gray-400">
               P95 (10 min): {timeSeries10m?.p95_latency_ms != null ? Number(timeSeries10m.p95_latency_ms).toFixed(2) : '—'} ms
             </p>
@@ -294,6 +418,40 @@ export const Analytics = () => {
           </CardContent>
         </Card>
       </div>
+
+      {/* Histograma P95: distribuição de latências (10 min) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Latência — Histograma P95 (últimos 10 min)</CardTitle>
+          <p className="text-sm text-gray-400">
+            Distribuição das consultas por faixa de latência; P95 (10 min): {timeSeries10m?.p95_latency_ms != null ? Number(timeSeries10m.p95_latency_ms).toFixed(2) : '—'} ms
+          </p>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <Skeleton className="h-[220px] w-full rounded" />
+          ) : latencyHistogramData.some((d) => d.count > 0) ? (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={latencyHistogramData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#3f3f3f" />
+                <XAxis dataKey="range" stroke="#9ca3af" />
+                <YAxis stroke="#9ca3af" allowDecimals={false} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#2d2d2d',
+                    border: '1px solid #3f3f3f',
+                    borderRadius: '8px',
+                  }}
+                  labelStyle={{ color: '#f9fafb' }}
+                />
+                <Bar dataKey="count" fill="#f97316" name="Consultas" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="py-12 text-center text-sm text-gray-400">Sem dados de latência nos últimos 10 min</p>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Pie: tier distribution */}

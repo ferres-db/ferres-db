@@ -30,6 +30,10 @@ service FerresDB {
   // ── Streaming ────────────────────────────────────────────────────────
   rpc StreamUpsert(stream UpsertPointsRequest) returns (stream UpsertPointsResponse);
   rpc StreamSearch(stream SearchRequest) returns (stream SearchResponse);
+
+  // ── Replication (experimental) ────────────────────────────────────────
+  // Stream WAL entries from a collection for read replicas.
+  rpc StreamWal(StreamWalRequest) returns (stream StreamWalResponse);
 }
 
 // ─── Enums ──────────────────────────────────────────────────────────────
@@ -246,4 +250,35 @@ message ExplainSearchResponse {
   uint64            candidates_after_filter = 4;
   repeated ExplainResult results            = 5;
   IndexStats        index_stats             = 6;
+}
+
+// ─── Replication (WAL stream) ───────────────────────────────────────────
+
+message StreamWalRequest {
+  string collection_name = 1;
+  uint64 from_position   = 2;
+}
+
+message WalEntryMessage {
+  uint64 timestamp = 1;
+  oneof operation {
+    WalUpsert upsert = 2;
+    WalDelete delete = 3;
+  }
+}
+
+message WalUpsert {
+  string          id            = 1;
+  repeated float  vector        = 2;
+  string          metadata_json = 3;
+  uint64          created_at    = 4;
+  optional string namespace     = 5;
+}
+
+message WalDelete {
+  string id = 1;
+}
+
+message StreamWalResponse {
+  repeated WalEntryMessage entries = 1;
 }

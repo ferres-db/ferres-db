@@ -6,23 +6,56 @@
 //! [crate::request_validation] e aplicada nos handlers de points antes do processamento.
 
 use axum::{
-    extract::Request,
+    extract::{Request, State},
+    http::Method,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
+use governor::middleware::NoOpMiddleware;
 use std::sync::Arc;
 use std::time::Instant;
-use governor::middleware::NoOpMiddleware;
 use tower_governor::{
-    governor::GovernorConfigBuilder,
-    key_extractor::KeyExtractor,
-    GovernorError, GovernorLayer,
+    governor::GovernorConfigBuilder, key_extractor::KeyExtractor, GovernorError, GovernorLayer,
 };
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 use uuid::Uuid;
 
-use crate::metrics::{HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_MS, normalize_endpoint};
+use crate::error::ApiError;
+use crate::metrics::{normalize_endpoint, HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_MS};
+use crate::state::AppState;
+
+/// Bloqueia operações de escrita (POST/PUT/DELETE) quando o servidor está em modo réplica.
+/// Retorna 405 Method Not Allowed para rotas de escrita; permite GET e POST em search/auth.
+pub async fn replica_write_guard(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if state.config.replica_of.is_none() {
+        return next.run(req).await;
+    }
+    let method = req.method().clone();
+    let path = req.uri().path();
+    if method == Method::GET {
+        return next.run(req).await;
+    }
+    if method == Method::POST {
+        if path.ends_with("/search")
+            || path.ends_with("/search/hybrid")
+            || path.ends_with("/search/explain")
+            || path.ends_with("/search/estimate")
+            || path == "/api/v1/auth/login"
+        {
+            return next.run(req).await;
+        }
+    }
+    if method == Method::POST || method == Method::PUT || method == Method::DELETE {
+        return ApiError::method_not_allowed("Write operations are not allowed on a read replica")
+            .into_response();
+    }
+    next.run(req).await
+}
 
 /// Middleware de logging estruturado e raiz do distributed tracing para cada requisição.
 ///
@@ -38,16 +71,26 @@ use crate::metrics::{HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_MS, normalize_en
 pub async fn request_logger(req: Request, next: Next) -> Response {
     // Gera request_id único para correlação entre logs e traces
     let request_id = Uuid::new_v4().to_string();
-    
+
     // Extrai informações da requisição
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let normalized_endpoint = normalize_endpoint(&path);
-    
+
     // Extrai collection e operation do path
     let (collection, operation) = extract_collection_and_operation(&path);
-    
-    // Span pai: toda a requisição e sub-operações ficam como filhos (distributed tracing)
+
+    // Span pai: toda a requisição e sub-operações ficam como filhos (distributed tracing).
+    //
+    // IMPORTANT: We use `.instrument(span)` instead of `span.enter()` because
+    // `enter()` is thread-local and MUST NOT be held across `.await` points.
+    // In async code, the tokio runtime can poll different tasks on the same
+    // thread.  If task A holds `span.enter()` and yields, then task B runs on
+    // the same thread and creates its own span, B's span becomes a *child* of
+    // A's span — producing the ever-growing nested span chains visible in logs:
+    //   http_request{req1}:http_request{req2}:http_request{req3}:...
+    // `.instrument()` correctly attaches the span only while the future is
+    // being polled, preventing cross-task contamination.
     let span = tracing::span!(
         tracing::Level::INFO,
         "http_request",
@@ -57,7 +100,6 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
         collection = ?collection,
         operation = ?operation
     );
-    let _guard = span.enter();
 
     // OTel: propaga W3C trace context (traceparent/tracestate) para o span atual
     #[cfg(feature = "otel")]
@@ -69,8 +111,9 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
 
     let start = Instant::now();
 
+    // Run the inner handler instrumented with the span (NOT span.enter()).
     #[allow(unused_mut)]
-    let mut response = next.run(req).await;
+    let mut response = next.run(req).instrument(span.clone()).await;
     let latency_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let status = response.status();
     let status_str = status.as_u16().to_string();
@@ -89,7 +132,7 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
     HTTP_REQUESTS_TOTAL
         .with_label_values(&[method.as_str(), &normalized_endpoint, &status_str])
         .inc();
-    
+
     HTTP_REQUEST_DURATION_MS
         .with_label_values(&[method.as_str(), &normalized_endpoint])
         .observe(latency_ms as f64);
@@ -127,12 +170,12 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
 /// Extrai o nome da coleção e a operação do path da URL.
 fn extract_collection_and_operation(path: &str) -> (Option<String>, Option<String>) {
     let parts: Vec<&str> = path.split('/').collect();
-    
+
     // Procura por "collections" no path
     if let Some(pos) = parts.iter().position(|&p| p == "collections") {
         if pos + 1 < parts.len() {
             let collection_name = parts[pos + 1];
-            
+
             // Determina a operação baseado no path
             let operation = if path.contains("/search") {
                 Some("search".to_string())
@@ -147,11 +190,11 @@ fn extract_collection_and_operation(path: &str) -> (Option<String>, Option<Strin
             } else {
                 None
             };
-            
+
             return (Some(collection_name.to_string()), operation);
         }
     }
-    
+
     // Tenta identificar operações sem coleção
     let operation = if path == "/api/v1/collections" {
         Some("list_collections".to_string())
@@ -162,7 +205,7 @@ fn extract_collection_and_operation(path: &str) -> (Option<String>, Option<Strin
     } else {
         None
     };
-    
+
     (None, operation)
 }
 
@@ -240,12 +283,20 @@ impl KeyExtractor for CollectionKeyExtractor {
 }
 
 /// Cria o layer de rate limiting por coleção.
-/// Baseline: 100 req/s por coleção; burst até 200 req/s.
-pub fn create_collection_rate_limit_layer() -> GovernorLayer<CollectionKeyExtractor, NoOpMiddleware> {
+/// Valores vêm da configuração do servidor (config.toml ou env).
+pub fn create_collection_rate_limit_layer(
+    per_second: u32,
+    burst_size: u32,
+) -> GovernorLayer<CollectionKeyExtractor, NoOpMiddleware> {
     let mut builder = GovernorConfigBuilder::default();
-    builder.per_second(100);
-    builder.burst_size(200);
-    let config = builder.key_extractor(CollectionKeyExtractor).finish().unwrap();
+    builder.per_second(per_second as u64);
+    builder.burst_size(burst_size);
+    let config = builder
+        .key_extractor(CollectionKeyExtractor)
+        .finish()
+        .unwrap();
 
-    GovernorLayer { config: Arc::new(config) }
+    GovernorLayer {
+        config: Arc::new(config),
+    }
 }
