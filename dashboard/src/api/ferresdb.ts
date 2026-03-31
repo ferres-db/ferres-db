@@ -170,6 +170,7 @@ export const collectionsApi = {
       enable_bm25?: boolean;
       bm25_text_field?: string;
       tiered_storage?: TieredStorageConfig;
+      retention_days?: number | null;
     },
   ): Promise<void> => {
     // Backend expects "dimension" and "distance" (PascalCase: Cosine, Euclidean, DotProduct)
@@ -200,6 +201,11 @@ export const collectionsApi = {
             dtype: "Int8",
             always_ram: q.always_ram ?? false,
             quantile: q.quantile ?? 0.99,
+            ...(q.enable_qjl && {
+              enable_qjl: true,
+              qjl_m: q.qjl_m ?? 64,
+              qjl_seed: q.qjl_seed ?? 42,
+            }),
           },
         };
       }
@@ -212,6 +218,9 @@ export const collectionsApi = {
     }
     if (options?.tiered_storage && options.tiered_storage.enabled) {
       body.tiered_storage = options.tiered_storage;
+    }
+    if (options?.retention_days != null) {
+      body.retention_days = options.retention_days;
     }
 
     await apiClient.post("/api/v1/collections", body);
@@ -499,6 +508,18 @@ export const usersApi = {
 
 // Graph API (subgraph for Graph Explorer)
 export const graphApi = {
+  linkPoints: async (
+    collection: string,
+    from: string,
+    to: string,
+  ): Promise<{ ok: boolean }> => {
+    const response = await apiClient.post<{ ok: boolean }>(
+      `/api/v1/collections/${encodeURIComponent(collection)}/points/link`,
+      { from, to },
+    );
+    return response.data;
+  },
+
   getSubgraph: async (
     collection: string,
     options?: {
