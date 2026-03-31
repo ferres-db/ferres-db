@@ -136,20 +136,41 @@ session.headers.setdefault("Content-Type", "application/json")
 ### Criar coleção
 
 ```python
-def create_collection(name: str, dimension: int, distance: str = "Cosine", enable_bm25: bool = False):
-    resp = session.post(
-        f"{BASE}/api/v1/collections",
-        json={
-            "name": name,
-            "dimension": dimension,
-            "distance": distance,
-            "enable_bm25": enable_bm25,
-        },
-    )
+def create_collection(
+    name: str,
+    dimension: int,
+    distance: str = "Cosine",
+    enable_bm25: bool = False,
+    quantization: dict | None = None,
+    retention_days: int | None = None,
+):
+    body = {
+        "name": name,
+        "dimension": dimension,
+        "distance": distance,
+        "enable_bm25": enable_bm25,
+    }
+    if quantization is not None:
+        body["quantization"] = quantization
+    if retention_days is not None:
+        body["retention_days"] = retention_days
+    resp = session.post(f"{BASE}/api/v1/collections", json=body)
     if resp.status_code not in (200, 201):
         err = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         raise RuntimeError(err.get("message", resp.text))
     return resp.json()
+
+# SQ8 com QJL (correção residual, opt-in):
+create_collection("docs", 384, quantization={
+    "Scalar": {"dtype": "Int8", "always_ram": False, "quantile": 0.99,
+               "enable_qjl": True, "qjl_m": 64, "qjl_seed": 42}
+})
+
+# PolarQuant (8 bits por ângulo):
+create_collection("docs_polar", 384, quantization={"Polar": {"bits_per_angle": 8}})
+
+# Com retenção de 30 dias:
+create_collection("logs", 128, retention_days=30)
 ```
 
 ### Upsert de pontos
@@ -178,15 +199,25 @@ upserted, failed = upsert_points("docs", points)
 ### Busca vetorial
 
 ```python
-def search(collection: str, vector: list[float], limit: int = 5, filter_meta=None):
+def search(
+    collection: str,
+    vector: list[float],
+    limit: int = 5,
+    filter_meta=None,
+    rerank: bool = False,
+):
     payload = {"vector": vector, "limit": limit}
     if filter_meta is not None:
         payload["filter"] = filter_meta
+    if rerank:
+        payload["rerank"] = True
     resp = session.post(f"{BASE}/api/v1/collections/{collection}/search", json=payload)
     if resp.status_code != 200:
         err = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         raise RuntimeError(err.get("message", resp.text))
-    return resp.json().get("results", [])
+    data = resp.json()
+    # data["rerank_ms"] disponível quando rerank=True foi aplicado
+    return data.get("results", [])
 ```
 
 ### Busca híbrida (vetorial + BM25)
@@ -194,20 +225,89 @@ def search(collection: str, vector: list[float], limit: int = 5, filter_meta=Non
 Requer coleção criada com `enable_bm25: true`.
 
 ```python
-def search_hybrid(collection: str, query_text: str, query_vector: list[float], limit: int = 5, alpha: float = 0.5):
+def search_hybrid(
+    collection: str,
+    query_text: str,
+    query_vector: list[float],
+    limit: int = 5,
+    alpha: float = 0.5,
+    fusion: str = "weighted",
+    rrf_k: int = 60,
+):
+    """
+    fusion: "weighted" (default) ou "rrf" (Reciprocal Rank Fusion).
+    alpha: peso vetor vs BM25 quando fusion="weighted" (1.0 = só vetorial, 0.0 = só BM25).
+    rrf_k: constante k do RRF quando fusion="rrf".
+    """
+    payload = {
+        "query_text": query_text,
+        "query_vector": query_vector,
+        "limit": limit,
+        "fusion": fusion,
+    }
+    if fusion == "weighted":
+        payload["alpha"] = alpha
+    else:
+        payload["rrf_k"] = rrf_k
     resp = session.post(
         f"{BASE}/api/v1/collections/{collection}/search/hybrid",
-        json={
-            "query_text": query_text,
-            "query_vector": query_vector,
-            "limit": limit,
-            "alpha": alpha,
-        },
+        json=payload,
     )
     if resp.status_code != 200:
         err = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         raise RuntimeError(err.get("message", resp.text))
     return resp.json().get("results", [])
+```
+
+### Grafos (relações entre pontos)
+
+```python
+def link_points(collection: str, from_id: str, to_id: str):
+    """Cria uma relação não-direcionada entre dois pontos."""
+    resp = session.post(
+        f"{BASE}/api/v1/collections/{collection}/points/link",
+        json={"from": from_id, "to": to_id},
+    )
+    if resp.status_code != 200:
+        err = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        raise RuntimeError(err.get("message", resp.text))
+    return resp.json()
+
+def get_subgraph(
+    collection: str,
+    center_id: str | None = None,
+    depth: int | None = None,
+    seed: str | None = None,
+    limit: int | None = None,
+):
+    """
+    Retorna subgrafo via BFS.
+    center_id + depth: expansão a partir de um nó central.
+    seed: nó semente para 1-hop.
+    limit: máximo de nós no grafo completo.
+    Resposta: { "nodes": [...], "edges": [...] }
+    """
+    params = {}
+    if center_id is not None:
+        params["center_id"] = center_id
+    if depth is not None:
+        params["depth"] = depth
+    if seed is not None:
+        params["seed"] = seed
+    if limit is not None:
+        params["limit"] = limit
+    resp = session.get(
+        f"{BASE}/api/v1/collections/{collection}/graph/subgraph",
+        params=params,
+    )
+    if resp.status_code != 200:
+        err = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        raise RuntimeError(err.get("message", resp.text))
+    return resp.json()  # { "nodes": [...], "edges": [...] }
+
+# Exemplo:
+link_points("docs", "doc-1", "doc-2")
+subgraph = get_subgraph("docs", center_id="doc-1", depth=2)
 ```
 
 ### Referência no repositório
