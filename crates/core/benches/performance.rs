@@ -461,7 +461,7 @@ fn benchmark_sq8(c: &mut Criterion) {
 
         // Print memory comparison
         let f32_mem = n * dim * 4;
-        let u8_mem = n * dim * 1;
+        let u8_mem = n * dim;
         println!(
             "   Memory: f32={:.1}MB, SQ8={:.1}MB ({:.1}x compression)",
             f32_mem as f64 / 1024.0 / 1024.0,
@@ -839,7 +839,7 @@ fn benchmark_qjl_latency(c: &mut Criterion) {
             "  Recall@{k}: SQ8={sq_recall:.3}  SQ8+QJL={qjl_recall:.3}  (delta={qjl_overhead_pct:+.1}%)"
         );
 
-        let qjl_overhead_bytes = n * ((64 + 63) / 64) * 8; // ceil(m/64) u64 words × 8 bytes
+        let qjl_overhead_bytes = n * 64_usize.div_ceil(64) * 8; // ceil(m/64) u64 words × 8 bytes
         println!(
             "  QJL memory overhead: ~{:.1} KB (m=64, {} u64 words per vector)",
             qjl_overhead_bytes as f64 / 1024.0,
