@@ -182,7 +182,6 @@ pub struct StorageOptions {
     pub namespace_physical_isolation: bool,
 }
 
-
 /// Metadados persistidos de uma coleção.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionMeta {
