@@ -142,7 +142,7 @@ fn synthetic_point_with_vector(p: &Point, vector: Vec<f32>) -> Point {
         metadata: p.metadata.clone(),
         created_at: p.created_at,
         namespace: p.namespace.clone(),
-        expires_at: p.expires_at.clone(),
+        expires_at: p.expires_at,
         vectors: None,
         relations: p.relations.clone(),
     }

@@ -931,7 +931,7 @@ pub fn distance_between(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
                 (1.0 - (dot as f64) / denom) as f32
             }
         }
-        DistanceMetric::DotProduct => (1.0 - dot_product(a, b)) as f32,
+        DistanceMetric::DotProduct => 1.0 - dot_product(a, b),
     }
 }
 

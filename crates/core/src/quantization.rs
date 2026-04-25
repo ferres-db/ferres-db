@@ -803,7 +803,7 @@ impl QjlParams {
     /// Retorna `ceil(m / 64)` palavras u64 com os bits compactados.
     pub fn encode_residual(&self, residual: &[f32]) -> Vec<u64> {
         debug_assert_eq!(residual.len(), self.dim);
-        let num_words = (self.m + 63) / 64;
+        let num_words = self.m.div_ceil(64);
         let mut bits = vec![0u64; num_words];
 
         for (i, row) in self.projection_matrix.iter().enumerate() {
@@ -883,7 +883,7 @@ impl QjlParams {
 /// O(n log n) tempo, O(n) memória. Para dim = 128: 127 ângulos, 1 raio final.
 pub fn polar_encode(vector: &[f32], bits_per_angle: u8) -> PolarQuantized {
     debug_assert!(
-        bits_per_angle >= 1 && bits_per_angle <= 8,
+        (1..=8).contains(&bits_per_angle),
         "bits_per_angle must be in [1, 8]"
     );
 
@@ -960,7 +960,7 @@ pub fn polar_decode(quantized: &PolarQuantized) -> Vec<f32> {
     let mut level_sizes: Vec<usize> = Vec::new();
     let mut sz = dim;
     while sz > 1 {
-        let pairs = (sz + 1) / 2;
+        let pairs = sz.div_ceil(2);
         level_sizes.push(pairs);
         sz = pairs;
     }
@@ -976,9 +976,7 @@ pub fn polar_decode(quantized: &PolarQuantized) -> Vec<f32> {
     // input_sizes[k] = level_sizes[k-1] for k > 0 (the radii produced by the previous level).
     let mut input_sizes: Vec<usize> = vec![0; level_sizes.len()];
     input_sizes[0] = dim;
-    for k in 1..level_sizes.len() {
-        input_sizes[k] = level_sizes[k - 1];
-    }
+    input_sizes[1..level_sizes.len()].copy_from_slice(&level_sizes[..(level_sizes.len() - 1)]);
 
     // Start from the final (deepest) radius and expand level by level in reverse.
     let mut radii = vec![quantized.final_radius];
@@ -990,8 +988,7 @@ pub fn polar_decode(quantized: &PolarQuantized) -> Vec<f32> {
 
         let mut expanded = Vec::with_capacity(2 * n_pairs);
 
-        for i in 0..n_pairs {
-            let r = radii[i];
+        for (i, &r) in radii.iter().enumerate().take(n_pairs) {
             let q = quantized.angles[offset + i] as f32;
             // Dequantize: [0, max_angle_val] → [0, 2π] → [-π, π]
             let theta = q / max_angle_val * two_pi - std::f32::consts::PI;
