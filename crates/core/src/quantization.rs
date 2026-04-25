@@ -774,8 +774,8 @@ impl QjlParams {
     /// A matriz R tem valores Rademacher: cada entrada é +1 ou -1 com igual probabilidade,
     /// gerada com `StdRng::seed_from_u64(seed)` para reproducibilidade.
     pub fn new(dim: usize, m: usize, seed: u64) -> Self {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
         let mut rng = StdRng::seed_from_u64(seed);
         let projection_matrix: Vec<Vec<i8>> = (0..m)
@@ -1371,7 +1371,11 @@ mod tests {
         let q3 = polar_encode(&v3, 8);
         assert_eq!(q3.dim, 3);
         let d3 = polar_decode(&q3);
-        assert_eq!(d3.len(), 3, "decoded must have exactly 3 elements for odd dim");
+        assert_eq!(
+            d3.len(),
+            3,
+            "decoded must have exactly 3 elements for odd dim"
+        );
     }
 
     /// Testa que a memória de PolarQuantized para dim=128 é menor que Vec<f32>.
@@ -1476,7 +1480,10 @@ mod tests {
         let bits_a = qjl_a.encode_residual(&residual);
         let bits_b = qjl_b.encode_residual(&residual);
 
-        assert_ne!(bits_a, bits_b, "Different seeds should produce different sign bits");
+        assert_ne!(
+            bits_a, bits_b,
+            "Different seeds should produce different sign bits"
+        );
     }
 
     /// Testa que QjlParams serializa apenas (m, dim, seed) e regenera a matriz no load.
@@ -1487,7 +1494,10 @@ mod tests {
 
         let json = serde_json::to_string(&qjl).expect("serialize");
         // JSON deve conter apenas m, dim, seed — não a matriz
-        assert!(!json.contains("projection_matrix"), "matrix should not be serialized");
+        assert!(
+            !json.contains("projection_matrix"),
+            "matrix should not be serialized"
+        );
         assert!(json.contains("\"m\":48"), "m should be in JSON");
         assert!(json.contains("\"seed\":99"), "seed should be in JSON");
 

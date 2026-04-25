@@ -35,7 +35,7 @@ use crate::error::FerresError;
 use crate::explain::ExplainMeta;
 use crate::point::Point;
 use crate::quantization::{
-    polar_distance_asymmetric, polar_encode, polar_decode, PolarQuantConfig, PolarQuantized,
+    polar_decode, polar_distance_asymmetric, polar_encode, PolarQuantConfig, PolarQuantized,
     QjlParams, QuantizationConfig, ScalarQuantizationConfig, ScalarQuantizationParams,
 };
 
@@ -1071,9 +1071,7 @@ impl ANNIndex for QuantizedHnswIndex {
                     Some((id, sq_score - correction))
                 })
                 .collect();
-            corrected.sort_by(|a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            corrected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             corrected
         } else {
             reranked
@@ -1100,7 +1098,7 @@ impl ANNIndex for QuantizedHnswIndex {
                 }
             }
             self.quantized_vectors.push(Vec::new()); // placeholder
-            // QJL placeholder: mantém alinhamento com id_map/quantized_vectors
+                                                     // QJL placeholder: mantém alinhamento com id_map/quantized_vectors
             if self.config.enable_qjl {
                 self.qjl_sign_bits.push(Vec::new());
             }
@@ -1962,8 +1960,8 @@ mod tests {
     /// O recall médio do QJL deve ser >= 75% do recall médio do SQ8.
     #[test]
     fn test_qjl_recall_not_worse() {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
         use std::collections::HashSet;
 
         let dim = 128usize;
@@ -1973,10 +1971,12 @@ mod tests {
 
         // Gera pontos sintéticos
         let points: Vec<Point> = (0..n)
-            .map(|i| make_point(
-                &format!("p{i}"),
-                (0..dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect(),
-            ))
+            .map(|i| {
+                make_point(
+                    &format!("p{i}"),
+                    (0..dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect(),
+                )
+            })
             .collect();
 
         // Queries — 20 amostras para reduzir variância do algoritmo randomizado
@@ -2045,7 +2045,7 @@ mod tests {
                 .map(|(id, _)| id)
                 .collect();
 
-            sq_recall_total  += truth.intersection(&sq_ids).count();
+            sq_recall_total += truth.intersection(&sq_ids).count();
             qjl_recall_total += truth.intersection(&qjl_ids).count();
         }
 
