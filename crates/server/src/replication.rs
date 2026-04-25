@@ -204,7 +204,7 @@ fn apply_wal_entry(
         }
         Operation::Link(link) => {
             let mut coll = coll_arc.write().map_err(|e| e.to_string())?;
-            coll.add_relation(link.from, link.to)
+            coll.add_relation(&link.from, &link.to)
                 .map_err(|e| e.to_string())?;
         }
     }
