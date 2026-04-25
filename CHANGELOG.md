@@ -1,65 +1,65 @@
 # Changelog
 
-Alterações notáveis do projeto, agrupadas por semana. O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/).
+Notable changes to the project, grouped by week. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Released] - 31/06/2026
 
 ### Added
 
-- **Optimization: QJL (Quantized Johnson-Lindenstrauss) residual correction para SQ8** — Nova etapa opcional de correção pós-quantização no `QuantizedHnswIndex`. Após o SQ8 quantizar cada vetor, o erro residual (`original - dequantize(quantized)`) é projetado por uma matriz de Johnson-Lindenstrauss aleatória R ∈ {+1,-1}^{m×d} e comprimido para 1 bit por dimensão projetada (packed em u64, `ceil(m/64)` palavras). Na busca, após o re-rank SQ8 assimétrico, aplica-se o estimador não-enviesado `score_final = score_sq8 − (2/m)·Σᵢ(q_projected_i·sign_i)` que reduz o viés de quantização e melhora o recall@10. Ativado via `ScalarQuantizationConfig { enable_qjl: true, qjl_m: 64, qjl_seed: 42 }` — desabilitado por padrão, sem impacto em coleções existentes (compatível com serde: campos com `#[serde(default)]`). A matriz R é gerada deterministicamente a partir do `seed` (usando `StdRng`) e não é serializada — apenas `(m, dim, seed)` são persistidos, regenerando R no load. `QjlParams` exposto no crate público via `pub use quantization::QjlParams`. Dashboard: toggle "Enable QJL residual correction" + slider de dimensões m (32–128) na criação de coleção SQ8; badge "QJL" na lista de coleções. Benchmark criterion: `benchmark_qjl_latency` compara latência de busca e recall@10 com e sem QJL (dim 128 e 384, 1 000 vetores).
+- **Optimization: QJL (Quantized Johnson-Lindenstrauss) residual correction for SQ8** — New optional post-quantization correction step in `QuantizedHnswIndex`. After SQ8 quantizes each vector, the residual error (`original - dequantize(quantized)`) is projected by a random Johnson-Lindenstrauss matrix R ∈ {+1,-1}^{m×d} and compressed to 1 bit per projected dimension (packed in u64, `ceil(m/64)` words). During search, after asymmetric SQ8 re-ranking, the unbiased estimator `score_final = score_sq8 − (2/m)·Σᵢ(q_projected_i·sign_i)` is applied, reducing quantization bias and improving recall@10. Enabled via `ScalarQuantizationConfig { enable_qjl: true, qjl_m: 64, qjl_seed: 42 }` — disabled by default, with no impact on existing collections (serde-compatible: fields use `#[serde(default)]`). Matrix R is generated deterministically from `seed` (using `StdRng`) and is not serialized — only `(m, dim, seed)` are persisted and R is regenerated on load. `QjlParams` exposed in the public crate via `pub use quantization::QjlParams`. Dashboard: "Enable QJL residual correction" toggle + dimension slider m (32–128) in SQ8 collection creation; "QJL" badge in collection list. Criterion benchmark: `benchmark_qjl_latency` compares search latency and recall@10 with and without QJL (dim 128 and 384, 1,000 vectors).
 
-- **PolarQuant quantization** (`QuantizationConfig::Polar`): nova variante de quantização baseada em coordenadas polares recursivas. Converte vetores cartesianos em `(final_radius: f32, angles: Vec<u8>)` agrupando pares `(x, y)` → `(r, θ)` de forma recursiva até restar um único raio escalar. Não exige calibração por bloco — os ângulos têm fronteiras fixas em `[0, 2π]`, eliminando o overhead de parâmetros `min`/`max`/`scale` por dimensão presente no SQ8. Configurável via `PolarQuantConfig { bits_per_angle: u8 }` (default: 8 bits = 256 níveis). Expõe `polar_encode`, `polar_decode` e `polar_distance_asymmetric` (query permanece em `f32`, candidato decodificado on-the-fly). Adicionado `PolarQuantHnswIndex` implementando o trait `ANNIndex`, integrado na factory `create_ann_index`. Recall ≥ 0.90 em testes unitários para dim 128 (1 000 vetores aleatórios).
-- **Benchmark `quantization_comparison`** (criterion): compara build time, latência de busca, recall@10 e footprint de memória entre SQ8 e PolarQuant para dim 128 e 384.
+- **PolarQuant quantization** (`QuantizationConfig::Polar`): new quantization variant based on recursive polar coordinates. Converts Cartesian vectors into `(final_radius: f32, angles: Vec<u8>)` by recursively grouping pairs `(x, y)` → `(r, θ)` until a single scalar radius remains. Requires no per-block calibration — angles have fixed boundaries in `[0, 2π]`, eliminating the `min`/`max`/`scale` parameter overhead per dimension present in SQ8. Configurable via `PolarQuantConfig { bits_per_angle: u8 }` (default: 8 bits = 256 levels). Exposes `polar_encode`, `polar_decode` and `polar_distance_asymmetric` (query remains as `f32`, candidate decoded on-the-fly). Added `PolarQuantHnswIndex` implementing the `ANNIndex` trait, integrated in the `create_ann_index` factory. Recall ≥ 0.90 in unit tests for dim 128 (1,000 random vectors).
+- **Benchmark `quantization_comparison`** (criterion): compares build time, search latency, recall@10 and memory footprint between SQ8 and PolarQuant for dim 128 and 384.
 
-- **Feature: Graph persistence and traversal — grafos sobre pontos.** — Core: campo opcional `relations: Option<Vec<String>>` em `Point` (IDs de pontos relacionados); método `Collection::add_relation(from_id, to_id)` para grafo não direcionado; persistência em storage (PointBin e JSONL incluem `relations`) e WAL com nova operação `Operation::Link { from, to }` e `Wal::append_link`; replay de Link na recuperação e no PITR. API: `POST /api/v1/collections/{name}/points/link` (body: `{ "from", "to" }`) para criar relação entre dois pontos; `GET /api/v1/collections/{name}/points/{id}` e listagem incluem `relations` na resposta. Módulo `crates/core/src/graph.rs`: função `traverse_bfs(get_point, start_id, max_depth)` (BFS com `VecDeque`); `search.rs`: função pública `distance_between(a, b, metric)`; `Collection::search_connected(query_vector, center_point_id, hops, k)` — restringe candidatos ao subgrafo por BFS e retorna top K por similaridade vetorial. Endpoint `GET /api/v1/collections/{name}/graph/subgraph`: parâmetros `center_id` e `depth` para subgrafo por BFS; `seed` (1-hop) e `limit` (grafo completo); resposta no formato `{ "nodes": [...], "edges": [...] }`. Dashboard: dependência `react-force-graph-2d`; nova página **Graph Explorer** (`/collections/:name/graph`) com visualização force-directed, clique no nó para expandir (chamada à API subgraph), cores por metadados (ex.: categoria) e barra lateral com JSON do nó selecionado; página **CollectionDetails** com botões "View Points" e "View Graph"; botão "View Graph" também na página de pontos. Documentação em `docs/api.md` (link, subgraph com center_id/depth/edges, campo relations em GET point).
+- **Feature: Graph persistence and traversal — graphs over points.** — Core: optional field `relations: Option<Vec<String>>` in `Point` (IDs of related points); method `Collection::add_relation(from_id, to_id)` for undirected graph; persistence in storage (PointBin and JSONL include `relations`) and WAL with new operation `Operation::Link { from, to }` and `Wal::append_link`; Link replay on recovery and PITR. API: `POST /api/v1/collections/{name}/points/link` (body: `{ "from", "to" }`) to create a relation between two points; `GET /api/v1/collections/{name}/points/{id}` and listing include `relations` in the response. Module `crates/core/src/graph.rs`: function `traverse_bfs(get_point, start_id, max_depth)` (BFS with `VecDeque`); `search.rs`: public function `distance_between(a, b, metric)`; `Collection::search_connected(query_vector, center_point_id, hops, k)` — restricts candidates to the subgraph via BFS and returns top K by vector similarity. Endpoint `GET /api/v1/collections/{name}/graph/subgraph`: parameters `center_id` and `depth` for BFS subgraph; `seed` (1-hop) and `limit` (full graph); response in format `{ "nodes": [...], "edges": [...] }`. Dashboard: `react-force-graph-2d` dependency; new **Graph Explorer** page (`/collections/:name/graph`) with force-directed visualization, node click to expand (subgraph API call), colors by metadata (e.g. category) and sidebar with selected node JSON; **CollectionDetails** page with "View Points" and "View Graph" buttons; "View Graph" button also on the points page. Documentation in `docs/api.md` (link, subgraph with center_id/depth/edges, relations field in GET point).
 
 - **Architecture: Added foundation for Raft-based distributed consensus.** — Server: optional crate `openraft` (feature `raft`); types and cluster status API for when a Raft node is run. Consensus: logic prepared so WAL can be replicated to a majority of nodes before confirm (propose via `replicate_then_confirm` once a Raft node is initialized). Dashboard: new **Cluster** page showing active nodes, Leader, and replication status (`GET /api/v1/cluster`). Build with `--features raft` to enable Raft types and future multi-node setup.
 
-- **Feature: Retention Policy Manager — limpeza automática de dados antigos.** — Core: nova configuração `retention_days` em `CollectionConfig` (opcional; padrão `None` = manter indefinidamente). Worker de background a cada 1 hora compacta o WAL (`wal.log`) por coleção, removendo entradas mais antigas que o período configurado (`compact_wal_entries_older_than` no core). Dashboard: na página **Settings**, nova secção **Data retention** para configurar a retenção (dias) por coleção; alterações são persistidas via `PATCH /api/v1/collections/{name}` (body: `{ "retention_days": number | null }`). Criação de coleção aceita `retention_days` opcional; `GET /api/v1/collections` e `GET /api/v1/collections/{name}` incluem `retention_days`. Documentação em `docs/api.md`.
+- **Feature: Retention Policy Manager — automatic cleanup of old data.** — Core: new `retention_days` configuration in `CollectionConfig` (optional; default `None` = keep indefinitely). Background worker running every 1 hour compacts the WAL (`wal.log`) per collection, removing entries older than the configured period (`compact_wal_entries_older_than` in core). Dashboard: on the **Settings** page, new **Data retention** section to configure retention (days) per collection; changes are persisted via `PATCH /api/v1/collections/{name}` (body: `{ "retention_days": number | null }`). Collection creation accepts optional `retention_days`; `GET /api/v1/collections` and `GET /api/v1/collections/{name}` include `retention_days`. Documentation in `docs/api.md`.
 
-- **Feature: Integrated native Cross-Encoder re-ranking via ONNX Runtime.** — Core: suporte opcional à crate `ort` (feature `rerank`) para carregar modelos Cross-Encoder (ex.: BGE-Reranker). Novo método `search_with_rerank`: recupera `limit * 5` candidatos via HNSW, re-pontua com o Cross-Encoder e retorna os top `limit` reordenados. API: parâmetro `rerank: bool` no body de `POST /api/v1/collections/{name}/search`; resposta inclui `rerank_ms` quando aplicável. Dashboard (Analytics): métrica "Re-ranking Overhead (ms)". Documentação em `docs/api.md`.
+- **Feature: Integrated native Cross-Encoder re-ranking via ONNX Runtime.** — Core: optional support for the `ort` crate (feature `rerank`) to load Cross-Encoder models (e.g. BGE-Reranker). New method `search_with_rerank`: retrieves `limit * 5` candidates via HNSW, re-scores with the Cross-Encoder and returns the top `limit` reordered. API: `rerank: bool` parameter in the body of `POST /api/v1/collections/{name}/search`; response includes `rerank_ms` when applicable. Dashboard (Analytics): "Re-ranking Overhead (ms)" metric. Documentation in `docs/api.md`.
 
 - **Security: Enhanced RBAC with namespace-level access control.** — API keys can be restricted to one or more namespaces (multitenancy). New `NamespaceAllowance` in the permissions model; API key store supports `allowed_namespaces` (create and update via `PUT /api/v1/keys/:id`). Middleware validates namespace from query param `namespace` or header `X-Namespace`; handlers validate namespace from request body (search, upsert, delete points). Dashboard: "Users/API Keys" allows assigning namespaces when creating a key and editing namespaces per key. Documented in `docs/api.md`.
 
-- **Optimization: Dynamic HNSW auto-tuning based on real-time performance metrics.** — O índice HNSW passa a ajustar `ef_search` dinamicamente (FerresEngine): se a latência P95 estiver baixa e o recall for prioridade, o valor é aumentado; se a latência estiver alta (proxy para CPU sob estresse), é reduzido. A lógica de auto-tune está em `collection.rs` (`apply_hnsw_auto_tune`); o servidor executa um ciclo a cada 60s usando P95 do `query_stats` por coleção. Novos campos em `GET /api/v1/stats/global`: `hnsw_auto_tune_enabled`, `index_optimization_label` ("Optimized by FerresEngine"); em `GET /api/v1/collections/{name}/stats`: `ef_search_current`, `hnsw_auto_tune_enabled`. Dashboard (Overview): badge e card "Index" com "Optimized by FerresEngine". Documentação em `docs/api.md`.
+- **Optimization: Dynamic HNSW auto-tuning based on real-time performance metrics.** — The HNSW index now dynamically adjusts `ef_search` (FerresEngine): if P95 latency is low and recall is the priority, the value is increased; if latency is high (proxy for CPU under stress), it is reduced. The auto-tune logic is in `collection.rs` (`apply_hnsw_auto_tune`); the server runs a cycle every 60s using P95 from `query_stats` per collection. New fields in `GET /api/v1/stats/global`: `hnsw_auto_tune_enabled`, `index_optimization_label` ("Optimized by FerresEngine"); in `GET /api/v1/collections/{name}/stats`: `ef_search_current`, `hnsw_auto_tune_enabled`. Dashboard (Overview): badge and "Index" card with "Optimized by FerresEngine". Documentation in `docs/api.md`.
 
-- **Feature: Added Point-in-Time Recovery (PITR) support using timestamped WAL.** — Cada entrada do WAL já inclui timestamp Unix; ao gravar um snapshot, o servidor persiste `last_snapshot_timestamp` no diretório da coleção. Novo endpoint `POST /api/v1/admin/restore` (Admin) aceita `{ "timestamp": <unix_sec>, "collection": "<name>?" }` e restaura uma ou todas as coleções ao estado nesse momento (carrega o último snapshot e reaplica o WAL apenas até o timestamp). `GET /api/v1/admin/restore/points` lista pontos de restauração (snapshot + timestamps do WAL) por coleção. Dashboard: nova aba **Snapshots & Recovery** para visualizar pontos de restauração e acionar PITR. Documentação em `docs/api.md` (guia de recuperação de desastres).
+- **Feature: Added Point-in-Time Recovery (PITR) support using timestamped WAL.** — Each WAL entry already includes a Unix timestamp; when saving a snapshot, the server persists `last_snapshot_timestamp` in the collection directory. New endpoint `POST /api/v1/admin/restore` (Admin) accepts `{ "timestamp": <unix_sec>, "collection": "<name>?" }` and restores one or all collections to the state at that moment (loads the last snapshot and replays the WAL only up to the timestamp). `GET /api/v1/admin/restore/points` lists restore points (snapshot + WAL timestamps) per collection. Dashboard: new **Snapshots & Recovery** tab to view restore points and trigger PITR. Documentation in `docs/api.md` (disaster recovery guide).
 
 - **Security: Added secure S3 configuration management and expanded audit logging for admin actions.** — Dashboard Settings: section to configure S3 backup (Bucket, Region, Endpoint); credential fields (Secret Key) are hidden by default (password inputs). New endpoint `POST /api/v1/admin/settings/test-s3` validates S3 connection before saving. All "Backup to S3" and "Reindex" operations triggered via Dashboard (or API) are recorded in the audit log.
 
-- **Optimizations: Added automatic cache warmup on startup.** — Ao iniciar, o servidor lê as últimas 50 queries do `query_logger` (queries.log), reexecuta-as em background para carregar os índices HNSW na RAM (Hot Tier) e popular o `search_cache`. Logs de tracing indicam o progresso do warmup (`warmup: starting cache warmup`, `warmup: ran query`, `warmup: cache warmup completed`). O log de queries passou a gravar o vetor completo (opcional) para permitir o replay.
+- **Optimizations: Added automatic cache warmup on startup.** — On startup, the server reads the last 50 queries from the `query_logger` (queries.log), re-executes them in the background to load HNSW indices into RAM (Hot Tier) and populate the `search_cache`. Tracing logs indicate warmup progress (`warmup: starting cache warmup`, `warmup: ran query`, `warmup: cache warmup completed`). The query log now stores the full vector (optional) to enable replay.
 
-- **Physical storage isolation for improved multitenancy security** — Com opção `namespace_physical_isolation` (core: `StorageOptions`, servidor: `namespace_physical_isolation` no config.toml ou `FERRESDB_NAMESPACE_PHYSICAL_ISOLATION`), os pontos de cada namespace passam a ser gravados em `data/collections/<name>/namespaces/<namespace>/points.bin` (e opcionalmente `index.bin`). O VectorDB carrega índices de forma independente por namespace quando esses diretórios existem, permitindo snapshot por namespace e limpeza física de dados de um tenant sem afetar outros. Documentação em `docs/api.md`.
+- **Physical storage isolation for improved multitenancy security** — With the `namespace_physical_isolation` option (core: `StorageOptions`, server: `namespace_physical_isolation` in config.toml or `FERRESDB_NAMESPACE_PHYSICAL_ISOLATION`), points of each namespace are written to `data/collections/<name>/namespaces/<namespace>/points.bin` (and optionally `index.bin`). The VectorDB loads indices independently per namespace when those directories exist, enabling per-namespace snapshots and physical data cleanup for one tenant without affecting others. Documentation in `docs/api.md`.
 
-- **Backup S3** — Integração com AWS S3 para backups: novo endpoint `POST /api/v1/admin/backup` (apenas Admin) gera um snapshot binário (tar.gz) do diretório de storage e faz upload para um bucket S3 configurável. Configuração via `config.toml` ou variáveis de ambiente: **Region** (`s3_region` / `FERRESDB_S3_REGION` ou `AWS_REGION`), **Bucket** (`s3_bucket` / `FERRESDB_S3_BUCKET`), **Credentials** (`s3_access_key_id` / `s3_secret_access_key` ou `FERRESDB_S3_ACCESS_KEY_ID` / `FERRESDB_S3_SECRET_ACCESS_KEY`, ou `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`). Dependências no servidor: `aws-sdk-s3`, `aws-config`, `tar`, `flate2`. Dashboard: nova página **Definições** com botão "Export to Cloud" (visível apenas para Admin). Documentação em `docs/api.md`.
+- **S3 Backup** — AWS S3 integration for backups: new endpoint `POST /api/v1/admin/backup` (Admin only) generates a binary snapshot (tar.gz) of the storage directory and uploads it to a configurable S3 bucket. Configuration via `config.toml` or environment variables: **Region** (`s3_region` / `FERRESDB_S3_REGION` or `AWS_REGION`), **Bucket** (`s3_bucket` / `FERRESDB_S3_BUCKET`), **Credentials** (`s3_access_key_id` / `s3_secret_access_key` or `FERRESDB_S3_ACCESS_KEY_ID` / `FERRESDB_S3_SECRET_ACCESS_KEY`, or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`). Server dependencies: `aws-sdk-s3`, `aws-config`, `tar`, `flate2`. Dashboard: new **Settings** page with "Export to Cloud" button (visible to Admin only). Documentation in `docs/api.md`.
 
-- **Replication (Experimental)** — Base para Read Replicas: no core, `Wal::stream_from(collection_dir, position)` para leitura incremental do WAL; servidor com `--replica-of <ADDR>` ou `FERRESDB_REPLICA_OF` inicia como réplica; endpoints de escrita (POST/PUT/DELETE em coleções, pontos, save, reindex, etc.) retornam **405 Method Not Allowed** em réplicas; worker (feature `grpc`) consome WAL do líder via gRPC `StreamWal` e aplica no VectorDB local; dashboard exibe "Role: Leader" ou "Role: Replica" no Overview; `GET /api/v1/stats/global` inclui campo `role`. Documentação em `docs/api.md` (seção Replication).
+- **Replication (Experimental)** — Foundation for Read Replicas: in core, `Wal::stream_from(collection_dir, position)` for incremental WAL reading; server with `--replica-of <ADDR>` or `FERRESDB_REPLICA_OF` starts as a replica; write endpoints (POST/PUT/DELETE on collections, points, save, reindex, etc.) return **405 Method Not Allowed** on replicas; worker (feature `grpc`) consumes WAL from the leader via gRPC `StreamWal` and applies it to the local VectorDB; dashboard shows "Role: Leader" or "Role: Replica" in Overview; `GET /api/v1/stats/global` includes `role` field. Documentation in `docs/api.md` (Replication section).
 
-- **Dashboard: Visual Explainer no Query Tester.** — Na aba "Query Tester", o botão "Explain" passa a exibir um **Visual Explainer** com pipeline da busca: camadas HNSW percorridas, comparações de distância, pontos filtrados pelo Native Pre-filtering e resultados. Tempo total do request (embedding + explain API) é exibido. Dados vêm do endpoint `POST /api/v1/collections/{name}/search/explain` (`explain_meta`, `candidates_scanned`, `candidates_after_filter`).
+- **Dashboard: Visual Explainer in Query Tester.** — In the "Query Tester" tab, the "Explain" button now displays a **Visual Explainer** with the search pipeline: HNSW layers traversed, distance comparisons, points filtered by Native Pre-filtering and results. Total request time (embedding + explain API) is shown. Data comes from the `POST /api/v1/collections/{name}/search/explain` endpoint (`explain_meta`, `candidates_scanned`, `candidates_after_filter`).
 
-- **Dashboard: PITR UI com datetime picker e confirmação.** — Na página "Snapshots & Recovery": seletor de data/hora (datetime-local) para escolher o ponto de restauração; botão "Point-in-Time Restore" envia o timestamp para `POST /api/v1/admin/restore`. Modal de confirmação de segurança antes de executar o restauro, alertando que a operação reinicia o estado do banco.
+- **Dashboard: PITR UI with datetime picker and confirmation.** — On the "Snapshots & Recovery" page: date/time selector (datetime-local) to choose the restore point; "Point-in-Time Restore" button sends the timestamp to `POST /api/v1/admin/restore`. Safety confirmation modal before executing the restore, alerting that the operation resets the database state.
 
-- **Dashboard: página Cluster ativa no menu.** — A página "Cluster" permanece disponível no menu lateral e exibe os nós ativos retornados por `GET /api/v1/cluster`, indicando Leader e Followers (campo `role` por nó e `leader_id` no status).
+- **Dashboard: Cluster page active in the menu.** — The "Cluster" page remains available in the side menu and displays active nodes returned by `GET /api/v1/cluster`, indicating Leader and Followers (`role` field per node and `leader_id` in the status).
 
 ### Documentation
 
-- **api.md:** Schema de resposta final de `POST /api/v1/collections/{name}/search/explain` já documentado; adicionada secção **GET /api/v1/cluster** com schema de resposta (raft_enabled, leader_id, nodes com id, addr, role, replication_lag). Documentação da camada de grafos: **GET /api/v1/collections/{name}/points/{id}** inclui campo `relations`; **POST /api/v1/collections/{name}/points/link** (body `from`, `to`); **GET /api/v1/collections/{name}/graph/subgraph** com query params `center_id`, `depth`, `seed`, `limit` e resposta `{ "nodes", "edges" }`; tabelas de permissões e mapeamento REST atualizadas com o endpoint de link.
+- **api.md:** Final response schema for `POST /api/v1/collections/{name}/search/explain` already documented; added **GET /api/v1/cluster** section with response schema (raft_enabled, leader_id, nodes with id, addr, role, replication_lag). Graph layer documentation: **GET /api/v1/collections/{name}/points/{id}** includes `relations` field; **POST /api/v1/collections/{name}/points/link** (body `from`, `to`); **GET /api/v1/collections/{name}/graph/subgraph** with query params `center_id`, `depth`, `seed`, `limit` and response `{ "nodes", "edges" }`; permissions tables and REST mapping updated with the link endpoint.
 
 ## [Released] - 09/02/2026
 
-Primeira versão estável do FerresDB, com polimento final de performance, analytics e documentação.
+First stable release of FerresDB, with final performance, analytics and documentation polish.
 
 ### Added
 
-- **Performance: SIMD (AVX2/SSE4.1)** — Kernels de distância em `crates/core/src/search.rs` com a crate `pulp`: `euclidean_distance` e `dot_product` com despacho em runtime (AVX2 8× f32, SSE4.1 4× f32) e fallback escalar. Distância assimétrica SQ8 (f32×u8) em `quantization.rs` processa múltiplos bytes em paralelo. Servidor registra no startup via `tracing`: "SIMD acceleration: active" ou "scalar fallback". Dashboard (Overview): Badge "SIMD: Active" (verde) ou "SIMD: Scalar" (amarelo) a partir de `GET /api/v1/stats/global` (`simd_enabled`).
+- **Performance: SIMD (AVX2/SSE4.1)** — Distance kernels in `crates/core/src/search.rs` using the `pulp` crate: `euclidean_distance` and `dot_product` with runtime dispatch (AVX2 8× f32, SSE4.1 4× f32) and scalar fallback. Asymmetric SQ8 distance (f32×u8) in `quantization.rs` processes multiple bytes in parallel. Server logs on startup via `tracing`: "SIMD acceleration: active" or "scalar fallback". Dashboard (Overview): "SIMD: Active" badge (green) or "SIMD: Scalar" (yellow) from `GET /api/v1/stats/global` (`simd_enabled`).
 
-- **Analytics: correção e visibilidade** — O endpoint `GET /api/v1/stats/analytics` passa a preencher `time_series_10m` com dados reais: leitura fresca do `queries.log` (sem depender do cache de 1h) para `throughput_per_minute`, `recent_latencies` e `p95_latency_ms`. Query logger faz `flush` após cada escrita para que o analytics leia dados imediatamente. Dashboard: gráfico de ingestão (pontos/min), área de latência e histograma P95 (distribuição por faixas de ms); card "Cache Hit Rate %" nos KPIs.
+- **Analytics: correction and visibility** — The `GET /api/v1/stats/analytics` endpoint now populates `time_series_10m` with real data: fresh reading of `queries.log` (without relying on the 1h cache) for `throughput_per_minute`, `recent_latencies` and `p95_latency_ms`. Query logger flushes after each write so analytics reads data immediately. Dashboard: ingestion chart (points/min), latency area chart and P95 histogram (distribution by ms range); "Cache Hit Rate %" card in KPIs.
 
-- **Documentação** — `docs/api.md`: especificação dos campos de série temporal (`time_series_10m`) e da flag `simd_enabled` (stats/global). CHANGELOG e exemplos do SDK alinhados à estrutura final de inserção e busca.
+- **Documentation** — `docs/api.md`: specification of time series fields (`time_series_10m`) and the `simd_enabled` flag (stats/global). CHANGELOG and SDK examples aligned with the final insertion and search structure.
 
 ### Fixed
 
-- **Analytics: dados de queries no Dashboard** — O buffer de logs não era lido de forma atualizada pelo endpoint de analytics (cache 1h). Passou a usar `entries_10m_fresh()` e `p95_latency_10m_fresh()` para leitura direta do arquivo na construção de `time_series_10m`, garantindo que os gráficos do Dashboard exibam latência e throughput reais.
+- **Analytics: query data in Dashboard** — The log buffer was not being read in an up-to-date manner by the analytics endpoint (1h cache). Now uses `entries_10m_fresh()` and `p95_latency_10m_fresh()` for direct file reading when building `time_series_10m`, ensuring Dashboard charts display real latency and throughput.
 
 ---
 
@@ -67,264 +67,264 @@ Primeira versão estável do FerresDB, com polimento final de performance, analy
 
 ### Added
 
-- **Feature: Embedded Model Context Protocol (MCP) support via STDIO.** — Servidor MCP embutido no binário do FerresDB; ativação com a flag `--mcp` ou a variável de ambiente `FERRESDB_ENABLE_MCP=true`. Ferramentas expostas: `search_points` (busca vetorial com pre-filtering nativo), `upsert_points` e `get_stats`. O protocolo usa stdin/stdout; os logs do servidor são redirecionados para stderr quando o modo MCP está ativo. Requer build com a feature `mcp` (`cargo build -p ferres-db-server --features mcp`). Documentação em `docs/api.md` (seção Model Context Protocol) e `README.md` (conexão com Claude Desktop).
+- **Feature: Embedded Model Context Protocol (MCP) support via STDIO.** — MCP server embedded in the FerresDB binary; enabled with the `--mcp` flag or environment variable `FERRESDB_ENABLE_MCP=true`. Exposed tools: `search_points` (vector search with native pre-filtering), `upsert_points` and `get_stats`. The protocol uses stdin/stdout; server logs are redirected to stderr when MCP mode is active. Requires build with the `mcp` feature (`cargo build -p ferres-db-server --features mcp`). Documentation in `docs/api.md` (Model Context Protocol section) and `README.md` (connection with Claude Desktop).
 
-- **Dashboard: Added real-time ingestion throughput and latency charts.** — Página Analytics passa a exibir gráfico de linha (Recharts) para ingestão (throughput, pontos/min nos últimos 10 min) e gráfico de área para latência de busca (ms) nas últimas consultas; KPIs incluem "Cache Hit Rate %" baseado no `search_cache` do core. Backend: `query_log_analytics` com `entries_10m()`, `p95_latency_10m()` e `avg_points_per_second_10m()`; buffer de ingestão em `AppState` para séries temporais; endpoint `GET /api/v1/stats/analytics` estendido com `time_series_10m` e `cache_hit_rate_pct`. Documentação em `docs/api.md`.
+- **Dashboard: Added real-time ingestion throughput and latency charts.** — Analytics page now displays a line chart (Recharts) for ingestion (throughput, points/min in the last 10 min) and an area chart for search latency (ms) in recent queries; KPIs include "Cache Hit Rate %" based on the core's `search_cache`. Backend: `query_log_analytics` with `entries_10m()`, `p95_latency_10m()` and `avg_points_per_second_10m()`; ingestion buffer in `AppState` for time series; `GET /api/v1/stats/analytics` endpoint extended with `time_series_10m` and `cache_hit_rate_pct`. Documentation in `docs/api.md`.
 
-- **Feature: Support for named multi-vector points per document.** — Cada ponto pode ter um vetor principal (`vector`) e opcionalmente múltiplos vetores nomeados (`vectors: HashMap<String, Vec<f32>>`), por exemplo `title_vector` e `content_vector`. A busca aceita o parâmetro `vector_field` para consultar contra o vetor principal (`default`) ou contra um campo nomeado. Índices ANN separados são mantidos por campo vetorial; inserção, remoção e persistência (JSONL/bincode) suportam a nova estrutura. Documentação em `docs/api.md`.
+- **Feature: Support for named multi-vector points per document.** — Each point can have a main vector (`vector`) and optionally multiple named vectors (`vectors: HashMap<String, Vec<f32>>`), for example `title_vector` and `content_vector`. Search accepts the `vector_field` parameter to query against the main vector (`default`) or a named field. Separate ANN indices are maintained per vector field; insertion, removal and persistence (JSONL/bincode) support the new structure. Documentation in `docs/api.md`.
 
-- **Storage: Added Zstd compression for WAL and binary snapshot support.** — WAL pode usar compressão Zstd opcional (menor uso de disco em `wal.log`); snapshots de pontos podem ser gravados em `points.bin` (bincode) em vez de `points.jsonl`, reduzindo tamanho e tempo de carregamento. Configuração via `StorageOptions` (core), `wal_compression` / `binary_snapshot` no servidor (config.toml ou env `FERRESDB_WAL_COMPRESSION`, `FERRESDB_BINARY_SNAPSHOT`). Documentação em `docs/api.md`.
+- **Storage: Added Zstd compression for WAL and binary snapshot support.** — WAL can use optional Zstd compression (lower disk usage in `wal.log`); point snapshots can be written to `points.bin` (bincode) instead of `points.jsonl`, reducing size and load time. Configuration via `StorageOptions` (core), `wal_compression` / `binary_snapshot` on the server (config.toml or env `FERRESDB_WAL_COMPRESSION`, `FERRESDB_BINARY_SNAPSHOT`). Documentation in `docs/api.md`.
 
-- **Ecossystem: Added foundation for LangChain and LlamaIndex integrations.**
+- **Ecosystem: Added foundation for LangChain and LlamaIndex integrations.**
 
-- **Search: Implemented native HNSW pre-filtering for higher accuracy with metadata.** — O filtro é aplicado durante a exploração do grafo (nós que não satisfazem o predicado são ignorados antes de entrar na lista de candidatos). A busca continua explorando com `ef` crescente até obter até `limit` resultados válidos ou exaurir o grafo.
+- **Search: Implemented native HNSW pre-filtering for higher accuracy with metadata.** — The filter is applied during graph exploration (nodes that do not satisfy the predicate are ignored before entering the candidate list). The search continues exploring with increasing `ef` until up to `limit` valid results are obtained or the graph is exhausted.
 
-- **Performance: SIMD kernels implemented with hardware status visibility in Dashboard.** — Kernels SIMD (AVX2/SSE4.1) para `euclidean_distance` e `dot_product` em `crates/core/src/search.rs` (foco em `QuantizedHnswIndex` SQ8); detecção em runtime via `simd_enabled()`. Endpoint `GET /api/v1/stats/global` expõe `simd_enabled: bool`; Dashboard (Overview) exibe Badge "SIMD Acceleration: Active" ou "SIMD: Scalar Fallback".
+- **Performance: SIMD kernels implemented with hardware status visibility in Dashboard.** — SIMD kernels (AVX2/SSE4.1) for `euclidean_distance` and `dot_product` in `crates/core/src/search.rs` (focus on `QuantizedHnswIndex` SQ8); runtime detection via `simd_enabled()`. Endpoint `GET /api/v1/stats/global` exposes `simd_enabled: bool`; Dashboard (Overview) displays "SIMD Acceleration: Active" or "SIMD: Scalar Fallback" badge.
 
-- **Performance: Added SIMD-accelerated distance kernels (AVX2/SSE).** — Kernels de distância (`euclidean_distance`, `dot_product`) em `crates/core/src/search.rs` usam a crate `pulp` para abstração SIMD segura, com despacho em tempo de execução para AVX2 (8× f32) ou SSE4.1 (4× f32) e fallback escalar automático. Distância assimétrica SQ8 (f32×u8) permanece otimizada em `quantization.rs` (múltiplos bytes em paralelo).
+- **Performance: Added SIMD-accelerated distance kernels (AVX2/SSE).** — Distance kernels (`euclidean_distance`, `dot_product`) in `crates/core/src/search.rs` use the `pulp` crate for safe SIMD abstraction, with runtime dispatch for AVX2 (8× f32) or SSE4.1 (4× f32) and automatic scalar fallback. Asymmetric SQ8 distance (f32×u8) remains optimized in `quantization.rs` (multiple bytes in parallel).
 
 - **Features: Time-to-Live (TTL) support for automatic data expiration**
 
-- **Support for Logical Namespaces (Multitenancy)** — Isolamento de dados por cliente na mesma coleção física via campo opcional `namespace` em Point. Permite evitar milhares de coleções: vários tenants compartilham uma coleção e os dados são filtrados por namespace. Inclui: campo `namespace` em Point (opcional); `MetadataFilter` com condição de primeira classe `$namespace` e métodos `matches_namespace`/`matches_point`; chave interna composta `(namespace, id)` para unicidade; persistência em storage e WAL; parâmetro `namespace` em buscas, get point e delete. Documentação em `docs/api.md`.
+- **Support for Logical Namespaces (Multitenancy)** — Data isolation per client in the same physical collection via optional `namespace` field in Point. Avoids thousands of collections: multiple tenants share a collection and data is filtered by namespace. Includes: `namespace` field in Point (optional); `MetadataFilter` with first-class `$namespace` condition and `matches_namespace`/`matches_point` methods; composite internal key `(namespace, id)` for uniqueness; persistence in storage and WAL; `namespace` parameter in searches, get point and delete. Documentation in `docs/api.md`.
 
-- **Auto-Reindex em background (worker)** — Worker em background que a cada 30 minutos percorre as coleções e verifica o rácio de tombstones (`tombstone_count / total_indexed`). Quando o rácio excede 20%, dispara reindex automático usando a lógica de swap de índice existente. Logs detalhados de início e fim de ciclo e de cada compactação via `tracing`. Em `crates/core`: `tombstone_ratio()`, `total_indexed_len()` em `Collection`, documentação de `total_indexed` em `needs_reindex`. Em `crates/server`: task Tokio em `main.rs`, `run_auto_reindex_cycle()` em `handlers/reindex.rs`, graceful shutdown da task.
+- **Background Auto-Reindex (worker)** — Background worker that every 30 minutes iterates over collections and checks the tombstone ratio (`tombstone_count / total_indexed`). When the ratio exceeds 20%, it triggers automatic reindex using the existing index swap logic. Detailed start/end cycle and compaction logs via `tracing`. In `crates/core`: `tombstone_ratio()`, `total_indexed_len()` in `Collection`, documentation of `total_indexed` in `needs_reindex`. In `crates/server`: Tokio task in `main.rs`, `run_auto_reindex_cycle()` in `handlers/reindex.rs`, graceful shutdown of the task.
 
 ### Performance / Search
 
-- **Optimizations: SIMD-accelerated distance kernels** — Cálculos de distância vetorial acelerados com instruções SIMD (AVX2 e SSE4.1) e detecção em tempo de execução com fallback escalar. Distâncias f32×f32: `euclidean_distance` e `dot_product` em `search.rs` com kernels AVX2 (8× f32) e SSE4.1 (4× f32); distância assimétrica f32×u8 (SQ8): `asymmetric_distance` em `quantization.rs` acelerada para re-ranking do `QuantizedHnswIndex`. Ganho de throughput significativo em vetores de 256–384 dimensões em CPUs com AVX2.
+- **Optimizations: SIMD-accelerated distance kernels** — Vector distance calculations accelerated with SIMD instructions (AVX2 and SSE4.1) and runtime detection with scalar fallback. f32×f32 distances: `euclidean_distance` and `dot_product` in `search.rs` with AVX2 (8× f32) and SSE4.1 (4× f32) kernels; asymmetric f32×u8 distance (SQ8): `asymmetric_distance` in `quantization.rs` accelerated for `QuantizedHnswIndex` re-ranking. Significant throughput gains for 256–384 dimension vectors on CPUs with AVX2.
 
-- **Native HNSW pre-filtering** — A busca com filtro de metadata passou a aplicar o filtro **durante** a exploração do grafo HNSW (via `search_filter` do hnsw_rs), em vez de buscar `limit*10` resultados e filtrar depois. Garante maior precisão e consistência no número de resultados retornados (até `limit` que satisfazem o filtro). O trait `ANNIndex` foi estendido com parâmetro opcional `predicate` em `search` e `search_explain`; `HnswIndex` e `QuantizedHnswIndex` utilizam pre-filtering nativo quando o predicado está presente.
+- **Native HNSW pre-filtering** — Metadata-filtered search now applies the filter **during** HNSW graph exploration (via `search_filter` from hnsw_rs), instead of searching `limit*10` results and filtering afterwards. Guarantees higher accuracy and consistency in the number of results returned (up to `limit` that satisfy the filter). The `ANNIndex` trait was extended with an optional `predicate` parameter in `search` and `search_explain`; `HnswIndex` and `QuantizedHnswIndex` use native pre-filtering when a predicate is present.
 
 ## [Released] - 08/02/2026 - 12:00
 
 ### Added
 
-- **API gRPC nativa — alternativa de alta performance à API REST com streaming bidirecional**
-  - Feature flag `grpc` no `crates/server/Cargo.toml` — servidor funciona sem gRPC por padrão (só REST).
-  - Proto file `crates/server/proto/ferresdb.proto` com package `ferresdb.v1`.
-  - Serviço `FerresDB` com 13 RPCs espelhando a API REST:
-    - `CreateCollection`, `GetCollection`, `ListCollections`, `DeleteCollection` — CRUD de coleções.
-    - `UpsertPoints`, `DeletePoints`, `GetPoint`, `ListPoints` — gerenciamento de pontos.
-    - `Search`, `HybridSearch`, `ExplainSearch` — busca vetorial, híbrida e explain.
-    - `StreamUpsert` (client→server streaming) e `StreamSearch` (bidirecional) — operações em streaming.
-  - Novo módulo `crates/server/src/grpc.rs` (~960 linhas): implementação completa do serviço gRPC reutilizando `AppState`, `Collection`, `Point`, `MetadataFilter` — zero duplicação de lógica de negócio.
-  - `build.rs` com `tonic-build` para compilação automática do proto (requer `protoc`).
-  - Server gRPC (tonic) escuta na porta 50051 (configurável via `GRPC_PORT` env) em paralelo com REST.
-  - Dependências opcionais: `tonic 0.12`, `prost 0.13`, `tonic-build 0.12`, `async-stream 0.3`.
-  - Metadata e filtros transmitidos como JSON string (`metadata_json`, `filter_json`) no gRPC.
-  - `DistanceMetric` mapeado para enum protobuf (1=Cosine, 2=DotProduct, 3=Euclidean).
-  - Métricas Prometheus e query stats registrados para queries gRPC (mesmos counters/histograms do REST).
-  - Documentação: `docs/api.md` com seção gRPC completa (mapeamento REST→gRPC, exemplos `grpcurl`, geração de clientes).
-  - SDKs: READMEs atualizados com instruções para gerar stubs gRPC em Python, TypeScript e Go.
+- **Native gRPC API — high-performance alternative to the REST API with bidirectional streaming**
+  - Feature flag `grpc` in `crates/server/Cargo.toml` — server works without gRPC by default (REST only).
+  - Proto file `crates/server/proto/ferresdb.proto` with package `ferresdb.v1`.
+  - `FerresDB` service with 13 RPCs mirroring the REST API:
+    - `CreateCollection`, `GetCollection`, `ListCollections`, `DeleteCollection` — collection CRUD.
+    - `UpsertPoints`, `DeletePoints`, `GetPoint`, `ListPoints` — point management.
+    - `Search`, `HybridSearch`, `ExplainSearch` — vector, hybrid and explain search.
+    - `StreamUpsert` (client→server streaming) and `StreamSearch` (bidirectional) — streaming operations.
+  - New module `crates/server/src/grpc.rs` (~960 lines): complete gRPC service implementation reusing `AppState`, `Collection`, `Point`, `MetadataFilter` — zero business logic duplication.
+  - `build.rs` with `tonic-build` for automatic proto compilation (requires `protoc`).
+  - gRPC server (tonic) listens on port 50051 (configurable via `GRPC_PORT` env) in parallel with REST.
+  - Optional dependencies: `tonic 0.12`, `prost 0.13`, `tonic-build 0.12`, `async-stream 0.3`.
+  - Metadata and filters transmitted as JSON string (`metadata_json`, `filter_json`) in gRPC.
+  - `DistanceMetric` mapped to protobuf enum (1=Cosine, 2=DotProduct, 3=Euclidean).
+  - Prometheus metrics and query stats registered for gRPC queries (same counters/histograms as REST).
+  - Documentation: `docs/api.md` with complete gRPC section (REST→gRPC mapping, `grpcurl` examples, client generation).
+  - SDKs: READMEs updated with instructions to generate gRPC stubs in Python, TypeScript and Go.
 
-- **Background Reindex — reconstrução de índice ANN sem downtime**
-  - Novo módulo `crates/core/src/reindex.rs` com toda a lógica de reindex em background.
-  - `ReindexJob`, `ReindexStatus`, `ReindexStats`: tipos para rastrear jobs de reindex.
-  - Fluxo de 3 fases: **Building** (thread separada, buscas continuam no índice antigo), **Swapping** (write lock < 1ms para trocar índices), **Cleanup** (drop do índice antigo).
-  - `build_new_index()`: constrói novo `Box<dyn ANNIndex>` a partir de snapshot de pontos — sem tombstones.
-  - `apply_delta()`: reconcilia inserções/remoções que ocorreram durante a fase de build.
-  - `needs_reindex()`: detecta quando tombstones > 20% dos pontos indexados.
-  - `estimate_index_size()`: estima tamanho do índice em bytes.
-  - Trait `ANNIndex` estendido com `tombstone_count()` (implementado em `HnswIndex` e `QuantizedHnswIndex`).
-  - `Collection` estendido com `tombstone_count()`, `points_snapshot()`, `swap_index()`.
-  - Novos endpoints no server:
-    - `POST /api/v1/collections/{name}/reindex` — inicia job de reindex (retorna 202 Accepted).
-    - `GET /api/v1/collections/{name}/reindex/{job_id}` — status do job.
-    - `GET /api/v1/collections/{name}/reindex` — lista jobs da collection.
-  - Auto-reindex: após deleção de pontos, se tombstones > 20%, um reindex é disparado automaticamente.
-  - Jobs registrados no `AppState` via `DashMap<String, Arc<RwLock<ReindexJob>>>`.
-  - Restrição: apenas 1 reindex por collection por vez (retorna 409 se já existe job ativo).
-  - Testes: `test_reindex_cleans_tombstones`, `test_reindex_concurrent_search`, `test_reindex_with_concurrent_writes`, `test_reindex_job_lifecycle`, `test_reindex_job_failure`, `test_build_new_index`, `test_apply_delta_additions`, `test_apply_delta_removals`, `test_needs_reindex`, `test_estimate_index_size`, `test_reindex_stats_default`, `test_reindex_job_serialization`.
-  - SDKs atualizados:
-    - **Python**: `start_reindex()`, `get_reindex_job()`, `list_reindex_jobs()` + modelos `ReindexJob`, `ReindexStatus`, `ReindexStats`, `StartReindexResponse`.
-    - **TypeScript**: `startReindex()`, `getReindexJob()`, `listReindexJobs()` + tipos e schemas Zod correspondentes.
-  - Dashboard: API client com `reindexApi.start()`, `reindexApi.getJob()`, `reindexApi.listJobs()`.
-  - Documentação: `docs/api.md` atualizado com endpoints, schemas e exemplos.
+- **Background Reindex — ANN index rebuild without downtime**
+  - New module `crates/core/src/reindex.rs` with all reindex logic in the background.
+  - `ReindexJob`, `ReindexStatus`, `ReindexStats`: types for tracking reindex jobs.
+  - 3-phase flow: **Building** (separate thread, searches continue on old index), **Swapping** (write lock < 1ms to swap indices), **Cleanup** (drop of old index).
+  - `build_new_index()`: builds new `Box<dyn ANNIndex>` from a point snapshot — without tombstones.
+  - `apply_delta()`: reconciles insertions/removals that occurred during the build phase.
+  - `needs_reindex()`: detects when tombstones > 20% of indexed points.
+  - `estimate_index_size()`: estimates index size in bytes.
+  - `ANNIndex` trait extended with `tombstone_count()` (implemented in `HnswIndex` and `QuantizedHnswIndex`).
+  - `Collection` extended with `tombstone_count()`, `points_snapshot()`, `swap_index()`.
+  - New server endpoints:
+    - `POST /api/v1/collections/{name}/reindex` — starts reindex job (returns 202 Accepted).
+    - `GET /api/v1/collections/{name}/reindex/{job_id}` — job status.
+    - `GET /api/v1/collections/{name}/reindex` — lists jobs for the collection.
+  - Auto-reindex: after point deletion, if tombstones > 20%, a reindex is automatically triggered.
+  - Jobs registered in `AppState` via `DashMap<String, Arc<RwLock<ReindexJob>>>`.
+  - Restriction: only 1 reindex per collection at a time (returns 409 if an active job already exists).
+  - Tests: `test_reindex_cleans_tombstones`, `test_reindex_concurrent_search`, `test_reindex_with_concurrent_writes`, `test_reindex_job_lifecycle`, `test_reindex_job_failure`, `test_build_new_index`, `test_apply_delta_additions`, `test_apply_delta_removals`, `test_needs_reindex`, `test_estimate_index_size`, `test_reindex_stats_default`, `test_reindex_job_serialization`.
+  - Updated SDKs:
+    - **Python**: `start_reindex()`, `get_reindex_job()`, `list_reindex_jobs()` + models `ReindexJob`, `ReindexStatus`, `ReindexStats`, `StartReindexResponse`.
+    - **TypeScript**: `startReindex()`, `getReindexJob()`, `listReindexJobs()` + corresponding types and Zod schemas.
+  - Dashboard: API client with `reindexApi.start()`, `reindexApi.getJob()`, `reindexApi.listJobs()`.
+  - Documentation: `docs/api.md` updated with endpoints, schemas and examples.
 
-- **Fusion Strategies para Hybrid Search — Reciprocal Rank Fusion (RRF) como alternativa ao weighted score**
-  - Novo módulo `crates/core/src/fusion.rs` com algoritmos de fusão desacoplados.
-  - `FusionStrategy` (enum): `WeightedScore { alpha }` (compatível com comportamento original) e `RRF { k }` (fusão pura por rank).
-  - `reciprocal_rank_fusion()`: fusão genérica de N rankings via `score = Σ 1/(k + rank_i)`. Suporta qualquer número de rankers.
-  - `weighted_fusion()`: fusão ponderada de 2 rankings (vetorial + keyword) com alpha. Replica o comportamento original.
-  - `Collection::hybrid_search()` agora aceita `FusionStrategy` em vez de `alpha` diretamente.
-  - Novos campos opcionais no endpoint `POST /api/v1/collections/{name}/search/hybrid`:
-    - `fusion`: `"weighted"` (default) ou `"rrf"`.
-    - `rrf_k`: constante k para RRF (default: 60).
-  - Backward compatible: requests sem `fusion` usam `"weighted"` com `alpha` (comportamento idêntico ao anterior).
-  - Testes: `test_rrf_basic`, `test_rrf_no_overlap`, `test_rrf_vs_weighted`, `test_weighted_backward_compat`, `test_rrf_limit`, `test_rrf_empty_rankings`, `test_rrf_single_ranking`, `test_weighted_fusion_extreme_alpha`, `test_rrf_three_rankers`.
-  - SDKs atualizados:
-    - **Python**: parâmetros `fusion` e `rrf_k` em `hybrid_search()`.
-    - **TypeScript**: campos `fusion` e `rrf_k` em `HybridSearchQuery`.
-  - Dashboard: seletor de estratégia de fusão na aba Hybrid do Query Tester.
-  - Documentação: `api.md` atualizado com novos parâmetros, exemplos e guia de quando usar RRF vs weighted.
+- **Fusion Strategies for Hybrid Search — Reciprocal Rank Fusion (RRF) as an alternative to weighted score**
+  - New module `crates/core/src/fusion.rs` with decoupled fusion algorithms.
+  - `FusionStrategy` (enum): `WeightedScore { alpha }` (compatible with original behavior) and `RRF { k }` (pure rank-based fusion).
+  - `reciprocal_rank_fusion()`: generic fusion of N rankings via `score = Σ 1/(k + rank_i)`. Supports any number of rankers.
+  - `weighted_fusion()`: weighted fusion of 2 rankings (vector + keyword) with alpha. Replicates original behavior.
+  - `Collection::hybrid_search()` now accepts `FusionStrategy` instead of `alpha` directly.
+  - New optional fields in endpoint `POST /api/v1/collections/{name}/search/hybrid`:
+    - `fusion`: `"weighted"` (default) or `"rrf"`.
+    - `rrf_k`: k constant for RRF (default: 60).
+  - Backward compatible: requests without `fusion` use `"weighted"` with `alpha` (identical behavior to before).
+  - Tests: `test_rrf_basic`, `test_rrf_no_overlap`, `test_rrf_vs_weighted`, `test_weighted_backward_compat`, `test_rrf_limit`, `test_rrf_empty_rankings`, `test_rrf_single_ranking`, `test_weighted_fusion_extreme_alpha`, `test_rrf_three_rankers`.
+  - Updated SDKs:
+    - **Python**: `fusion` and `rrf_k` parameters in `hybrid_search()`.
+    - **TypeScript**: `fusion` and `rrf_k` fields in `HybridSearchQuery`.
+  - Dashboard: fusion strategy selector in the Hybrid tab of Query Tester.
+  - Documentation: `api.md` updated with new parameters, examples and guide on when to use RRF vs weighted.
 
-- **Tiered Storage — movimentação automática de vetores entre camadas de armazenamento baseada em frequência de acesso**
-  - Novo módulo `crates/core/src/tiered.rs` com toda a lógica de tiered storage.
-  - `TieredStorageConfig`: configuração opt-in com thresholds para Hot/Warm/Cold e intervalo de compactação.
-  - `StorageTier` (enum): `Hot` (RAM), `Warm` (mmap), `Cold` (disco on-demand).
-  - `AccessTracker`: rastreio de último acesso e contagem por ponto para decisão automática de tier.
-  - `WarmStorage`: armazenamento de vetores em memory-mapped files via `memmap2`.
-  - `ColdStorage`: persistência completa de pontos em disco (JSON), carregados on-demand.
-  - `TieredCollection`: wrapper sobre `Collection` que gerencia Hot/Warm/Cold com promoção e demoção automática.
-  - Background compaction: task periódica que demove pontos Hot→Warm→Cold baseado em thresholds de acesso.
-  - Promoção automática: qualquer acesso a ponto Warm/Cold promove para Hot.
-  - Grafo HNSW **sempre** em memória — apenas dados dos pontos são tiered.
-  - `CollectionConfig` estendido com campo `tiered_storage` (`#[serde(default)]` para backward compatibility).
-  - `CollectionMeta` em `storage.rs` inclui `tiered_storage` para persistência.
-  - `FileStorage::save_tier_metadata` / `load_tier_metadata` para persistir `TierMetadata` (tiers, acessos).
-  - Novo endpoint `GET /api/v1/collections/{name}/tiers`: retorna distribuição de pontos por tier e memória estimada.
-  - Testes: `test_tier_demotion`, `test_tier_promotion`, `test_search_across_tiers`, `test_compaction`, `test_tier_distribution`, `test_tiered_disabled_everything_hot`, `test_tier_metadata_serialization`, `bench_search_latency_hot_vs_cold`.
-  - Dependência: `memmap2 = "0.9"` no workspace.
-  - SDKs atualizados:
-    - **Python**: `TieredStorageConfig` model, `get_tier_distribution()` no client, `TierDistribution` response model.
-    - **TypeScript**: `TieredStorageConfig` interface/schema, `getTierDistribution()` no client, `TierDistribution` response type.
-  - Documentação: `api.md` atualizado com novo endpoint e configuração de tiered storage.
+- **Tiered Storage — automatic movement of vectors between storage tiers based on access frequency**
+  - New module `crates/core/src/tiered.rs` with all tiered storage logic.
+  - `TieredStorageConfig`: opt-in configuration with Hot/Warm/Cold thresholds and compaction interval.
+  - `StorageTier` (enum): `Hot` (RAM), `Warm` (mmap), `Cold` (on-demand disk).
+  - `AccessTracker`: tracks last access and count per point for automatic tier decision.
+  - `WarmStorage`: vector storage in memory-mapped files via `memmap2`.
+  - `ColdStorage`: full point persistence on disk (JSON), loaded on-demand.
+  - `TieredCollection`: wrapper over `Collection` that manages Hot/Warm/Cold with automatic promotion and demotion.
+  - Background compaction: periodic task that demotes Hot→Warm→Cold points based on access thresholds.
+  - Automatic promotion: any access to a Warm/Cold point promotes it to Hot.
+  - HNSW graph **always** in memory — only point data is tiered.
+  - `CollectionConfig` extended with `tiered_storage` field (`#[serde(default)]` for backward compatibility).
+  - `CollectionMeta` in `storage.rs` includes `tiered_storage` for persistence.
+  - `FileStorage::save_tier_metadata` / `load_tier_metadata` to persist `TierMetadata` (tiers, accesses).
+  - New endpoint `GET /api/v1/collections/{name}/tiers`: returns point distribution per tier and estimated memory.
+  - Tests: `test_tier_demotion`, `test_tier_promotion`, `test_search_across_tiers`, `test_compaction`, `test_tier_distribution`, `test_tiered_disabled_everything_hot`, `test_tier_metadata_serialization`, `bench_search_latency_hot_vs_cold`.
+  - Dependency: `memmap2 = "0.9"` in workspace.
+  - Updated SDKs:
+    - **Python**: `TieredStorageConfig` model, `get_tier_distribution()` in client, `TierDistribution` response model.
+    - **TypeScript**: `TieredStorageConfig` interface/schema, `getTierDistribution()` in client, `TierDistribution` response type.
+  - Documentation: `api.md` updated with new endpoint and tiered storage configuration.
 
 ## [Released] - 07/02/2026 - 15:00 - 0.2.0
 
 ### Added
 
-- **Real-time Streaming via WebSocket — ingestão e subscrição de eventos em tempo real**
-  - Novo endpoint `GET /api/v1/ws` para upgrade HTTP → WebSocket.
-  - Protocolo JSON sobre WebSocket com mensagens tipadas:
-    - `upsert`: ingestão de pontos em tempo real com batch automático (debounce 10ms).
-    - `subscribe`: subscrição para eventos de uma coleção (`upsert`, `delete`).
-    - `ping`/`pong`: heartbeat aplicacional.
-    - `ack`: confirmação de operação com `upserted`, `failed`, `took_ms`.
-    - `event`: notificação de mudanças (collection, action, point_ids, timestamp).
-    - `error`: erro com mensagem e código HTTP.
-  - Novo `handlers/streaming.rs` com `ws_handler` e `handle_ws_connection`.
-  - Batch automático: acumula mensagens por 10ms antes de flush (debounce) para melhor throughput.
-  - Heartbeat: ping a cada 30s, desconexão se pong não chegar em 10s.
-  - Timeout de inatividade: 5 minutos sem atividade fecha a conexão.
-  - Autenticação: aceita API key como query param (`?token=sk-xxx`) ou header `Authorization: Bearer <key>`.
-  - Limite configurável de 100 conexões WebSocket simultâneas.
-  - Mensagens > 10MB rejeitadas automaticamente.
-  - Novo `CollectionEvent` e `event_channels` (broadcast) no `AppState` para propagação de eventos.
-  - Handlers REST `upsert_points` e `delete_points` agora emitem eventos no broadcast channel para subscribers WebSocket.
-  - Métricas Prometheus: `ws_connections_active` (gauge), `ws_messages_received_total` (counter por tipo), `ws_messages_sent_total` (counter por tipo).
-  - Testes E2E: upsert de 10 pontos via WS, ping/pong, subscribe + evento via REST, rejeição sem auth, mensagem inválida, coleção inexistente.
-  - Dependências: `axum` com feature `ws`, `tokio-tungstenite`.
+- **Real-time Streaming via WebSocket — real-time ingestion and event subscription**
+  - New endpoint `GET /api/v1/ws` for HTTP → WebSocket upgrade.
+  - JSON protocol over WebSocket with typed messages:
+    - `upsert`: real-time point ingestion with automatic batching (10ms debounce).
+    - `subscribe`: subscription for events from a collection (`upsert`, `delete`).
+    - `ping`/`pong`: application heartbeat.
+    - `ack`: operation confirmation with `upserted`, `failed`, `took_ms`.
+    - `event`: change notification (collection, action, point_ids, timestamp).
+    - `error`: error with message and HTTP code.
+  - New `handlers/streaming.rs` with `ws_handler` and `handle_ws_connection`.
+  - Automatic batching: accumulates messages for 10ms before flush (debounce) for better throughput.
+  - Heartbeat: ping every 30s, disconnection if pong doesn't arrive within 10s.
+  - Inactivity timeout: 5 minutes without activity closes the connection.
+  - Authentication: accepts API key as query param (`?token=sk-xxx`) or `Authorization: Bearer <key>` header.
+  - Configurable limit of 100 simultaneous WebSocket connections.
+  - Messages > 10MB automatically rejected.
+  - New `CollectionEvent` and `event_channels` (broadcast) in `AppState` for event propagation.
+  - REST handlers `upsert_points` and `delete_points` now emit events on the broadcast channel for WebSocket subscribers.
+  - Prometheus metrics: `ws_connections_active` (gauge), `ws_messages_received_total` (counter by type), `ws_messages_sent_total` (counter by type).
+  - E2E tests: upsert of 10 points via WS, ping/pong, subscribe + event via REST, rejection without auth, invalid message, non-existent collection.
+  - Dependencies: `axum` with `ws` feature, `tokio-tungstenite`.
 
-- **Scalar Quantization (SQ8) — compressão de vetores f32 para u8 com ~4× economia de memória**
-  - Novo módulo `crates/core/src/quantization.rs`: `QuantizationConfig` (enum `None | Scalar`), `ScalarQuantizationConfig` (dtype, always_ram, quantile), `ScalarType::Int8`, `ScalarQuantizationParams` (mins, maxs, scales por dimensão).
-  - `ScalarQuantizationParams::calibrate()`: calibra min/max/scale por dimensão com percentis para robustez contra outliers. Amostra limitada a 10K vetores para performance.
-  - `ScalarQuantizationParams::quantize()`: mapeia `f32` → `u8` por dimensão (`[min,max]` → `[0,255]`).
-  - `ScalarQuantizationParams::dequantize()`: operação inversa (aproximada) para reconstrução.
-  - `ScalarQuantizationParams::asymmetric_distance()`: distância assimétrica (query f32 vs candidato u8) para Euclidean, Cosine e DotProduct — preserva mais precisão que quantizar ambos.
-  - Novo `QuantizedHnswIndex` em `search.rs`: implementa `ANNIndex` combinando HNSW (para navegação do grafo) com vetores quantizados u8.
-    - `build()`: calibra params, quantiza vetores, constrói HNSW com vetores dequantizados.
-    - `search()`: busca HNSW expandida → re-rank com distância assimétrica → re-rank opcional com originais f32 (se `always_ram=true`).
-    - `add_point()`: quantiza vetor, insere no HNSW com dequantizado.
-    - `remove_point()`: delega tombstone para HNSW interno.
-  - Factory function `create_ann_index()`: seleciona `HnswIndex` ou `QuantizedHnswIndex` baseado na config.
-  - `CollectionConfig` estendido com campo `quantization: QuantizationConfig` (`#[serde(default)]` para backward compatibility).
-  - `Collection::new()` agora usa `create_ann_index()` para criar o índice adequado.
-  - `CreateCollectionRequest` no server aceita campo `quantization` (opt-in via API).
-  - `CollectionMeta` em `storage.rs` inclui `quantization` para persistência.
-  - Benchmarks em `crates/core/benches/performance.rs`: recall@10 SQ8 vs f32, latência de busca, uso de memória para 10K e 100K vetores.
-  - Testes: `test_sq8_calibration`, `test_sq8_roundtrip` (erro < 1%), `test_sq8_recall` (recall@10 > 90% vs f32), `test_sq8_memory` (4× compressão), `test_quantized_hnsw_basic`, `test_quantized_hnsw_always_ram`, `test_quantized_hnsw_add_point`, `test_quantized_hnsw_remove_point`, `test_create_ann_index_*`, testes de serialização/desserialização, testes com outliers.
-  - Coleções existentes sem quantização continuam funcionando sem mudança (default: `QuantizationConfig::None`).
+- **Scalar Quantization (SQ8) — vector compression from f32 to u8 with ~4× memory savings**
+  - New module `crates/core/src/quantization.rs`: `QuantizationConfig` (enum `None | Scalar`), `ScalarQuantizationConfig` (dtype, always_ram, quantile), `ScalarType::Int8`, `ScalarQuantizationParams` (mins, maxs, scales per dimension).
+  - `ScalarQuantizationParams::calibrate()`: calibrates min/max/scale per dimension with percentiles for robustness against outliers. Sample limited to 10K vectors for performance.
+  - `ScalarQuantizationParams::quantize()`: maps `f32` → `u8` per dimension (`[min,max]` → `[0,255]`).
+  - `ScalarQuantizationParams::dequantize()`: inverse (approximate) operation for reconstruction.
+  - `ScalarQuantizationParams::asymmetric_distance()`: asymmetric distance (query f32 vs candidate u8) for Euclidean, Cosine and DotProduct — preserves more precision than quantizing both.
+  - New `QuantizedHnswIndex` in `search.rs`: implements `ANNIndex` combining HNSW (for graph navigation) with quantized u8 vectors.
+    - `build()`: calibrates params, quantizes vectors, builds HNSW with dequantized vectors.
+    - `search()`: expanded HNSW search → re-rank with asymmetric distance → optional re-rank with original f32 (if `always_ram=true`).
+    - `add_point()`: quantizes vector, inserts into HNSW with dequantized.
+    - `remove_point()`: delegates tombstone to internal HNSW.
+  - Factory function `create_ann_index()`: selects `HnswIndex` or `QuantizedHnswIndex` based on config.
+  - `CollectionConfig` extended with `quantization: QuantizationConfig` field (`#[serde(default)]` for backward compatibility).
+  - `Collection::new()` now uses `create_ann_index()` to create the appropriate index.
+  - `CreateCollectionRequest` on the server accepts `quantization` field (opt-in via API).
+  - `CollectionMeta` in `storage.rs` includes `quantization` for persistence.
+  - Benchmarks in `crates/core/benches/performance.rs`: recall@10 SQ8 vs f32, search latency, memory usage for 10K and 100K vectors.
+  - Tests: `test_sq8_calibration`, `test_sq8_roundtrip` (error < 1%), `test_sq8_recall` (recall@10 > 90% vs f32), `test_sq8_memory` (4× compression), `test_quantized_hnsw_basic`, `test_quantized_hnsw_always_ram`, `test_quantized_hnsw_add_point`, `test_quantized_hnsw_remove_point`, `test_create_ann_index_*`, serialization/deserialization tests, tests with outliers.
+  - Existing collections without quantization continue to work without change (default: `QuantizationConfig::None`).
 
-- **RBAC (Role-Based Access Control) granular com audit trail**
-  - Novo módulo `crates/server/src/permissions.rs`: `Resource` (AllCollections, Collection(name)), `Action` (Read, Write, Create, Delete, Admin), `MetadataRestriction`, `Permission`, `PermissionResult`, `check_permission`, `merge_restriction_filter`.
-  - Novo módulo `crates/server/src/audit.rs`: `AuditEntry`, `AuditResult`, `AuditLogger` (append-only JSONL, rotação diária `audit-YYYY-MM-DD.jsonl`), escrita assíncrona via `tokio::spawn`.
-  - UserStore estendido: coluna `permissions TEXT` (JSON) em SQLite, migração `ALTER TABLE`, `get_permissions`, `update_permissions`, `create_with_permissions`; `UserInfo` com campo opcional `permissions`.
-  - Auth: `AuthUser` com `permissions: Option<Vec<Permission>>`; extractor `AuthenticatedUser` carrega permissões do UserStore via state; helper `check_user_permission` (Admin bypassa, fallback legado por role).
-  - Enforcement: handlers de points (search, search_hybrid, upsert, delete_points, explain_search, estimate_search), collections (create, delete), save, keys, users usam `AuthenticatedUser` e verificam permissão granular; em `search_points` a `MetadataRestriction` é injetada no filtro (AND com request).
-  - Novo erro `ApiError::Forbidden` (403).
-  - Endpoint `GET /api/v1/audit` (Admin only): query params `user`, `action`, `resource`, `from`, `to`, `limit`; retorna entradas de auditoria filtradas.
-  - Endpoint `PUT /api/v1/users/{username}/permissions` para atualizar permissões granulares (Admin).
-  - Instrumentação de todos os handlers com audit trail (login, search, upsert, delete_points, create/delete collection, save, create/delete API key, create/delete user, update password/permissions).
-  - Documentação em `docs/api.md`: modelo RBAC, endpoints de permissões e audit, enforcement por endpoint.
-  - Testes em `crates/server/tests/rbac_test.rs`: viewer não pode upsert, viewer pode search, admin bypassa restrições, MetadataRestriction filtra resultados, permissões por coleção, write granular, audit registra ações e negações, audit requer Admin; testes unitários em `permissions` e `audit`, persistência de permissões no UserStore.
+- **RBAC (Role-Based Access Control) with granular audit trail**
+  - New module `crates/server/src/permissions.rs`: `Resource` (AllCollections, Collection(name)), `Action` (Read, Write, Create, Delete, Admin), `MetadataRestriction`, `Permission`, `PermissionResult`, `check_permission`, `merge_restriction_filter`.
+  - New module `crates/server/src/audit.rs`: `AuditEntry`, `AuditResult`, `AuditLogger` (append-only JSONL, daily rotation `audit-YYYY-MM-DD.jsonl`), asynchronous write via `tokio::spawn`.
+  - UserStore extended: `permissions TEXT` column (JSON) in SQLite, `ALTER TABLE` migration, `get_permissions`, `update_permissions`, `create_with_permissions`; `UserInfo` with optional `permissions` field.
+  - Auth: `AuthUser` with `permissions: Option<Vec<Permission>>`; `AuthenticatedUser` extractor loads permissions from UserStore via state; helper `check_user_permission` (Admin bypasses, legacy role fallback).
+  - Enforcement: point handlers (search, search_hybrid, upsert, delete_points, explain_search, estimate_search), collections (create, delete), save, keys, users use `AuthenticatedUser` and verify granular permission; in `search_points` the `MetadataRestriction` is injected into the filter (AND with request).
+  - New error `ApiError::Forbidden` (403).
+  - Endpoint `GET /api/v1/audit` (Admin only): query params `user`, `action`, `resource`, `from`, `to`, `limit`; returns filtered audit entries.
+  - Endpoint `PUT /api/v1/users/{username}/permissions` to update granular permissions (Admin).
+  - Instrumentation of all handlers with audit trail (login, search, upsert, delete_points, create/delete collection, save, create/delete API key, create/delete user, update password/permissions).
+  - Documentation in `docs/api.md`: RBAC model, permissions and audit endpoints, enforcement per endpoint.
+  - Tests in `crates/server/tests/rbac_test.rs`: viewer cannot upsert, viewer can search, admin bypasses restrictions, MetadataRestriction filters results, per-collection permissions, granular write, audit records actions and denials, audit requires Admin; unit tests in `permissions` and `audit`, permissions persistence in UserStore.
 
 ## [Released] - 07/02/2026 - 11:00 - 0.1.1
 
 ### Added
 
-- **Query Cost Estimation — estimativa de custo de queries antes da execução**
-  - Novo módulo `crates/core/src/cost.rs` com tipos: `QueryCostEstimate`, `CostBreakdown`, `CostEstimateParams`.
-  - Função `estimate_search_cost` com heurísticas baseadas em HNSW (O(log n × ef_search × dimension)), custo de filtro pós-busca, hidratação e overhead de rede.
-  - Novo método `VectorDB::estimate_query_cost` — estima custo sem executar busca real.
-  - Novo endpoint `POST /api/v1/collections/{name}/search/estimate` — retorna estimativa de latência, memória, nós visitados, flag `is_expensive` e recomendações de otimização.
-  - Campo opcional `include_history` para incluir percentis históricos (p50/p95/p99) no response.
-  - **Budget-Based Queries**: campo opcional `budget_ms` no endpoint `POST /search`. Se a estimativa exceder o orçamento, retorna `422 Unprocessable Entity` com a estimativa detalhada no body (sem executar a busca).
-  - Novo erro `BudgetExceeded` (422) no server com estimativa de custo no body.
-  - Recomendações automáticas: limit alto, filtros em coleções grandes, vetores de alta dimensão, ef_search alto.
-  - Testes unitários em `cost.rs` (15 testes: valores positivos, filtro, tamanho, limit, is_expensive, recomendações, serialização, etc.).
-  - Testes E2E: endpoint estimate, collection not found, budget rejeitado, budget aceito.
-  - Documentação do endpoint e budget_ms em `docs/api.md`.
+- **Query Cost Estimation — query cost estimation before execution**
+  - New module `crates/core/src/cost.rs` with types: `QueryCostEstimate`, `CostBreakdown`, `CostEstimateParams`.
+  - Function `estimate_search_cost` with HNSW-based heuristics (O(log n × ef_search × dimension)), post-search filter cost, hydration and network overhead.
+  - New method `VectorDB::estimate_query_cost` — estimates cost without executing a real search.
+  - New endpoint `POST /api/v1/collections/{name}/search/estimate` — returns latency estimate, memory, visited nodes, `is_expensive` flag and optimization recommendations.
+  - Optional field `include_history` to include historical percentiles (p50/p95/p99) in the response.
+  - **Budget-Based Queries**: optional `budget_ms` field in the `POST /search` endpoint. If the estimate exceeds the budget, returns `422 Unprocessable Entity` with the detailed estimate in the body (without executing the search).
+  - New error `BudgetExceeded` (422) on the server with cost estimate in the body.
+  - Automatic recommendations: high limit, filters on large collections, high-dimension vectors, high ef_search.
+  - Unit tests in `cost.rs` (15 tests: positive values, filter, size, limit, is_expensive, recommendations, serialization, etc.).
+  - E2E tests: estimate endpoint, collection not found, budget rejected, budget accepted.
+  - Documentation of endpoint and budget_ms in `docs/api.md`.
 
-- **Explain Query — explicação detalhada de resultados de busca vetorial**
-  - Novo módulo `crates/core/src/explain.rs` com tipos: `SearchExplanation`, `ExplainResult`, `FilterExplanation`, `ConditionResult`, `ExplainMeta`, `IndexStats`.
-  - Novo método `search_explain` no trait `ANNIndex` (com implementação padrão e override otimizado em `HnswIndex`).
-  - Novo método `search_explain` em `Collection` (delega ao índice).
-  - Novo método `VectorDB::search_explain` — busca vetorial com explicação completa: score breakdown, avaliação de filtros condição-a-condição, ranking antes/depois de filtros e estatísticas do índice.
-  - Novo endpoint `POST /api/v1/collections/{name}/search/explain` no servidor HTTP.
-  - Helper `evaluate_condition` para avaliar individualmente cada condição de filtro contra metadata.
-  - Testes unitários para explain (basic, com filtro, com BM25 habilitado, avaliação de condições).
-  - Documentação do endpoint em `docs/api.md`.
+- **Explain Query — detailed explanation of vector search results**
+  - New module `crates/core/src/explain.rs` with types: `SearchExplanation`, `ExplainResult`, `FilterExplanation`, `ConditionResult`, `ExplainMeta`, `IndexStats`.
+  - New method `search_explain` in the `ANNIndex` trait (with default implementation and optimized override in `HnswIndex`).
+  - New method `search_explain` in `Collection` (delegates to index).
+  - New method `VectorDB::search_explain` — vector search with complete explanation: score breakdown, per-condition filter evaluation, ranking before/after filters and index statistics.
+  - New endpoint `POST /api/v1/collections/{name}/search/explain` on the HTTP server.
+  - Helper `evaluate_condition` to individually evaluate each filter condition against metadata.
+  - Unit tests for explain (basic, with filter, with BM25 enabled, condition evaluation).
+  - Documentation of endpoint in `docs/api.md`.
 
-- **OpenTelemetry Distributed Tracing — tracing distribuído completo de cada busca vetorial**
-  - Aprimorado `crates/server/src/tracing_otel.rs`: leitura explícita de `OTEL_EXPORTER_OTLP_ENDPOINT` (padrão `http://localhost:4317`), registro do propagador global W3C Trace Context (`traceparent`/`tracestate`).
-  - Spans enriquecidos em `search_points` e `search_hybrid` com 9+ atributos OTel: `db.collection`, `db.operation`, `db.vector.dimension`, `db.vector.limit`, `db.results.count`, `db.duration.search_ms`, `db.duration.hydrate_ms`, `db.index.type`, `db.index.ef_search`, `db.hybrid.alpha`. Valores preenchidos via `Span::current().record()`.
-  - Spans filhos granulares no core: `collection.search` (atributos: `points`, `dimension`) em `Collection::search()` e `hnsw.search` (atributos: `candidates`, `ef`, `tombstones`) em `HnswIndex::search()`.
-  - Propagação de trace context W3C no middleware `request_logger`: extração de `traceparent`/`tracestate` dos headers HTTP, linkagem ao span `http_request`, e inclusão de header `x-trace-id` na resposta para debugging.
-  - Todo código OTel protegido por `#[cfg(feature = "otel")]` — servidor funciona normalmente sem a feature.
-  - Seção "Observability" no `README.md`: como habilitar, variáveis de ambiente, exemplo com Jaeger, hierarquia de spans, tabela de atributos OTel.
+- **OpenTelemetry Distributed Tracing — complete distributed tracing of each vector search**
+  - Enhanced `crates/server/src/tracing_otel.rs`: explicit reading of `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`), registration of the global W3C Trace Context propagator (`traceparent`/`tracestate`).
+  - Enriched spans in `search_points` and `search_hybrid` with 9+ OTel attributes: `db.collection`, `db.operation`, `db.vector.dimension`, `db.vector.limit`, `db.results.count`, `db.duration.search_ms`, `db.duration.hydrate_ms`, `db.index.type`, `db.index.ef_search`, `db.hybrid.alpha`. Values filled via `Span::current().record()`.
+  - Granular child spans in core: `collection.search` (attributes: `points`, `dimension`) in `Collection::search()` and `hnsw.search` (attributes: `candidates`, `ef`, `tombstones`) in `HnswIndex::search()`.
+  - W3C trace context propagation in `request_logger` middleware: extraction of `traceparent`/`tracestate` from HTTP headers, linking to `http_request` span, and inclusion of `x-trace-id` response header for debugging.
+  - All OTel code protected by `#[cfg(feature = "otel")]` — server works normally without the feature.
+  - "Observability" section in `README.md`: how to enable, environment variables, example with Jaeger, span hierarchy, OTel attributes table.
 
 ### Fixed
 
-- **Performance: liberação antecipada de read lock nos handlers de busca**
-  - `search_points`: o `RwLockReadGuard` e o `DashMap Ref` agora são dropados imediatamente após a hidratação dos resultados (`collection.get()`), antes de filtro de metadata, construção de `QueryProfile`, inserção no `DashMap`, métricas Prometheus, `query_stats` e spawn do `query_logger`.
-  - `search_hybrid`: mesmo padrão — lock liberado logo após hidratar os resultados do hybrid search (vetorial + BM25).
-  - Impacto: reduz contenção do `RwLock`, permitindo que escritas concorrentes (upsert/delete) não fiquem bloqueadas por operações que não precisam do lock (métricas, logging, profiling).
+- **Performance: early release of read lock in search handlers**
+  - `search_points`: the `RwLockReadGuard` and `DashMap Ref` are now dropped immediately after result hydration (`collection.get()`), before metadata filtering, `QueryProfile` construction, `DashMap` insertion, Prometheus metrics, `query_stats` and `query_logger` spawn.
+  - `search_hybrid`: same pattern — lock released right after hydrating hybrid search results (vector + BM25).
+  - Impact: reduces `RwLock` contention, allowing concurrent writes (upsert/delete) to not be blocked by operations that do not need the lock (metrics, logging, profiling).
 
 ---
 
-## 2025-W05 (semana de 03–09 fev 2025)
+## 2025-W05 (week of Feb 03–09 2025)
 
 ### Added
 
-- **API REST (servidor HTTP)**
+- **REST API (HTTP server)**
   - `GET /health` — health check
-  - `GET /metrics` — métricas Prometheus
-  - `POST /api/v1/save` — persistir todas as coleções no disco
-  - `POST /api/v1/collections` — criar coleção (name, dimension, distance, enable_bm25, bm25_text_field)
-  - `GET /api/v1/collections` — listar coleções
-  - `GET /api/v1/collections/{name}` — detalhes da coleção
-  - `DELETE /api/v1/collections/{name}` — remover coleção
-  - `POST /api/v1/collections/{name}/points` — upsert de pontos (até 1000 por request)
-  - `DELETE /api/v1/collections/{name}/points` — remover pontos por IDs
-  - `GET /api/v1/collections/{name}/points/{id}` — obter ponto por ID
-  - `POST /api/v1/collections/{name}/search` — busca vetorial (vector, limit, filter)
-  - `POST /api/v1/collections/{name}/search/hybrid` — busca híbrida (vetorial + BM25, RRF)
-  - `GET /api/v1/collections/{name}/stats` — estatísticas (num_points, num_queries, latências)
+  - `GET /metrics` — Prometheus metrics
+  - `POST /api/v1/save` — persist all collections to disk
+  - `POST /api/v1/collections` — create collection (name, dimension, distance, enable_bm25, bm25_text_field)
+  - `GET /api/v1/collections` — list collections
+  - `GET /api/v1/collections/{name}` — collection details
+  - `DELETE /api/v1/collections/{name}` — remove collection
+  - `POST /api/v1/collections/{name}/points` — upsert points (up to 1000 per request)
+  - `DELETE /api/v1/collections/{name}/points` — remove points by IDs
+  - `GET /api/v1/collections/{name}/points/{id}` — get point by ID
+  - `POST /api/v1/collections/{name}/search` — vector search (vector, limit, filter)
+  - `POST /api/v1/collections/{name}/search/hybrid` — hybrid search (vector + BM25, RRF)
+  - `GET /api/v1/collections/{name}/stats` — statistics (num_points, num_queries, latencies)
 - **Core**
-  - Busca híbrida (vetorial + BM25) com RRF; suporte a `enable_bm25` e `bm25_text_field` na criação da coleção
-  - Filtro por metadata na busca vetorial (igualdade)
-- **SDK Rust (ferres-db-sdk)**
-  - `FerresDbClient::new(base_url)` e `hybrid_search(collection, query_text, query_vector, limit, alpha)`
-  - Tipos `HybridSearchResponse`, `SearchResultItem`, `SdkError`
-- **Documentação**
-  - [docs/api.md](docs/api.md) — referência da API HTTP com curl e schemas JSON
-  - [docs/sdk.md](docs/sdk.md) — guia SDK Rust e uso da API em Python/TypeScript
-  - README raiz: overview, diagrama de arquitetura (Mermaid), quick start em 3 passos, links para docs
-  - [examples/simple_rag/README.md](examples/simple_rag/README.md) — tutorial passo a passo, troubleshooting, próximos passos
-  - [CHANGELOG.md](CHANGELOG.md) — log de mudanças por semana
+  - Hybrid search (vector + BM25) with RRF; support for `enable_bm25` and `bm25_text_field` on collection creation
+  - Metadata filtering in vector search (equality)
+- **Rust SDK (ferres-db-sdk)**
+  - `FerresDbClient::new(base_url)` and `hybrid_search(collection, query_text, query_vector, limit, alpha)`
+  - Types `HybridSearchResponse`, `SearchResultItem`, `SdkError`
+- **Documentation**
+  - [docs/api.md](docs/api.md) — HTTP API reference with curl and JSON schemas
+  - [docs/sdk.md](docs/sdk.md) — Rust SDK guide and API usage in Python/TypeScript
+  - Root README: overview, architecture diagram (Mermaid), quick start in 3 steps, links to docs
+  - [examples/simple_rag/README.md](examples/simple_rag/README.md) — step-by-step tutorial, troubleshooting, next steps
+  - [CHANGELOG.md](CHANGELOG.md) — change log by week
 
 ### Changed
 
-- N/A (entrada inicial)
+- N/A (initial entry)
 
 ### Fixed
 
-- N/A (entrada inicial)
+- N/A (initial entry)
 
 ---
 
-## Como usar este changelog
+## How to use this changelog
 
-- **Unreleased**: itens já implementados mas ainda não publicados em release.
-- **Por semana**: use o formato `## YYYY-Wxx (semana de DD–DD mês YYYY)` ou `## DD/MM/YYYY - DD/MM/YYYY` e agrupe as mudanças em **Added**, **Changed**, **Fixed** (e opcionalmente **API**, **Deprecated**, **Removed**, **Security**).
+- **Unreleased**: items already implemented but not yet published in a release.
+- **By week**: use the format `## YYYY-Wxx (week of DD–DD Mon YYYY)` or `## DD/MM/YYYY - DD/MM/YYYY` and group changes under **Added**, **Changed**, **Fixed** (and optionally **API**, **Deprecated**, **Removed**, **Security**).

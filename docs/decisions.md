@@ -1,461 +1,461 @@
 # Architecture Decision Records (ADRs)
 
-As decisões estão documentadas em arquivos individuais em **[docs/ADR/](ADR/)**. Este arquivo mantém um resumo e o histórico legado; para o conteúdo completo de cada decisão, consulte os arquivos na pasta ADR.
+Decisions are documented in individual files in **[docs/ADR/](ADR/)**. This file maintains a summary and the legacy history; for the full content of each decision, consult the files in the ADR folder.
 
-## ADR-001: Uso de HNSW em vez de implementação própria
+## ADR-001: Using HNSW instead of a custom implementation
 
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Precisávamos de um algoritmo ANN eficiente para busca vetorial.
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: We needed an efficient ANN algorithm for vector search.
 
-**Decisão**: Usar a biblioteca `hnsw_rs` em vez de implementar HNSW do zero.
+**Decision**: Use the `hnsw_rs` library instead of implementing HNSW from scratch.
 
-**Alternativas Consideradas**:
+**Alternatives Considered**:
 
-1. **Implementar HNSW do zero**
-   - ✅ Controle total sobre implementação
-   - ❌ Muito tempo de desenvolvimento
-   - ❌ Risco de bugs e performance subótima
-   - ❌ Manutenção contínua necessária
+1. **Implement HNSW from scratch**
+   - ✅ Full control over implementation
+   - ❌ Very long development time
+   - ❌ Risk of bugs and suboptimal performance
+   - ❌ Continuous maintenance required
 
-2. **Usar outra biblioteca ANN** (ex: `usearch`, `faiss-rs`)
-   - ✅ Implementação madura
-   - ❌ `usearch`: Menos features, menor comunidade
-   - ❌ `faiss-rs`: Bindings para C++, complexidade adicional
+2. **Use another ANN library** (e.g. `usearch`, `faiss-rs`)
+   - ✅ Mature implementation
+   - ❌ `usearch`: Fewer features, smaller community
+   - ❌ `faiss-rs`: C++ bindings, additional complexity
 
-3. **Usar `hnsw_rs`** (escolhido)
-   - ✅ Biblioteca Rust nativa (sem FFI)
-   - ✅ API limpa e bem documentada
-   - ✅ Suporte a múltiplas métricas de distância
-   - ✅ Ativa manutenção
-   - ❌ Menos controle sobre detalhes internos
+3. **Use `hnsw_rs`** (chosen)
+   - ✅ Native Rust library (no FFI)
+   - ✅ Clean and well-documented API
+   - ✅ Support for multiple distance metrics
+   - ✅ Actively maintained
+   - ❌ Less control over internal details
 
-**Consequências**:
+**Consequences**:
 
-- Desenvolvimento mais rápido (focamos na API e storage)
-- Dependência externa (mas bem mantida)
-- Performance excelente (benchmarks confirmam)
-- Facilita manutenção (bugs corrigidos upstream)
+- Faster development (we focused on API and storage)
+- External dependency (but well maintained)
+- Excellent performance (benchmarks confirm)
+- Easier maintenance (bugs fixed upstream)
 
-**Notas**: Se precisarmos de features específicas não suportadas pelo `hnsw_rs`, podemos considerar fork ou implementação própria no futuro.
+**Notes**: If we need specific features not supported by `hnsw_rs`, we can consider forking or a custom implementation in the future.
 
 ---
 
-## ADR-002: Formato JSON-lines para persistência
+## ADR-002: JSON-lines format for persistence
 
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Precisávamos de um formato de persistência que permitisse append incremental e fosse fácil de debugar.
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: We needed a persistence format that allowed incremental append and was easy to debug.
 
-**Decisão**: Usar formato JSON-lines (`.jsonl`) para armazenar pontos.
+**Decision**: Use JSON-lines format (`.jsonl`) to store points.
 
-**Alternativas Consideradas**:
+**Alternatives Considered**:
 
-1. **Bincode completo**
-   - ✅ Serialização muito rápida
-   - ✅ Tamanho compacto
-   - ❌ Não permite append incremental
-   - ❌ Difícil de debugar (binário)
-   - ❌ Recuperação parcial difícil após crash
+1. **Full bincode**
+   - ✅ Very fast serialization
+   - ✅ Compact size
+   - ❌ Does not allow incremental append
+   - ❌ Hard to debug (binary)
+   - ❌ Partial recovery after crash is difficult
 
 2. **SQLite**
    - ✅ ACID transactions
-   - ✅ Queries SQL
-   - ❌ Overhead desnecessário para dados simples
-   - ❌ Dependência externa pesada
-   - ❌ Complexidade adicional
+   - ✅ SQL queries
+   - ❌ Unnecessary overhead for simple data
+   - ❌ Heavy external dependency
+   - ❌ Additional complexity
 
 3. **Protocol Buffers**
-   - ✅ Compacto e eficiente
-   - ✅ Schema versionado
-   - ❌ Menos legível que JSON
-   - ❌ Requer schema definitions
-   - ❌ Append incremental mais complexo
+   - ✅ Compact and efficient
+   - ✅ Versioned schema
+   - ❌ Less readable than JSON
+   - ❌ Requires schema definitions
+   - ❌ Incremental append is more complex
 
-4. **JSON-lines** (escolhido)
-   - ✅ Append incremental simples
-   - ✅ Streaming de leitura
-   - ✅ Recuperação parcial após crash
-   - ✅ Fácil de debugar (texto legível)
-   - ✅ Compatível com ferramentas Unix
-   - ❌ Mais lento que bincode para leitura completa
-   - ❌ Tamanho maior que bincode
+4. **JSON-lines** (chosen)
+   - ✅ Simple incremental append
+   - ✅ Streaming reads
+   - ✅ Partial recovery after crash
+   - ✅ Easy to debug (human-readable text)
+   - ✅ Compatible with Unix tools
+   - ❌ Slower than bincode for full reads
+   - ❌ Larger size than bincode
 
-**Consequências**:
+**Consequences**:
 
-- Facilita debugging e inspeção manual
-- Permite implementação futura de WAL (write-ahead log)
-- Tradeoff de performance aceitável para benefícios de flexibilidade
-- Formato bem conhecido e suportado
+- Facilitates debugging and manual inspection
+- Enables future WAL (write-ahead log) implementation
+- Acceptable performance tradeoff for flexibility benefits
+- Well-known and supported format
 
-**Notas**: Para coleções muito grandes (>10M pontos), podemos considerar formato binário otimizado no futuro, mas JSON-lines é adequado para maioria dos casos.
-
----
-
-## ADR-003: Trait Object para abstração de índice ANN
-
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Queríamos desacoplar `Collection` do backend específico de busca (HNSW).
-
-**Decisão**: Usar `Box<dyn ANNIndex>` (trait object) em vez de tipo genérico ou enum.
-
-**Alternativas Consideradas**:
-
-1. **Tipo genérico** (`Collection<I: ANNIndex>`)
-   - ✅ Zero-cost abstraction (monomorphização)
-   - ✅ Performance máxima
-   - ❌ `Collection` não pode ser armazenada em `HashMap` facilmente
-   - ❌ Complexidade de tipos aumenta
-
-2. **Enum com variantes** (`enum IndexType { Hnsw, BruteForce }`)
-   - ✅ Despacho estático (rápido)
-   - ✅ Sem heap allocation
-   - ❌ Menos extensível (requer modificar enum para novo backend)
-   - ❌ Match statements em todos os métodos
-
-3. **Trait Object** (`Box<dyn ANNIndex>`) (escolhido)
-   - ✅ Extensível (qualquer tipo pode implementar)
-   - ✅ Fácil de testar (mock implementations)
-   - ✅ Desacopla `Collection` do backend
-   - ❌ Overhead de vtable (desprezível comparado ao custo HNSW)
-   - ❌ Heap allocation (uma vez, aceitável)
-
-**Consequências**:
-
-- Facilita testes unitários (mock `ANNIndex`)
-- Permite múltiplas implementações sem modificar `Collection`
-- Overhead de vtable é desprezível (<1% do tempo de busca)
-- Código mais limpo e extensível
-
-**Notas**: Se profiling mostrar que vtable overhead é significativo, podemos considerar enum com variantes específicas, mas isso é improvável dado o custo da busca HNSW.
+**Notes**: For very large collections (>10M points), we may consider an optimized binary format in the future, but JSON-lines is adequate for most cases.
 
 ---
 
-## ADR-004: Tombstones em vez de remoção real do HNSW
+## ADR-003: Trait Object for ANN index abstraction
 
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: HNSW não suporta remoção nativa do grafo. Precisávamos de uma estratégia para remover pontos.
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: We wanted to decouple `Collection` from the specific search backend (HNSW).
 
-**Decisão**: Usar "tombstones" (marcação lógica) em vez de remoção física ou rebuild completo.
+**Decision**: Use `Box<dyn ANNIndex>` (trait object) instead of a generic type or enum.
 
-**Alternativas Consideradas**:
+**Alternatives Considered**:
 
-1. **Rebuild completo após cada remoção**
-   - ✅ Limpa completamente o índice
-   - ✅ Sem pontos órfãos
-   - ❌ Muito lento para coleções grandes (O(n log n))
-   - ❌ Bloqueia todas as operações durante rebuild
+1. **Generic type** (`Collection<I: ANNIndex>`)
+   - ✅ Zero-cost abstraction (monomorphization)
+   - ✅ Maximum performance
+   - ❌ `Collection` cannot easily be stored in a `HashMap`
+   - ❌ Type complexity increases
 
-2. **Implementação custom de remoção no HNSW**
-   - ✅ Remoção real
-   - ✅ Performance aceitável
-   - ❌ Complexidade muito alta
-   - ❌ Requer pesquisa e desenvolvimento significativo
-   - ❌ Risco de bugs
+2. **Enum with variants** (`enum IndexType { Hnsw, BruteForce }`)
+   - ✅ Static dispatch (fast)
+   - ✅ No heap allocation
+   - ❌ Less extensible (requires modifying enum for new backends)
+   - ❌ Match statements in every method
 
-3. **Tombstones** (escolhido)
-   - ✅ Simples de implementar
-   - ✅ Não bloqueia operações
-   - ✅ Remoção imediata (filtrada nas buscas)
-   - ❌ Pontos permanecem no grafo até rebuild
-   - ❌ Uso de memória ligeiramente maior
+3. **Trait Object** (`Box<dyn ANNIndex>`) (chosen)
+   - ✅ Extensible (any type can implement)
+   - ✅ Easy to test (mock implementations)
+   - ✅ Decouples `Collection` from backend
+   - ❌ vtable overhead (negligible compared to HNSW cost)
+   - ❌ Heap allocation (once, acceptable)
 
-**Consequências**:
+**Consequences**:
 
-- Remoção é O(1) (apenas marcação)
-- Buscas filtram tombstones automaticamente
-- Rebuild periódico (ou manual) limpa completamente
-- Tradeoff aceitável entre performance e simplicidade
+- Facilitates unit tests (mock `ANNIndex`)
+- Allows multiple implementations without modifying `Collection`
+- vtable overhead is negligible (<1% of search time)
+- Cleaner and more extensible code
 
-**Notas**: Para coleções com muitas remoções, recomenda-se rebuild periódico. Podemos implementar rebuild automático baseado em threshold de tombstones no futuro.
-
----
-
-## ADR-005: Normalização L2 para métrica Cosine
-
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Busca por similaridade de cosseno pode ser otimizada normalizando vetores para norma L2=1.
-
-**Decisão**: Normalizar vetores para norma L2=1 quando a métrica é Cosine, transformando busca de cosseno em busca L2.
-
-**Alternativas Consideradas**:
-
-1. **Usar distância Cosine nativa do HNSW**
-   - ✅ Sem normalização necessária
-   - ❌ Menos estável numericamente
-   - ❌ Pode ter problemas com vetores de norma zero
-
-2. **Normalizar apenas na busca** (não na inserção)
-   - ✅ Vetores originais preservados
-   - ❌ Normalização repetida em cada busca
-   - ❌ Performance pior
-
-3. **Normalizar na inserção e busca** (escolhido)
-   - ✅ Estabilidade numérica melhor
-   - ✅ Busca mais rápida (vetores já normalizados)
-   - ✅ Transforma Cosine em L2 (mais eficiente)
-   - ❌ Vetores normalizados armazenados (não originais)
-
-**Consequências**:
-
-- Performance melhor para Cosine (busca L2 é mais eficiente)
-- Estabilidade numérica melhorada
-- Vetores originais não são preservados (mas isso é aceitável para Cosine)
-- Cálculo em `f64` evita overflow em alta dimensão
-
-**Notas**: Se precisarmos preservar vetores originais, podemos armazenar ambos (normalizado + original), mas isso dobra o uso de memória.
+**Notes**: If profiling shows that vtable overhead is significant, we can consider an enum with specific variants, but this is unlikely given the cost of HNSW search.
 
 ---
 
-## ADR-006: Cache LRU opcional para resultados de busca
+## ADR-004: Tombstones instead of real HNSW removal
 
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Queries repetidas são comuns em aplicações reais. Cache pode melhorar latência significativamente.
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: HNSW does not support native graph removal. We needed a strategy for removing points.
 
-**Decisão**: Implementar cache LRU opcional configurável por coleção.
+**Decision**: Use "tombstones" (logical marking) instead of physical removal or a full rebuild.
 
-**Alternativas Consideradas**:
+**Alternatives Considered**:
 
-1. **Sem cache**
-   - ✅ Simplicidade
-   - ✅ Sem overhead de memória
-   - ❌ Latência alta para queries repetidas
+1. **Full rebuild after each removal**
+   - ✅ Completely cleans the index
+   - ✅ No orphan points
+   - ❌ Very slow for large collections (O(n log n))
+   - ❌ Blocks all operations during rebuild
 
-2. **Cache sempre habilitado**
-   - ✅ Melhor performance para queries repetidas
-   - ❌ Overhead de memória mesmo quando não necessário
-   - ❌ Menos flexível
+2. **Custom HNSW removal implementation**
+   - ✅ Real removal
+   - ✅ Acceptable performance
+   - ❌ Very high complexity
+   - ❌ Requires significant research and development
+   - ❌ Risk of bugs
 
-3. **Cache opcional configurável** (escolhido)
-   - ✅ Flexível (habilitado apenas quando necessário)
-   - ✅ Configurável por coleção
-   - ✅ Pode ser desabilitado para economizar memória
-   - ❌ Complexidade adicional no código
+3. **Tombstones** (chosen)
+   - ✅ Simple to implement
+   - ✅ Does not block operations
+   - ✅ Immediate removal (filtered in searches)
+   - ❌ Points remain in the graph until rebuild
+   - ❌ Slightly higher memory usage
 
-**Consequências**:
+**Consequences**:
 
-- Reduz latência para queries repetidas (10-100x mais rápido)
-- Uso de memória configurável
-- Overhead mínimo quando desabilitado
-- Cache pode retornar resultados desatualizados se pontos forem modificados (tradeoff aceitável)
+- Removal is O(1) (just marking)
+- Searches filter tombstones automatically
+- Periodic (or manual) rebuild cleans completely
+- Acceptable tradeoff between performance and simplicity
 
-**Notas**: Para aplicações com queries sempre diferentes, cache deve ser desabilitado (`search_cache_size = 0`).
-
----
-
-## ADR-007: Paralelização com Rayon para batches grandes
-
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Batch inserts grandes podem se beneficiar de paralelização.
-
-**Decisão**: Paralelizar validação e normalização para batches > 100 pontos usando Rayon.
-
-**Alternativas Consideradas**:
-
-1. **Sem paralelização**
-   - ✅ Simplicidade
-   - ✅ Sem overhead de sincronização
-   - ❌ Performance pior para batches grandes
-
-2. **Paralelização sempre**
-   - ✅ Melhor performance
-   - ❌ Overhead para batches pequenos
-   - ❌ Complexidade desnecessária
-
-3. **Paralelização condicional** (escolhido)
-   - ✅ Melhor performance para batches grandes
-   - ✅ Sem overhead para batches pequenos
-   - ✅ Threshold configurável (100 pontos)
-   - ❌ Complexidade adicional
-
-**Consequências**:
-
-- Melhoria de ~50% no tempo de indexação para batches grandes (10k+ pontos)
-- Overhead mínimo para batches pequenos (<100 pontos)
-- Aproveita múltiplos cores da CPU
-- HNSW ainda requer inserção sequencial (não thread-safe)
-
-**Notas**: Se `hnsw_rs` adicionar suporte a inserção paralela no futuro, podemos paralelizar também a inserção.
+**Notes**: For collections with many removals, periodic rebuild is recommended. We can implement automatic rebuild based on a tombstone threshold in the future.
 
 ---
 
-## ADR-008: Validação rigorosa de vetores
+## ADR-005: L2 normalization for Cosine metric
 
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Vetores inválidos (NaN, infinito, dimensão incorreta) podem causar bugs difíceis de debugar.
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: Cosine similarity search can be optimized by normalizing vectors to L2 norm = 1.
 
-**Decisão**: Validar rigorosamente todos os vetores na criação do `Point` e nas operações de `Collection`.
+**Decision**: Normalize vectors to L2 norm = 1 when the metric is Cosine, transforming cosine search into L2 search.
 
-**Validações Implementadas**:
+**Alternatives Considered**:
 
-- ID não pode ser vazio
-- Vetor não pode ser vazio
-- Componentes do vetor devem ser finitos (não NaN, não infinito)
-- Dimensão deve corresponder à configuração da coleção
+1. **Use native Cosine distance from HNSW**
+   - ✅ No normalization required
+   - ❌ Less numerically stable
+   - ❌ May have issues with zero-norm vectors
 
-**Alternativas Consideradas**:
+2. **Normalize only at search time** (not at insertion)
+   - ✅ Original vectors preserved
+   - ❌ Repeated normalization at every search
+   - ❌ Worse performance
 
-1. **Validação mínima**
-   - ✅ Performance máxima
-   - ❌ Bugs difíceis de debugar
-   - ❌ Comportamento indefinido com dados inválidos
+3. **Normalize at insertion and search** (chosen)
+   - ✅ Better numerical stability
+   - ✅ Faster search (vectors already normalized)
+   - ✅ Transforms Cosine into L2 (more efficient)
+   - ❌ Normalized vectors stored (not originals)
 
-2. **Validação rigorosa** (escolhido)
-   - ✅ Erros claros e específicos
-   - ✅ Previne bugs difíceis de debugar
-   - ✅ Fail-fast (erro imediato em vez de comportamento estranho)
-   - ❌ Overhead mínimo de validação
+**Consequences**:
 
-**Consequências**:
+- Better performance for Cosine (L2 search is more efficient)
+- Improved numerical stability
+- Original vectors are not preserved (but this is acceptable for Cosine)
+- Calculation in `f64` avoids overflow at high dimension
 
-- Erros claros facilitam debugging
-- Previne comportamento indefinido
-- Overhead de validação é desprezível (<1% do tempo total)
-- Código mais robusto e confiável
-
-**Notas**: Validação pode ser desabilitada em builds de release se necessário (não recomendado).
+**Notes**: If we need to preserve original vectors, we can store both (normalized + original), but this doubles memory usage.
 
 ---
 
-## ADR-009: Atomic writes com temp-file + rename
+## ADR-006: Optional LRU cache for search results
 
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Precisávamos garantir atomicidade de escritas no disco para evitar corrupção em caso de crash.
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: Repeated queries are common in real applications. Cache can significantly improve latency.
 
-**Decisão**: Usar padrão temp-file + rename para todas as escritas em disco.
+**Decision**: Implement an optional configurable LRU cache per collection.
 
-**Alternativas Consideradas**:
+**Alternatives Considered**:
 
-1. **Write direto**
-   - ✅ Simplicidade
-   - ❌ Risco de corrupção em crash durante escrita
-   - ❌ Arquivo parcial pode ser lido
+1. **No cache**
+   - ✅ Simplicity
+   - ✅ No memory overhead
+   - ❌ High latency for repeated queries
 
-2. **fsync após cada write**
-   - ✅ Durabilidade garantida
-   - ❌ Muito lento (I/O síncrono)
-   - ❌ Ainda não garante atomicidade
+2. **Always-on cache**
+   - ✅ Better performance for repeated queries
+   - ❌ Memory overhead even when not needed
+   - ❌ Less flexible
 
-3. **Temp-file + rename** (escolhido)
-   - ✅ Atomicidade garantida no nível do filesystem
-   - ✅ Performance aceitável
-   - ✅ Padrão bem conhecido e confiável
-   - ❌ Requer espaço temporário em disco
+3. **Optional configurable cache** (chosen)
+   - ✅ Flexible (enabled only when needed)
+   - ✅ Configurable per collection
+   - ✅ Can be disabled to save memory
+   - ❌ Additional code complexity
 
-**Consequências**:
+**Consequences**:
 
-- Garante atomicidade (arquivo completo ou não existe)
-- Previne corrupção em caso de crash
-- Performance aceitável (rename é rápido na maioria dos filesystems)
-- Padrão amplamente usado e confiável
+- Reduces latency for repeated queries (10–100× faster)
+- Configurable memory usage
+- Minimal overhead when disabled
+- Cache may return stale results if points are modified (acceptable tradeoff)
 
-**Notas**: Em filesystems que não garantem atomicidade de rename (ex: NFS), pode haver edge cases, mas isso é raro.
-
----
-
-## ADR-010: Checksum MD5 para validação de integridade
-
-**Status**: Aceito  
-**Data**: 2024  
-**Contexto**: Precisávamos detectar corrupção de dados em `points.jsonl`.
-
-**Decisão**: Calcular e armazenar checksum MD5 de `points.jsonl` para validação no load.
-
-**Alternativas Consideradas**:
-
-1. **Sem validação**
-   - ✅ Simplicidade
-   - ❌ Não detecta corrupção
-   - ❌ Bugs silenciosos possíveis
-
-2. **SHA-256 ou SHA-512**
-   - ✅ Mais seguro criptograficamente
-   - ❌ Mais lento que MD5
-   - ❌ Overkill para validação de integridade (não segurança)
-
-3. **MD5** (escolhido)
-   - ✅ Rápido
-   - ✅ Adequado para detecção de corrupção
-   - ✅ Amplamente suportado
-   - ❌ Não é seguro criptograficamente (mas não é necessário aqui)
-
-**Consequências**:
-
-- Detecta corrupção de dados automaticamente
-- Overhead mínimo (<1% do tempo de save/load)
-- Erros claros quando corrupção é detectada
-- MD5 é adequado para validação de integridade (não segurança)
-
-**Notas**: Se precisarmos de segurança criptográfica no futuro, podemos migrar para SHA-256, mas MD5 é suficiente para detecção de corrupção.
+**Notes**: For applications where queries are always different, cache should be disabled (`search_cache_size = 0`).
 
 ---
 
-## Resumo de Decisões
+## ADR-007: Parallelization with Rayon for large batches
 
-| ADR     | Decisão                                        | Status    |
-| ------- | ---------------------------------------------- | --------- |
-| ADR-001 | Usar `hnsw_rs` em vez de implementação própria | ✅ Aceito |
-| ADR-002 | Formato JSON-lines para persistência           | ✅ Aceito |
-| ADR-003 | Trait Object para abstração de índice          | ✅ Aceito |
-| ADR-004 | Tombstones para remoção                        | ✅ Aceito |
-| ADR-005 | Normalização L2 para Cosine                    | ✅ Aceito |
-| ADR-006 | Cache LRU opcional                             | ✅ Aceito |
-| ADR-007 | Paralelização condicional com Rayon            | ✅ Aceito |
-| ADR-008 | Validação rigorosa de vetores                  | ✅ Aceito |
-| ADR-009 | Atomic writes com temp-file + rename           | ✅ Aceito |
-| ADR-010 | Checksum MD5 para validação                    | ✅ Aceito |
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: Large batch inserts can benefit from parallelization.
 
-## Decisões Futuras (Rascunho)
+**Decision**: Parallelize validation and normalization for batches > 100 points using Rayon.
 
-### ADR-011: Write-ahead log (WAL) para melhor durabilidade
+**Alternatives Considered**:
 
-**Status**: Proposto  
-**Contexto**: Save completo após cada operação é lento para workloads write-heavy.
+1. **No parallelization**
+   - ✅ Simplicity
+   - ✅ No synchronization overhead
+   - ❌ Worse performance for large batches
 
-**Proposta**: Implementar WAL para escritas incrementais, com checkpoint periódico.
+2. **Always parallelize**
+   - ✅ Better performance
+   - ❌ Overhead for small batches
+   - ❌ Unnecessary complexity
 
-**Benefícios**:
+3. **Conditional parallelization** (chosen)
+   - ✅ Better performance for large batches
+   - ✅ No overhead for small batches
+   - ✅ Configurable threshold (100 points)
+   - ❌ Additional complexity
 
-- Melhor throughput de escrita
-- Durabilidade garantida
-- Recuperação após crash
+**Consequences**:
+
+- ~50% improvement in indexing time for large batches (10k+ points)
+- Minimal overhead for small batches (<100 points)
+- Takes advantage of multiple CPU cores
+- HNSW still requires sequential insertion (not thread-safe)
+
+**Notes**: If `hnsw_rs` adds support for parallel insertion in the future, we can parallelize the insertion as well.
+
+---
+
+## ADR-008: Strict vector validation
+
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: Invalid vectors (NaN, infinity, incorrect dimension) can cause hard-to-debug bugs.
+
+**Decision**: Strictly validate all vectors when creating `Point` and in `Collection` operations.
+
+**Implemented Validations**:
+
+- ID cannot be empty
+- Vector cannot be empty
+- Vector components must be finite (not NaN, not infinity)
+- Dimension must match the collection configuration
+
+**Alternatives Considered**:
+
+1. **Minimal validation**
+   - ✅ Maximum performance
+   - ❌ Hard-to-debug bugs
+   - ❌ Undefined behavior with invalid data
+
+2. **Strict validation** (chosen)
+   - ✅ Clear and specific errors
+   - ✅ Prevents hard-to-debug bugs
+   - ✅ Fail-fast (immediate error instead of strange behavior)
+   - ❌ Minimal validation overhead
+
+**Consequences**:
+
+- Clear errors facilitate debugging
+- Prevents undefined behavior
+- Validation overhead is negligible (<1% of total time)
+- More robust and reliable code
+
+**Notes**: Validation can be disabled in release builds if necessary (not recommended).
+
+---
+
+## ADR-009: Atomic writes with temp-file + rename
+
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: We needed to guarantee write atomicity on disk to avoid corruption in case of crash.
+
+**Decision**: Use the temp-file + rename pattern for all disk writes.
+
+**Alternatives Considered**:
+
+1. **Direct write**
+   - ✅ Simplicity
+   - ❌ Risk of corruption on crash during write
+   - ❌ Partial file may be read
+
+2. **fsync after each write**
+   - ✅ Guaranteed durability
+   - ❌ Very slow (synchronous I/O)
+   - ❌ Still does not guarantee atomicity
+
+3. **Temp-file + rename** (chosen)
+   - ✅ Atomicity guaranteed at filesystem level
+   - ✅ Acceptable performance
+   - ✅ Well-known and reliable pattern
+   - ❌ Requires temporary disk space
+
+**Consequences**:
+
+- Guarantees atomicity (complete file or nothing)
+- Prevents corruption in case of crash
+- Acceptable performance (rename is fast on most filesystems)
+- Widely used and reliable pattern
+
+**Notes**: On filesystems that do not guarantee rename atomicity (e.g. NFS), there may be edge cases, but this is rare.
+
+---
+
+## ADR-010: MD5 checksum for integrity validation
+
+**Status**: Accepted  
+**Date**: 2024  
+**Context**: We needed to detect data corruption in `points.jsonl`.
+
+**Decision**: Calculate and store MD5 checksum of `points.jsonl` for validation on load.
+
+**Alternatives Considered**:
+
+1. **No validation**
+   - ✅ Simplicity
+   - ❌ Does not detect corruption
+   - ❌ Silent bugs possible
+
+2. **SHA-256 or SHA-512**
+   - ✅ More cryptographically secure
+   - ❌ Slower than MD5
+   - ❌ Overkill for integrity validation (not security)
+
+3. **MD5** (chosen)
+   - ✅ Fast
+   - ✅ Adequate for corruption detection
+   - ✅ Widely supported
+   - ❌ Not cryptographically secure (but not needed here)
+
+**Consequences**:
+
+- Automatically detects data corruption
+- Minimal overhead (<1% of save/load time)
+- Clear errors when corruption is detected
+- MD5 is adequate for integrity validation (not security)
+
+**Notes**: If we need cryptographic security in the future, we can migrate to SHA-256, but MD5 is sufficient for corruption detection.
+
+---
+
+## Decision Summary
+
+| ADR     | Decision                                           | Status      |
+| ------- | -------------------------------------------------- | ----------- |
+| ADR-001 | Use `hnsw_rs` instead of custom implementation     | ✅ Accepted |
+| ADR-002 | JSON-lines format for persistence                  | ✅ Accepted |
+| ADR-003 | Trait Object for index abstraction                 | ✅ Accepted |
+| ADR-004 | Tombstones for removal                             | ✅ Accepted |
+| ADR-005 | L2 normalization for Cosine                        | ✅ Accepted |
+| ADR-006 | Optional LRU cache                                 | ✅ Accepted |
+| ADR-007 | Conditional parallelization with Rayon             | ✅ Accepted |
+| ADR-008 | Strict vector validation                           | ✅ Accepted |
+| ADR-009 | Atomic writes with temp-file + rename              | ✅ Accepted |
+| ADR-010 | MD5 checksum for validation                        | ✅ Accepted |
+
+## Future Decisions (Draft)
+
+### ADR-011: Write-ahead log (WAL) for better durability
+
+**Status**: Proposed  
+**Context**: Full save after each operation is slow for write-heavy workloads.
+
+**Proposal**: Implement WAL for incremental writes, with periodic checkpointing.
+
+**Benefits**:
+
+- Better write throughput
+- Guaranteed durability
+- Recovery after crash
 
 **Tradeoffs**:
 
-- Complexidade adicional
-- Overhead de I/O para WAL
-- Necessidade de compactação periódica
+- Additional complexity
+- I/O overhead for WAL
+- Need for periodic compaction
 
 ---
 
-### ADR-012: Compressão de vetores (quantização)
+### ADR-012: Vector compression (quantization)
 
-**Status**: Proposto  
-**Contexto**: Vetores ocupam muita memória em coleções grandes.
+**Status**: Proposed  
+**Context**: Vectors consume a lot of memory in large collections.
 
-**Proposta**: Implementar quantização (ex: int8) para reduzir uso de memória.
+**Proposal**: Implement quantization (e.g. int8) to reduce memory usage.
 
-**Benefícios**:
+**Benefits**:
 
-- Redução de 4x no uso de memória (f32 → int8)
-- Performance melhor (menos cache misses)
+- 4× reduction in memory usage (f32 → int8)
+- Better performance (fewer cache misses)
 
 **Tradeoffs**:
 
-- Perda de precisão
-- Overhead de conversão
-- Complexidade adicional
+- Loss of precision
+- Conversion overhead
+- Additional complexity
 
 ---
 
-## Referências
+## References
 
-- [Architecture Decision Records](https://adr.github.io/) - Formato ADR
-- [Documenting Architecture Decisions](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions) - Artigo original sobre ADRs
+- [Architecture Decision Records](https://adr.github.io/) - ADR format
+- [Documenting Architecture Decisions](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions) - Original article on ADRs

@@ -1,88 +1,88 @@
-# Guia de Desenvolvimento
+# Development Guide
 
-## 🚀 Executando o Projeto
+## Running the Project
 
-### Opção 1: Docker Compose (Recomendado)
+### Option 1: Docker Compose (Recommended)
 
-**Desenvolvimento** (com hot reload):
+**Development** (with hot reload):
 ```bash
 docker-compose -f docker-compose.dev.yml up --build
 ```
 - Backend: http://localhost:8080
 - Frontend: http://localhost:5173
 
-**Produção**:
+**Production**:
 ```bash
 docker-compose up --build
 ```
 - Backend: http://localhost:8080
 - Frontend: http://localhost:3000
 
-### Opção 2: Desenvolvimento Local (sem Docker)
+### Option 2: Local Development (without Docker)
 
 **Backend**:
 ```bash
 cargo run -p ferres-db-server
 ```
-- API disponível em: http://localhost:8080
+- API available at: http://localhost:8080
 
-**Frontend** (em outro terminal):
+**Frontend** (in another terminal):
 ```bash
 cd dashboard
 npm run dev
 ```
-- Frontend disponível em: http://localhost:5173
+- Frontend available at: http://localhost:5173
 
-**Configure o `.env` do dashboard**:
+**Configure the dashboard `.env`**:
 ```env
 VITE_API_BASE_URL=http://localhost:8080
 VITE_API_KEY=sk-dev-abc123
 ```
 
-### Opção 3: Scripts PowerShell/Batch
+### Option 3: PowerShell/Batch Scripts
 
 **Windows**:
 ```powershell
-.\run-server.ps1  # Builda frontend e inicia backend
+.\run-server.ps1  # Builds frontend and starts backend
 ```
 
-**Ou manualmente**:
+**Or manually**:
 ```bash
-# 1. Build do frontend
+# 1. Build the frontend
 cd dashboard
 npm run build
 cd ..
 
-# 2. Iniciar servidor Rust
+# 2. Start the Rust server
 cargo run -p ferres-db-server
 ```
 
-## 📁 Estrutura do Projeto
+## Project Structure
 
-- `crates/server/` - Servidor Rust (Axum) - Porta 8080
-- `dashboard/` - Frontend React (Vite + TypeScript)
-  - Desenvolvimento: Porta 5173 (Vite dev server)
-  - Produção: Porta 3000 (Nginx)
+- `crates/server/` — Rust server (Axum) — Port 8080
+- `dashboard/` — React frontend (Vite + TypeScript)
+  - Development: Port 5173 (Vite dev server)
+  - Production: Port 3000 (Nginx)
 
-## 🔧 Configuração
+## Configuration
 
 ### Backend (Rust)
 
-Configure via `config.toml` ou variáveis de ambiente:
-- `HOST`: Host do servidor (padrão: `0.0.0.0`)
-- `PORT`: Porta do servidor (padrão: `8080`)
-- `STORAGE_PATH`: Caminho para dados
-- `LOG_LEVEL`: Nível de log (`info`, `debug`, etc.)
+Configure via `config.toml` or environment variables:
+- `HOST`: Server host (default: `0.0.0.0`)
+- `PORT`: Server port (default: `8080`)
+- `STORAGE_PATH`: Data path
+- `LOG_LEVEL`: Log level (`info`, `debug`, etc.)
 
 ### Frontend (React)
 
 Configure via `dashboard/.env`:
-- `VITE_API_BASE_URL`: URL da API (padrão: `http://localhost:8080`)
-- `VITE_API_KEY`: Chave de API (opcional)
+- `VITE_API_BASE_URL`: API URL (default: `http://localhost:8080`)
+- `VITE_API_KEY`: API key (optional)
 
-## 📝 Notas Importantes
+## Important Notes
 
-- **Desenvolvimento**: Frontend e backend rodam separadamente em portas diferentes
-- **Produção**: Frontend é servido via Nginx, backend continua na porta 8080
-- **CORS**: Backend está configurado para aceitar requisições de qualquer origem
-- **Hot Reload**: Disponível apenas em desenvolvimento (Vite dev server)
+- **Development**: Frontend and backend run separately on different ports
+- **Production**: Frontend is served via Nginx, backend stays on port 8080
+- **CORS**: Backend is configured to accept requests from any origin
+- **Hot Reload**: Available only in development (Vite dev server)

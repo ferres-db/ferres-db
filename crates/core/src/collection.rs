@@ -385,6 +385,7 @@ impl Collection {
     ///     bm25_text_field: "text".to_string(),
     ///     quantization: Default::default(),
     ///     tiered_storage: Default::default(),
+    ///     retention_days: None,
     /// });
     ///
     /// let point = Point::new("p1", vec![1.0, 2.0, 3.0], serde_json::json!(null))?;
@@ -445,6 +446,7 @@ impl Collection {
     ///     bm25_text_field: "text".to_string(),
     ///     quantization: Default::default(),
     ///     tiered_storage: Default::default(),
+    ///     retention_days: None,
     /// });
     ///
     /// let points = vec![
@@ -597,6 +599,7 @@ impl Collection {
     ///     bm25_text_field: "text".to_string(),
     ///     quantization: Default::default(),
     ///     tiered_storage: Default::default(),
+    ///     retention_days: None,
     /// });
     ///
     /// collection.insert(Point::new("p1", vec![1.0, 0.0, 0.0], serde_json::json!(null))?)?;
