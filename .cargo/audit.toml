@@ -1,0 +1,38 @@
+# cargo-audit configuration — advisories that cannot be resolved and are
+# explicitly accepted. Each entry must include a justification comment.
+
+[advisories]
+ignore = [
+    # rustls-webpki 0.101.7 — locked inside aws-smithy-http-client 1.x which
+    # still bundles rustls 0.21 for its legacy HTTP/1 path. No compatible
+    # aws-smithy-http-client version drops the 0.21 dependency yet.
+    # Risk: TLS cert validation edge-cases; only affects outbound AWS S3 calls.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+
+    # lru 0.13 — IterMut UB under Stacked Borrows. No patched release exists.
+    # We never call IterMut on our LRU cache (read-through only).
+    "RUSTSEC-2026-0002",
+
+    # rand 0.8 / 0.9 — soundness issue only triggered when a custom global
+    # logger is installed before the first rand::rng() call. All affected
+    # versions are impacted and there is no fixed release; the rand team
+    # recommends avoiding custom loggers in the same process, which we do.
+    "RUSTSEC-2026-0097",
+
+    # bincode 1.x — unmaintained upstream. Used by hnsw_rs (indirect) and
+    # our WAL/snapshot serialisation. Migration to bincode 2 / postcard
+    # requires a format-breaking data migration and is tracked separately.
+    "RUSTSEC-2025-0141",
+
+    # number_prefix — unmaintained; transitive through indicatif used only in
+    # ferres-bench (not production). indicatif 0.18+ drops it but requires
+    # Rust 1.70+ which the benchmark crate doesn't need to support.
+    "RUSTSEC-2025-0119",
+
+    # paste — unmaintained; transitive through pulp (SIMD math library).
+    # No alternative for pulp's internal macro usage; awaiting upstream update.
+    "RUSTSEC-2024-0436",
+
+]

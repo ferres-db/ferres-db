@@ -58,6 +58,7 @@ jobs:
       packages: write
       id-token: write # para cosign
       attestations: write # para SBOM/provenance
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
