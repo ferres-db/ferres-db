@@ -336,6 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ingest(
     client: FerresDbClient,
     http_client: &reqwest::Client,
@@ -379,8 +380,8 @@ async fn run_ingest(
         }
     }
 
-    let total_batches = (total_vectors as usize + BATCH_SIZE - 1) / BATCH_SIZE;
-    let batches_per_worker = (total_batches + concurrency - 1) / concurrency;
+    let total_batches = (total_vectors as usize).div_ceil(BATCH_SIZE);
+    let batches_per_worker = total_batches.div_ceil(concurrency);
 
     let mp = MultiProgress::new();
     let pb = mp.add(ProgressBar::new(total_vectors as u64));
@@ -461,8 +462,8 @@ async fn run_ingest(
             let _ = h.await;
         }
     } else {
-        let total_batches = (total_vectors as usize + BATCH_SIZE - 1) / BATCH_SIZE;
-        let batches_per_worker = (total_batches + concurrency - 1) / concurrency;
+        let total_batches = (total_vectors as usize).div_ceil(BATCH_SIZE);
+        let batches_per_worker = total_batches.div_ceil(concurrency);
         let mut handles = Vec::with_capacity(concurrency);
         for w in 0..concurrency {
             let client = client.clone();
@@ -532,6 +533,7 @@ async fn run_ingest(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_search(
     client: FerresDbClient,
     url: &str,

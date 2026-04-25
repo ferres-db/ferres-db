@@ -46,6 +46,7 @@ fn wal_entry_to_proto(entry: WalEntry) -> WalEntryMessage {
             })
         }
         WalOperation::Delete { id } => Operation::Delete(WalDelete { id }),
+        WalOperation::Link { from, to } => Operation::Link(WalLink { from, to }),
     };
     WalEntryMessage {
         timestamp: entry.timestamp,
@@ -146,6 +147,7 @@ impl FerresDb for FerresGrpcService {
             bm25_text_field,
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
 
         let created_at = std::time::SystemTime::now()

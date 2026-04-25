@@ -119,6 +119,7 @@ async fn replicate_collection(
             bm25_text_field: "text".to_string(),
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
         let collection = Collection::new(config.clone());
         let collection_dir = state
