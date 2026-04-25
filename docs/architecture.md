@@ -1,18 +1,18 @@
-# Arquitetura — Visão Geral
+# Architecture — Overview
 
-Documento de entrada para a arquitetura do FerresDB Core. Para detalhes de componentes, fluxos e decisões, veja [architecture.md](architecture.md).
+Entry document for the FerresDB Core architecture. For component details, flows and decisions, see [architecture.md](architecture.md).
 
-## Diagrama de Componentes
+## Component Diagram
 
 ```mermaid
 flowchart TB
-  subgraph clients [Clientes]
+  subgraph clients [Clients]
     CLI[CLI]
-    RAG[RAG / Ingestão]
-    HTTP[Clientes HTTP]
+    RAG[RAG / Ingestion]
+    HTTP[HTTP Clients]
   end
 
-  subgraph server [Servidor HTTP - crates/server]
+  subgraph server [HTTP Server - crates/server]
     API[REST API]
     Handlers[Handlers]
     State[AppState]
@@ -45,19 +45,19 @@ flowchart TB
   State --> VectorDB
 ```
 
-## Camadas
+## Layers
 
-| Camada   | Crates     | Responsabilidade                         |
-| -------- | ---------- | ---------------------------------------- |
-| **API**  | `server`   | REST (Axum), handlers, métricas, health  |
-| **Core** | `core`     | VectorDB, Collection, HNSW, Storage, WAL |
-| **SDK**  | `sdk-rust` | Cliente Rust (HTTP, busca híbrida)       |
+| Layer    | Crates     | Responsibility                            |
+| -------- | ---------- | ----------------------------------------- |
+| **API**  | `server`   | REST (Axum), handlers, metrics, health    |
+| **Core** | `core`     | VectorDB, Collection, HNSW, Storage, WAL  |
+| **SDK**  | `sdk-rust` | Rust client (HTTP, hybrid search)         |
 
-## Fluxo High-Level
+## High-Level Flow
 
 ```mermaid
 sequenceDiagram
-  participant C as Cliente
+  participant C as Client
   participant API as REST API
   participant DB as VectorDB
   participant Col as Collection
@@ -69,7 +69,7 @@ sequenceDiagram
   DB->>Disk: WAL append
   DB->>Col: insert()
   Col->>HNSW: add_point()
-  DB->>Disk: save (snapshot se threshold)
+  DB->>Disk: save (snapshot if threshold)
   API-->>C: 200 OK
 
   C->>API: POST /collections/:name/search
@@ -81,27 +81,27 @@ sequenceDiagram
   API-->>C: JSON results
 ```
 
-## Documentação Detalhada
+## Detailed Documentation
 
-- **[architecture.md](architecture.md)** — Componentes (Point, Collection, ANNIndex, Storage), fluxos (Insert, Search, Delete, Load), decisões de design, thread-safety, performance e extensibilidade.
-- **[api.md](api.md)** — Referência dos endpoints REST.
-- **[ADR/](ADR/)** — Architecture Decision Records (decisões em arquivos numerados).
+- **[architecture.md](architecture.md)** — Components (Point, Collection, ANNIndex, Storage), flows (Insert, Search, Delete, Load), design decisions, thread-safety, performance and extensibility.
+- **[api.md](api.md)** — REST endpoint reference.
+- **[ADR/](ADR/)** — Architecture Decision Records (decisions in numbered files).
 
-## Estrutura do Repositório
+## Repository Structure
 
 ```
 ferres-db-core/
 ├── crates/
-│   ├── core/       # Motor: VectorDB, Collection, HNSW, Storage, WAL, BM25
-│   ├── server/     # Servidor HTTP (Axum), handlers, métricas
-│   └── sdk-rust/   # SDK Rust (cliente HTTP)
+│   ├── core/       # Engine: VectorDB, Collection, HNSW, Storage, WAL, BM25
+│   ├── server/     # HTTP server (Axum), handlers, metrics
+│   └── sdk-rust/   # Rust SDK (HTTP client)
 ├── docs/
-│   ├── ARCHITECTURE.md   # Este arquivo (visão + diagramas)
-│   ├── architecture.md  # Documentação detalhada
+│   ├── ARCHITECTURE.md   # This file (overview + diagrams)
+│   ├── architecture.md  # Detailed documentation
 │   ├── ADR/              # Decision records
 │   ├── api.md
 │   └── sdk.md
-├── examples/       # Ingestão, simple_rag
+├── examples/       # Ingestion, simple_rag
 ├── tests/          # E2E, fixtures
-└── CONTRIBUTING.md # Guia de contribuição
+└── CONTRIBUTING.md # Contribution guide
 ```

@@ -1,163 +1,163 @@
-# Roteiro de teste com usuários
+# User Testing Script
 
-Roteiro para validação do sistema de busca em documentação interna com usuários reais.
-
----
-
-## 1. Pré-teste
-
-### 1.1 Setup do ambiente
-
-- [ ] **Acesso ao servidor**
-  - URL do servidor (ex.: `http://localhost:8080` ou ambiente de homologação)
-  - Navegador recomendado: Chrome ou Firefox (última versão)
-- [ ] **Credenciais** (se aplicável)
-  - Login/senha ou token de acesso (fornecer antes da sessão)
-  - Instruções de primeiro acesso (ex.: reset de senha)
-- [ ] **Checklist técnico**
-  - Servidor rodando e acessível
-  - Dashboard e endpoint de busca respondendo
-  - Coleção de documentos indexada e disponível para busca
-
-### 1.2 Escopo explicado ao participante
-
-> **O que vamos testar:** um **sistema de busca em documentação interna**.  
-> Você poderá fazer perguntas em linguagem natural e o sistema retornará trechos relevantes dos nossos documentos (README, API, arquitetura, exemplos, etc.).  
-> O objetivo é avaliar se as respostas ajudam no dia a dia e onde o sistema pode melhorar.
-
-### 1.3 Duração
-
-- **Tempo total sugerido:** 2–3 horas de uso real
-- **Estrutura:** ~30 min de tarefas guiadas + 1–2 h de uso livre + ~15 min de entrevista/feedback
+Script for validating the internal documentation search system with real users.
 
 ---
 
-## 2. Tarefas guiadas (primeiros ~30 min)
+## 1. Pre-test
 
-Oriente o participante: _“Nas próximas tarefas, use o sistema de busca como faria no trabalho. Não há resposta certa ou errada; queremos ver como você usa e o que encontra.”_
+### 1.1 Environment setup
 
-### Tarefa 1
+- [ ] **Server access**
+  - Server URL (e.g. `http://localhost:8080` or staging environment)
+  - Recommended browser: Chrome or Firefox (latest version)
+- [ ] **Credentials** (if applicable)
+  - Login/password or access token (provide before the session)
+  - First-access instructions (e.g. password reset)
+- [ ] **Technical checklist**
+  - Server running and accessible
+  - Dashboard and search endpoint responding
+  - Document collection indexed and available for search
 
-**Objetivo:** “Encontre como fazer deploy da aplicação.”
+### 1.2 Scope explained to the participant
 
-- O participante deve usar a busca para descobrir passos ou referências a deploy.
-- **Observar:** termos usados na query, se refinou a pergunta, se ficou satisfeito com o resultado.
+> **What we are testing:** an **internal documentation search system**.  
+> You will be able to ask questions in natural language and the system will return relevant excerpts from our documents (README, API, architecture, examples, etc.).  
+> The goal is to evaluate whether the responses help in day-to-day work and where the system can be improved.
 
-### Tarefa 2
+### 1.3 Duration
 
-**Objetivo:** “Descubra quais são as variáveis de ambiente necessárias.”
-
-- O participante deve localizar documentação sobre variáveis de ambiente (ex.: `.env`, configuração).
-- **Observar:** se encontrou lista ou referência clara, se precisou de mais de uma busca.
-
-### Tarefa 3
-
-**Objetivo:** “Ache informação sobre troubleshooting de erro X.”
-
-- Substitua _“erro X”_ por um erro real da base de docs (ex.: erro de conexão, timeout, falha na ingestão).
-- **Observar:** se a busca retornou algo útil para diagnóstico ou resolução.
-
-**Anotações do facilitador (durante as tarefas):**
-
-- Queries digitadas (ou screenshot)
-- Se completou a tarefa com sucesso / parcialmente / não
-- Comentários espontâneos do participante
+- **Suggested total time:** 2–3 hours of actual use
+- **Structure:** ~30 min of guided tasks + 1–2 h of free use + ~15 min interview/feedback
 
 ---
 
-## 3. Uso livre (1–2 h)
+## 2. Guided tasks (first ~30 min)
 
-- **Instrução ao participante:**  
-  _“Use o sistema para suas dúvidas reais do dia a dia, como faria com a documentação. Pode ser sobre deploy, API, exemplos, configuração, erros, etc.”_
+Guide the participant: _"In the following tasks, use the search system as you would at work. There is no right or wrong answer; we want to see how you use it and what you find."_
 
-- **Auto-registro (participante):**
-  - Para cada dúvida/pergunta que fizer:
-    - **Resposta útil** → anotar brevemente o que ajudou
-    - **Resposta não útil** → anotar o que faltou ou o que estava errado/confuso
+### Task 1
 
-- **Formato sugerido para anotação:**
+**Goal:** "Find out how to deploy the application."
 
-  | Pergunta que fiz | Útil? (sim/não) | Observação breve |
-  | ---------------- | --------------- | ---------------- |
-  | ...              | ...             | ...              |
+- The participant should use the search to discover steps or references to deployment.
+- **Observe:** terms used in the query, whether they refined the question, whether they were satisfied with the result.
 
-- O facilitador pode acompanhar em tempo real (compartilhamento de tela) ou combinar envio de anotações ao final.
+### Task 2
 
----
+**Goal:** "Find out what environment variables are required."
 
-## 4. Coleta de feedback
+- The participant should locate documentation about environment variables (e.g. `.env`, configuration).
+- **Observe:** whether they found a clear list or reference, whether they needed more than one search.
 
-### 4.1 Formulário estruturado (ex.: Google Forms)
+### Task 3
 
-**Bloco 1 – Escalas (1–5)**
+**Goal:** "Find information about troubleshooting error X."
 
-- **Facilidade de uso**  
-  “Quão fácil foi usar o sistema de busca?”  
-  (1 = Muito difícil … 5 = Muito fácil)
+- Replace _"error X"_ with a real error from the docs base (e.g. connection error, timeout, ingestion failure).
+- **Observe:** whether the search returned something useful for diagnosis or resolution.
 
-- **Qualidade das respostas**  
-  “Quão satisfeito você ficou com a qualidade das respostas?”  
-  (1 = Muito insatisfeito … 5 = Muito satisfeito)
+**Facilitator notes (during tasks):**
 
-- **Velocidade**  
-  “Quão adequada foi a velocidade de resposta do sistema?”  
-  (1 = Muito lenta … 5 = Muito rápida)
-
-**Bloco 2 – Perguntas abertas**
-
-- **O que funcionou bem?**  
-  (texto livre)
-
-- **O que não funcionou?**  
-  (texto livre)
-
-- **O que você esperava que tivesse mas não tem?**  
-  (texto livre)
-
-**Sugestão:** enviar o link do formulário logo após a sessão (ou preencher junto na entrevista).
+- Queries typed (or screenshot)
+- Whether the task was completed successfully / partially / not at all
+- Participant's spontaneous comments
 
 ---
 
-### 4.2 Entrevista curta (~15 min)
+## 3. Free use (1–2 h)
 
-- **Formato:** remota com compartilhamento de tela (ou presencial com um dispositivo do participante).
-- **Foco:** observar uso real e aprofundar em falhas e expectativas.
+- **Instruction to participant:**  
+  _"Use the system for your real day-to-day questions, as you would with documentation. It can be about deployment, API, examples, configuration, errors, etc."_
 
-**Roteiro sugerido:**
+- **Self-registration (participant):**
+  - For each question/query they make:
+    - **Useful response** → briefly note what helped
+    - **Not useful response** → note what was missing or what was wrong/confusing
 
-1. **Uso real (5 min)**
-   - “Mostre como você usaria o sistema para uma dúvida que você teve esta semana.”
-   - Observar: termos da busca, como interpreta os resultados, se desiste ou refina.
+- **Suggested annotation format:**
 
-2. **Queries que falharam (5 min)**
-   - “Teve alguma pergunta em que o sistema não ajudou ou deu resposta estranha? Pode mostrar ou descrever.”
-   - Anotar: query exata (ou aproximada), o que o sistema retornou, o que o participante esperava.
+  | Question asked | Useful? (yes/no) | Brief observation |
+  | -------------- | ---------------- | ----------------- |
+  | ...            | ...              | ...               |
 
-3. **Fechamento (5 min)**
-   - “Se você pudesse pedir uma melhoria, qual seria a primeira?”
-   - “Alguma coisa que gostaria de acrescentar sobre a experiência?”
-
-**Checklist do facilitador:**
-
-- [ ] Gravação/consentimento (se aplicável)
-- [ ] Anotações ou transcrição das queries problemáticas
-- [ ] Resumo: 3 pontos positivos e 3 pontos a melhorar
+- The facilitator can follow in real time (screen sharing) or arrange to receive notes at the end.
 
 ---
 
-## Resumo da sessão (template)
+## 4. Feedback collection
 
-| Item                               | Preenchimento       |
-| ---------------------------------- | ------------------- |
-| Data                               |                     |
-| Participante (ou perfil)           |                     |
-| Duração real                       |                     |
-| Tarefas 1–3: concluídas?           | Sim / Parcial / Não |
-| Nº de buscas no uso livre (aprox.) |                     |
-| Principais queixas                 |                     |
-| Principais elogios                 |                     |
-| Próximos passos (melhorias)        |                     |
+### 4.1 Structured form (e.g. Google Forms)
+
+**Block 1 – Scales (1–5)**
+
+- **Ease of use**  
+  "How easy was it to use the search system?"  
+  (1 = Very difficult … 5 = Very easy)
+
+- **Response quality**  
+  "How satisfied were you with the quality of the responses?"  
+  (1 = Very unsatisfied … 5 = Very satisfied)
+
+- **Speed**  
+  "How adequate was the system's response speed?"  
+  (1 = Very slow … 5 = Very fast)
+
+**Block 2 – Open questions**
+
+- **What worked well?**  
+  (free text)
+
+- **What didn't work?**  
+  (free text)
+
+- **What did you expect to be there but wasn't?**  
+  (free text)
+
+**Suggestion:** send the form link right after the session (or fill it in together during the interview).
 
 ---
 
-_Documento de apoio ao teste com usuários do sistema de busca em documentação interna (ferres-db-core)._
+### 4.2 Short interview (~15 min)
+
+- **Format:** remote with screen sharing (or in-person with the participant's device).
+- **Focus:** observe real usage and dig deeper into failures and expectations.
+
+**Suggested script:**
+
+1. **Real use (5 min)**
+   - "Show me how you would use the system for a question you had this week."
+   - Observe: search terms, how they interpret the results, whether they give up or refine.
+
+2. **Failed queries (5 min)**
+   - "Was there any question where the system didn't help or gave a strange response? Can you show or describe it?"
+   - Note: exact (or approximate) query, what the system returned, what the participant expected.
+
+3. **Closing (5 min)**
+   - "If you could request one improvement, what would it be?"
+   - "Is there anything you'd like to add about the experience?"
+
+**Facilitator checklist:**
+
+- [ ] Recording/consent (if applicable)
+- [ ] Notes or transcript of problematic queries
+- [ ] Summary: 3 positive points and 3 points for improvement
+
+---
+
+## Session summary (template)
+
+| Item                                  | Entry               |
+| ------------------------------------- | ------------------- |
+| Date                                  |                     |
+| Participant (or profile)              |                     |
+| Actual duration                       |                     |
+| Tasks 1–3: completed?                 | Yes / Partial / No  |
+| Number of searches in free use (approx.) |                  |
+| Main complaints                       |                     |
+| Main praise                           |                     |
+| Next steps (improvements)             |                     |
+
+---
+
+_Supporting document for user testing of the internal documentation search system (ferres-db-core)._

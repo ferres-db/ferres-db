@@ -1,41 +1,41 @@
-# Referência da API HTTP — FerresDB
+# HTTP API Reference — FerresDB
 
-Referência dos endpoints REST do servidor FerresDB. Base URL de exemplo: `http://localhost:8080`.
+Reference for REST endpoints of the FerresDB server. Example base URL: `http://localhost:8080`.
 
-## Requisitos de CPU para performance máxima
+## CPU Requirements for Maximum Performance
 
-Para melhor throughput em buscas vetoriais, o servidor utiliza kernels SIMD quando disponíveis. Recomenda-se CPU com suporte a **AVX2** ou, na falta, **SSE4.1**, para performance máxima nas operações de distância (Euclidean, DotProduct, Cosine) e no re-ranking com quantização SQ8. Em CPUs sem essas instruções, o código usa implementação escalar (comportamento correto, com performance menor). A detecção é automática em tempo de execução; não é necessária configuração.
+For best throughput in vector searches, the server uses SIMD kernels when available. A CPU with **AVX2** support, or at least **SSE4.1**, is recommended for maximum performance on distance operations (Euclidean, DotProduct, Cosine) and in SQ8 quantization re-ranking. On CPUs without these instructions, the code uses a scalar implementation (correct behavior, with lower performance). Detection is automatic at runtime; no configuration is required.
 
-**Nota técnica (hardware):** Os kernels de distância (`euclidean_distance`, `dot_product`) e a distância assimétrica para SQ8 são acelerados por instruções **AVX2** (vetores de 8 floats) ou **SSE4.1** (4 floats), com fallback escalar automático. Para performance máxima em produção, utilize processadores que suportem pelo menos AVX2 (Intel Haswell ou posterior, AMD Excavator/Zen ou posterior). Em ambientes sem essas extensões (por exemplo, alguns VMs ou CPUs antigas), o comportamento permanece correto com throughput reduzido.
+**Technical note (hardware):** Distance kernels (`euclidean_distance`, `dot_product`) and asymmetric distance for SQ8 are accelerated by **AVX2** instructions (8-float vectors) or **SSE4.1** (4 floats), with automatic scalar fallback. For maximum performance in production, use processors that support at least AVX2 (Intel Haswell or later, AMD Excavator/Zen or later). In environments without these extensions (e.g. some VMs or older CPUs), behavior remains correct with reduced throughput.
 
-**Quantização de vetores:** O FerresDB suporta duas estratégias de compressão de vetores para redução de memória (~4× menos que `f32`):
+**Vector quantization:** FerresDB supports two vector compression strategies for memory reduction (~4× less than `f32`):
 
-- **SQ8** (`Scalar`): mapeia cada dimensão `f32 → u8` via calibração percentílica por bloco. Requer uma etapa de calibração sobre os dados existentes.
-- **PolarQuant** (`Polar`): converte pares de coordenadas cartesianas em `(raio, ângulo)` recursivamente. Os ângulos são sempre em `[0, 2π]` — não há parâmetros de calibração por bloco. Configurável via `bits_per_angle` (default: 8).
+- **SQ8** (`Scalar`): maps each `f32` dimension → `u8` via percentile calibration per block. Requires a calibration step on existing data.
+- **PolarQuant** (`Polar`): converts pairs of Cartesian coordinates into `(radius, angle)` recursively. Angles are always in `[0, 2π]` — no per-block calibration parameters. Configurable via `bits_per_angle` (default: 8).
 
 ---
 
-## Convenções
+## Conventions
 
-- **Content-Type:** `application/json` para requests com body.
-- **Autenticação:** Rotas protegidas aceitam API key no header `Authorization: Bearer <api-key>` (ver seção de API Keys e auth). A ferramenta oficial de benchmark (`ferres-bench`) suporta `--api-key` e env `FERRESDB_API_KEY`; ver [benchmark.md](benchmark.md).
-- **Erros:** Respostas de erro usam o schema abaixo e o status HTTP apropriado.
+- **Content-Type:** `application/json` for requests with body.
+- **Authentication:** Protected routes accept API key in the `Authorization: Bearer <api-key>` header (see API Keys and auth section). The official benchmark tool (`ferres-bench`) supports `--api-key` and env `FERRESDB_API_KEY`; see [benchmark.md](benchmark.md).
+- **Errors:** Error responses use the schema below and the appropriate HTTP status.
 
-### Schema de erro
+### Error schema
 
 ```json
 {
-  "error": "string (tipo do erro)",
-  "message": "string (descrição)",
+  "error": "string (error type)",
+  "message": "string (description)",
   "code": 400
 }
 ```
 
-| Campo     | Tipo   | Descrição                                                                                                                                                                      |
-| --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `error`   | string | Tipo: `collection_not_found`, `collection_already_exists`, `invalid_payload`, `invalid_dimension`, `internal_error`, `query_profile_not_found`, `method_not_allowed` (réplica) |
-| `message` | string | Mensagem legível                                                                                                                                                               |
-| `code`    | number | Código HTTP (400, 404, 409, 500)                                                                                                                                               |
+| Field     | Type   | Description                                                                                                                                                                     |
+| --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `error`   | string | Type: `collection_not_found`, `collection_already_exists`, `invalid_payload`, `invalid_dimension`, `internal_error`, `query_profile_not_found`, `method_not_allowed` (replica) |
+| `message` | string | Human-readable message                                                                                                                                                          |
+| `code`    | number | HTTP code (400, 404, 409, 500)                                                                                                                                                  |
 
 ---
 
@@ -43,11 +43,11 @@ Para melhor throughput em buscas vetoriais, o servidor utiliza kernels SIMD quan
 
 ### GET /health
 
-Verifica se o servidor está em execução.
+Checks whether the server is running.
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -55,7 +55,7 @@ Verifica se o servidor está em execução.
 }
 ```
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s http://localhost:8080/health
@@ -63,15 +63,15 @@ curl -s http://localhost:8080/health
 
 ---
 
-## Métricas (Prometheus)
+## Metrics (Prometheus)
 
 ### GET /metrics
 
-Retorna métricas no formato Prometheus (text/plain).
+Returns metrics in Prometheus format (text/plain).
 
-**Resposta:** `200 OK` (corpo em texto)
+**Response:** `200 OK` (text body)
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s http://localhost:8080/metrics
@@ -79,17 +79,17 @@ curl -s http://localhost:8080/metrics
 
 ---
 
-## Persistência
+## Persistence
 
 ### POST /api/v1/save
 
-Persiste todas as coleções no disco. Útil antes de reiniciar o servidor ou em testes de persistência.
+Persists all collections to disk. Useful before restarting the server or in persistence tests.
 
-**Request:** Sem body (ou `{}`).
+**Request:** No body (or `{}`).
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -97,34 +97,34 @@ Persiste todas as coleções no disco. Útil antes de reiniciar o servidor ou em
 }
 ```
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/save
 ```
 
-### Parâmetros de configuração de storage
+### Storage configuration parameters
 
-O servidor e o core suportam opções para reduzir uso de disco e tempo de carregamento:
+The server and core support options to reduce disk usage and load time:
 
-| Parâmetro                      | Tipo    | Default | Descrição                                                                                                                                                                                                                                  |
-| ------------------------------ | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `wal_compression`              | boolean | false   | Comprime o Write-Ahead Log (wal.log) com Zstd. Reduz o tamanho do WAL em disco. Ativo quando o servidor usa VectorDB com WAL.                                                                                                              |
-| `binary_snapshot`              | boolean | false   | Grava snapshots de pontos em formato binário (points.bin com bincode) em vez de JSONL (points.jsonl). Reduz tamanho dos ficheiros e acelera o carregamento. O carregamento detecta automaticamente o formato (points.bin ou points.jsonl). |
-| `namespace_physical_isolation` | boolean | false   | Isolamento físico por namespace: pontos com `namespace` são gravados em `data/collections/<name>/namespaces/<namespace>/points.bin`. Permite snapshot e limpeza por tenant sem afetar outros.                                              |
+| Parameter                      | Type    | Default | Description                                                                                                                                                                                                                                       |
+| ------------------------------ | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wal_compression`              | boolean | false   | Compresses the Write-Ahead Log (wal.log) with Zstd. Reduces WAL size on disk. Active when the server uses VectorDB with WAL.                                                                                                                     |
+| `binary_snapshot`              | boolean | false   | Writes point snapshots in binary format (points.bin with bincode) instead of JSONL (points.jsonl). Reduces file size and speeds up loading. Loading automatically detects the format (points.bin or points.jsonl).                               |
+| `namespace_physical_isolation` | boolean | false   | Physical isolation per namespace: points with `namespace` are written to `data/collections/<name>/namespaces/<namespace>/points.bin`. Allows snapshot and cleanup per tenant without affecting others.                                            |
 
-**Layout de diretórios com isolamento físico por namespace**
+**Directory layout with physical namespace isolation**
 
-Quando `namespace_physical_isolation` está ativo:
+When `namespace_physical_isolation` is active:
 
-- Pontos **sem** namespace: `data/collections/<collection_name>/points.bin` (ou `points.jsonl`) e `index.bin`.
-- Pontos **com** namespace: `data/collections/<collection_name>/namespaces/<namespace_name>/points.bin` (e opcionalmente `index.bin`, `checksum.md5`).
+- Points **without** namespace: `data/collections/<collection_name>/points.bin` (or `points.jsonl`) and `index.bin`.
+- Points **with** namespace: `data/collections/<collection_name>/namespaces/<namespace_name>/points.bin` (and optionally `index.bin`, `checksum.md5`).
 
-O carregamento detecta a existência de `namespaces/` e carrega pontos de cada subdiretório, reconstruindo o índice a partir do conjunto unificado. Isto permite operações de snapshot por namespace (copiar/eliminar apenas `data/collections/<name>/namespaces/<tenant_id>/`) e limpeza física de um tenant sem afetar outros.
+Loading detects the existence of `namespaces/` and loads points from each subdirectory, rebuilding the index from the unified set. This allows per-namespace snapshot operations (copy/delete only `data/collections/<name>/namespaces/<tenant_id>/`) and physical data cleanup for one tenant without affecting others.
 
-**Configuração no servidor**
+**Server configuration**
 
-- **Ficheiro config.toml** (na raiz do projeto ou em `../`, `../../`):
+- **config.toml file** (at project root or in `../`, `../../`):
 
 ```toml
 wal_compression = false
@@ -132,24 +132,24 @@ binary_snapshot = true
 namespace_physical_isolation = false
 ```
 
-- **Variáveis de ambiente** (sobrescrevem o TOML):
-  - `FERRESDB_WAL_COMPRESSION` — `true` ou `1` para ativar compressão WAL.
-  - `FERRESDB_BINARY_SNAPSHOT` — `true` ou `1` para ativar snapshots binários.
-  - `FERRESDB_NAMESPACE_PHYSICAL_ISOLATION` — `true` ou `1` para ativar isolamento físico por namespace (multitenancy).
+- **Environment variables** (override TOML):
+  - `FERRESDB_WAL_COMPRESSION` — `true` or `1` to enable WAL compression.
+  - `FERRESDB_BINARY_SNAPSHOT` — `true` or `1` to enable binary snapshots.
+  - `FERRESDB_NAMESPACE_PHYSICAL_ISOLATION` — `true` or `1` to enable physical namespace isolation (multitenancy).
 
-**Uso no core (VectorDB)**
+**Usage in core (VectorDB)**
 
-Use `VectorDB::with_storage_options(path, options)` com `StorageOptions { wal_compression: true, binary_snapshot: true, namespace_physical_isolation: true }` conforme necessário ao usar o core diretamente.
+Use `VectorDB::with_storage_options(path, options)` with `StorageOptions { wal_compression: true, binary_snapshot: true, namespace_physical_isolation: true }` as needed when using core directly.
 
 ### POST /api/v1/admin/backup
 
-Gera um snapshot binário (tar.gz) de todo o diretório de storage (coleções, API keys, usuários; exclui `logs`) e envia para o bucket S3 configurado. Requer autenticação e **role Admin**.
+Generates a binary snapshot (tar.gz) of the entire storage directory (collections, API keys, users; excludes `logs`) and uploads it to the configured S3 bucket. Requires authentication and **Admin role**.
 
-**Request:** Sem body (ou `{}`).
+**Request:** No body (or `{}`).
 
-**Resposta:** `200 OK` em sucesso.
+**Response:** `200 OK` on success.
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -161,66 +161,66 @@ Gera um snapshot binário (tar.gz) de todo o diretório de storage (coleções, 
 }
 ```
 
-| Campo        | Tipo    | Descrição                    |
-| ------------ | ------- | ---------------------------- |
-| `ok`         | boolean | Sempre `true` em sucesso.    |
-| `key`        | string  | Chave do objeto no S3.       |
-| `bucket`     | string  | Nome do bucket.              |
-| `size_bytes` | number  | Tamanho do archive em bytes. |
-| `region`     | string  | Região AWS usada (opcional). |
+| Field        | Type    | Description                    |
+| ------------ | ------- | ------------------------------ |
+| `ok`         | boolean | Always `true` on success.      |
+| `key`        | string  | Object key in S3.              |
+| `bucket`     | string  | Bucket name.                   |
+| `size_bytes` | number  | Archive size in bytes.         |
+| `region`     | string  | AWS region used (optional).    |
 
-**Erros:** `503` se S3 não estiver configurado (`s3_region`/`s3_bucket`); `502` se o upload para S3 falhar; `500` se a criação do archive ou o save das coleções falhar.
+**Errors:** `503` if S3 is not configured (`s3_region`/`s3_bucket`); `502` if S3 upload fails; `500` if archive creation or collection save fails.
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST -H "Authorization: Bearer YOUR_JWT_OR_API_KEY" http://localhost:8080/api/v1/admin/backup
 ```
 
-### Configuração S3 (backup para a cloud)
+### S3 Configuration (cloud backup)
 
-| Parâmetro              | Tipo   | Default | Descrição                                                                                                   |
-| ---------------------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `s3_region`            | string | —       | Região AWS (ex: `us-east-1`). Env: `FERRESDB_S3_REGION` ou `AWS_REGION`.                                    |
-| `s3_bucket`            | string | —       | Nome do bucket S3. Env: `FERRESDB_S3_BUCKET`.                                                               |
-| `s3_access_key_id`     | string | —       | Access Key ID (opcional; pode usar variáveis AWS). Env: `FERRESDB_S3_ACCESS_KEY_ID` ou `AWS_ACCESS_KEY_ID`. |
-| `s3_secret_access_key` | string | —       | Secret Access Key (opcional). Env: `FERRESDB_S3_SECRET_ACCESS_KEY` ou `AWS_SECRET_ACCESS_KEY`.              |
+| Parameter              | Type   | Default | Description                                                                                                  |
+| ---------------------- | ------ | ------- | ------------------------------------------------------------------------------------------------------------ |
+| `s3_region`            | string | —       | AWS region (e.g. `us-east-1`). Env: `FERRESDB_S3_REGION` or `AWS_REGION`.                                   |
+| `s3_bucket`            | string | —       | S3 bucket name. Env: `FERRESDB_S3_BUCKET`.                                                                   |
+| `s3_access_key_id`     | string | —       | Access Key ID (optional; can use AWS variables). Env: `FERRESDB_S3_ACCESS_KEY_ID` or `AWS_ACCESS_KEY_ID`.    |
+| `s3_secret_access_key` | string | —       | Secret Access Key (optional). Env: `FERRESDB_S3_SECRET_ACCESS_KEY` or `AWS_SECRET_ACCESS_KEY`.               |
 
-**config.toml (opcional):**
+**config.toml (optional):**
 
 ```toml
 s3_region = "us-east-1"
 s3_bucket = "ferres-backups"
-# Credenciais: preferir variáveis de ambiente (FERRESDB_S3_ACCESS_KEY_ID, FERRESDB_S3_SECRET_ACCESS_KEY ou AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+# Credentials: prefer environment variables (FERRESDB_S3_ACCESS_KEY_ID, FERRESDB_S3_SECRET_ACCESS_KEY or AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
 ```
 
-As credenciais podem ser omitidas no ficheiro (recomendado) e definidas apenas por variáveis de ambiente ou pelo perfil AWS configurado no sistema.
+Credentials can be omitted from the file (recommended) and set only via environment variables or the system AWS profile.
 
-### Point-in-Time Recovery (PITR) e recuperação de desastres
+### Point-in-Time Recovery (PITR) and disaster recovery
 
-O FerresDB suporta **Point-in-Time Recovery (PITR)** usando o Write-Ahead Log (WAL) com timestamps. Cada entrada no WAL tem um timestamp Unix; ao gravar um snapshot, o servidor persiste o instante em `last_snapshot_timestamp` no diretório da coleção. Assim é possível restaurar uma coleção (ou todas) ao estado num momento passado.
+FerresDB supports **Point-in-Time Recovery (PITR)** using the Write-Ahead Log (WAL) with timestamps. Each WAL entry has a Unix timestamp; when saving a snapshot, the server persists the timestamp in `last_snapshot_timestamp` in the collection directory. This allows restoring a collection (or all of them) to the state at a past point in time.
 
-**Fluxo de PITR:**
+**PITR flow:**
 
-1. Carregar o último snapshot em disco (estado no momento do último `save`).
-2. Ler as entradas do `wal.log` e reaplicar apenas as que têm `timestamp > last_snapshot_timestamp` e `timestamp <= target_timestamp`.
-3. Substituir a coleção em memória pelo estado resultante, persistir no disco e truncar o WAL.
+1. Load the last snapshot on disk (state at the time of the last `save`).
+2. Read `wal.log` entries and replay only those with `timestamp > last_snapshot_timestamp` and `timestamp <= target_timestamp`.
+3. Replace the in-memory collection with the resulting state, persist to disk and truncate the WAL.
 
-**Quando usar:** Após um erro humano (ex.: delete em massa), corrupção parcial ou para auditar o estado num instante passado. Recomenda-se combinar com backups regulares (ex.: `POST /api/v1/admin/backup` para S3) para recuperação de desastres que afetem o disco inteiro.
+**When to use:** After a human error (e.g. mass delete), partial corruption, or to audit the state at a past point in time. It is recommended to combine with regular backups (e.g. `POST /api/v1/admin/backup` to S3) for disaster recovery that affects the entire disk.
 
 #### GET /api/v1/admin/restore/points
 
-Lista os pontos de restauração disponíveis por coleção: timestamp do último snapshot e lista de timestamps das entradas no WAL. Requer autenticação e **role Admin**.
+Lists available restore points per collection: last snapshot timestamp and list of WAL entry timestamps. Requires authentication and **Admin role**.
 
-**Query params (opcionais):**
+**Query params (optional):**
 
-| Parâmetro    | Tipo   | Descrição                                  |
-| ------------ | ------ | ------------------------------------------ |
-| `collection` | string | Se presente, restringe à coleção indicada. |
+| Parameter    | Type   | Description                                  |
+| ------------ | ------ | -------------------------------------------- |
+| `collection` | string | If present, restricts to the indicated collection. |
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -233,9 +233,9 @@ Lista os pontos de restauração disponíveis por coleção: timestamp do últim
 }
 ```
 
-Use estes timestamps como alvo em `POST /api/v1/admin/restore`.
+Use these timestamps as the target in `POST /api/v1/admin/restore`.
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -H "Authorization: Bearer YOUR_ADMIN_KEY" "http://localhost:8080/api/v1/admin/restore/points"
@@ -244,16 +244,16 @@ curl -s -H "Authorization: Bearer YOUR_ADMIN_KEY" "http://localhost:8080/api/v1/
 
 #### POST /api/v1/admin/restore
 
-Restaura uma ou todas as coleções ao estado no timestamp dado (Point-in-Time Recovery). Requer autenticação e **role Admin**.
+Restores one or all collections to the state at the given timestamp (Point-in-Time Recovery). Requires authentication and **Admin role**.
 
 **Request body:**
 
-| Campo        | Tipo   | Obrigatório | Descrição                                                         |
-| ------------ | ------ | ----------- | ----------------------------------------------------------------- |
-| `timestamp`  | number | sim         | Timestamp Unix em segundos para o qual restaurar.                 |
-| `collection` | string | não         | Se presente, restaura apenas esta coleção; caso contrário, todas. |
+| Field        | Type   | Required | Description                                                              |
+| ------------ | ------ | -------- | ------------------------------------------------------------------------ |
+| `timestamp`  | number | yes      | Unix timestamp in seconds to restore to.                                 |
+| `collection` | string | no       | If present, restores only this collection; otherwise, restores all.      |
 
-**Schema de request:**
+**Request schema:**
 
 ```json
 {
@@ -262,9 +262,9 @@ Restaura uma ou todas as coleções ao estado no timestamp dado (Point-in-Time R
 }
 ```
 
-**Resposta:** `200 OK` (ou `422` se todas as restaurações falharem)
+**Response:** `200 OK` (or `422` if all restorations fail)
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -274,52 +274,52 @@ Restaura uma ou todas as coleções ao estado no timestamp dado (Point-in-Time R
 }
 ```
 
-| Campo      | Tipo     | Descrição                                            |
-| ---------- | -------- | ---------------------------------------------------- |
-| `ok`       | boolean  | `true` se não houve erros.                           |
-| `restored` | string[] | Nomes das coleções restauradas com sucesso.          |
-| `errors`   | string[] | Mensagens de erro por coleção (ex.: não encontrada). |
+| Field      | Type     | Description                                           |
+| ---------- | -------- | ----------------------------------------------------- |
+| `ok`       | boolean  | `true` if no errors occurred.                         |
+| `restored` | string[] | Names of successfully restored collections.           |
+| `errors`   | string[] | Error messages per collection (e.g. not found).       |
 
-Após a restauração, o estado em disco e em memória passa a ser o do momento `timestamp`; o WAL é truncado para refletir que não há operações pendentes após esse ponto.
+After restoration, the on-disk and in-memory state becomes the state at `timestamp`; the WAL is truncated to reflect that there are no pending operations after that point.
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
-# Restaurar apenas a coleção "docs" ao estado às 12:00 UTC do dia 2025-02-10
+# Restore only the "docs" collection to its state at 12:00 UTC on 2025-02-10
 curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer YOUR_ADMIN_KEY" \
   http://localhost:8080/api/v1/admin/restore \
   -d '{"timestamp":1739182800,"collection":"docs"}'
 
-# Restaurar todas as coleções a um momento
+# Restore all collections to a point in time
 curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer YOUR_ADMIN_KEY" \
   http://localhost:8080/api/v1/admin/restore \
   -d '{"timestamp":1739182800}'
 ```
 
-**Dashboard:** A aba **Snapshots & Recovery** permite visualizar os pontos de restauração por coleção e acionar uma restauração informando o timestamp (e opcionalmente a coleção).
+**Dashboard:** The **Snapshots & Recovery** tab allows viewing restore points per collection and triggering a restore by entering the timestamp (and optionally the collection).
 
 ---
 
-## Coleções
+## Collections
 
 ### POST /api/v1/collections
 
-Cria uma nova coleção.
+Creates a new collection.
 
 **Request body:**
 
-| Campo             | Tipo    | Obrigatório | Descrição                                                                                                                      |
-| ----------------- | ------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `name`            | string  | sim         | Nome único: apenas `a-zA-Z0-9_-`                                                                                               |
-| `dimension`       | number  | sim         | Dimensão dos vetores (1–4096)                                                                                                  |
-| `distance`        | string  | sim         | Métrica: `Cosine`, `Euclidean`, `DotProduct`                                                                                   |
-| `enable_bm25`     | boolean | não         | Habilita índice BM25 para busca híbrida (default: false)                                                                       |
-| `bm25_text_field` | string  | não         | Chave em metadata usada como texto para BM25 (default: `"text"`)                                                               |
-| `quantization`    | object  | não         | Compressão de vetores. `"None"` (padrão), `{"Scalar":{"dtype":"Int8"}}` (SQ8) ou `{"Polar":{"bits_per_angle":8}}` (PolarQuant) |
-| `tiered_storage`  | object  | não         | Configuração de tiered storage (ver seção Tiered Storage)                                                                      |
-| `retention_days`  | number  | não         | Retenção em dias (WAL e histórico); omitido ou null = sem limite                                                               |
+| Field             | Type    | Required | Description                                                                                                                      |
+| ----------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `name`            | string  | yes      | Unique name: only `a-zA-Z0-9_-`                                                                                                  |
+| `dimension`       | number  | yes      | Vector dimension (1–4096)                                                                                                        |
+| `distance`        | string  | yes      | Metric: `Cosine`, `Euclidean`, `DotProduct`                                                                                      |
+| `enable_bm25`     | boolean | no       | Enables BM25 index for hybrid search (default: false)                                                                            |
+| `bm25_text_field` | string  | no       | Metadata key used as text for BM25 (default: `"text"`)                                                                           |
+| `quantization`    | object  | no       | Vector compression. `"None"` (default), `{"Scalar":{"dtype":"Int8"}}` (SQ8) or `{"Polar":{"bits_per_angle":8}}` (PolarQuant)     |
+| `tiered_storage`  | object  | no       | Tiered storage configuration (see Tiered Storage section)                                                                        |
+| `retention_days`  | number  | no       | Retention in days (WAL and history); omitted or null = no limit                                                                  |
 
-**Schema de request:**
+**Request schema:**
 
 ```json
 {
@@ -332,22 +332,22 @@ Cria uma nova coleção.
 }
 ```
 
-**Exemplos de `quantization`:**
+**`quantization` examples:**
 
 ```json
-// Sem quantização (padrão)
+// No quantization (default)
 "quantization": "None"
 
-// Scalar Quantization SQ8 — comprime f32 → u8 por dimensão (~4× menos memória, requer calibração)
+// Scalar Quantization SQ8 — compresses f32 → u8 per dimension (~4× less memory, requires calibration)
 "quantization": {"Scalar": {"dtype": "Int8", "always_ram": false, "quantile": 99.5}}
 
-// PolarQuant — coordenadas polares recursivas (~4× menos memória, sem calibração por bloco)
+// PolarQuant — recursive polar coordinates (~4× less memory, no per-block calibration)
 "quantization": {"Polar": {"bits_per_angle": 8}}
 ```
 
-**Resposta:** `201 Created`
+**Response:** `201 Created`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -358,7 +358,7 @@ Cria uma nova coleção.
 }
 ```
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections \
@@ -370,17 +370,17 @@ curl -s -X POST http://localhost:8080/api/v1/collections \
 
 ### GET /api/v1/collections
 
-Lista todas as coleções. Opcionalmente restringe a coleções que possuem pelo menos um ponto no namespace indicado.
+Lists all collections. Optionally restricts to collections that have at least one point in the indicated namespace.
 
 **Query params:**
 
-| Param       | Tipo   | Descrição                                                                                            |
+| Param       | Type   | Description                                                                                          |
 | ----------- | ------ | ---------------------------------------------------------------------------------------------------- |
-| `namespace` | string | Quando definido, retorna apenas coleções que têm pelo menos um ponto neste namespace (multitenancy). |
+| `namespace` | string | When set, returns only collections that have at least one point in this namespace (multitenancy). |
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -396,9 +396,9 @@ Lista todas as coleções. Opcionalmente restringe a coleções que possuem pelo
 }
 ```
 
-O campo `retention_days` só aparece quando definido (número de dias) ou pode ser omitido quando não há limite.
+The `retention_days` field only appears when set (number of days) or can be omitted when there is no limit.
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections
@@ -409,13 +409,13 @@ curl -s "http://localhost:8080/api/v1/collections?namespace=tenant-a"
 
 ### GET /api/v1/collections/{name}
 
-Retorna detalhes de uma coleção.
+Returns details of a collection.
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -430,9 +430,9 @@ Retorna detalhes de uma coleção.
 }
 ```
 
-O campo `retention_days` é opcional (presente quando configurado; null ou omitido = sem limite).
+The `retention_days` field is optional (present when configured; null or omitted = no limit).
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections/docs
@@ -442,21 +442,21 @@ curl -s http://localhost:8080/api/v1/collections/docs
 
 ### PATCH /api/v1/collections/{name}
 
-Atualiza a configuração de retenção da coleção. Requer autenticação e permissão **Admin**.
+Updates the collection retention configuration. Requires authentication and **Admin** permission.
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Request body:**
 
-| Campo            | Tipo           | Descrição                                                   |
-| ---------------- | -------------- | ----------------------------------------------------------- |
-| `retention_days` | number ou null | Retenção em dias; null ou omitido = manter indefinidamente. |
+| Field            | Type           | Description                                                     |
+| ---------------- | -------------- | --------------------------------------------------------------- |
+| `retention_days` | number or null | Retention in days; null or omitted = keep indefinitely.         |
 
-**Resposta:** `204 No Content` (sem body)
+**Response:** `204 No Content` (no body)
 
-O worker de retenção compacta o WAL da coleção a cada hora, removendo entradas mais antigas que `retention_days` dias. A alteração é persistida em `config.json` no disco.
+The retention worker compacts the collection WAL every hour, removing entries older than `retention_days` days. The change is persisted in `config.json` on disk.
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X PATCH http://localhost:8080/api/v1/collections/docs \
@@ -469,13 +469,13 @@ curl -s -X PATCH http://localhost:8080/api/v1/collections/docs \
 
 ### DELETE /api/v1/collections/{name}
 
-Remove uma coleção e seus dados do disco.
+Removes a collection and its data from disk.
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
-**Resposta:** `204 No Content` (sem body)
+**Response:** `204 No Content` (no body)
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X DELETE http://localhost:8080/api/v1/collections/docs
@@ -485,13 +485,13 @@ curl -s -X DELETE http://localhost:8080/api/v1/collections/docs
 
 ### GET /api/v1/collections/{name}/tiers
 
-Retorna a distribuição de pontos por camada de armazenamento (Tiered Storage).
+Returns the point distribution per storage tier (Tiered Storage).
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -504,30 +504,30 @@ Retorna a distribuição de pontos por camada de armazenamento (Tiered Storage).
 }
 ```
 
-| Campo               | Tipo   | Descrição                                          |
-| ------------------- | ------ | -------------------------------------------------- |
-| `hot`               | number | Pontos na camada Hot (RAM, acesso instantâneo)     |
-| `warm`              | number | Pontos na camada Warm (mmap, acesso rápido)        |
-| `cold`              | number | Pontos na camada Cold (disco, carregado on-demand) |
-| `hot_memory_bytes`  | number | Memória estimada usada pela camada Hot (bytes)     |
-| `warm_memory_bytes` | number | Memória estimada usada pela camada Warm (bytes)    |
-| `cold_memory_bytes` | number | Memória estimada usada pela camada Cold (bytes)    |
+| Field               | Type   | Description                                           |
+| ------------------- | ------ | ----------------------------------------------------- |
+| `hot`               | number | Points in the Hot tier (RAM, instant access)          |
+| `warm`              | number | Points in the Warm tier (mmap, fast access)           |
+| `cold`              | number | Points in the Cold tier (disk, loaded on-demand)      |
+| `hot_memory_bytes`  | number | Estimated memory used by the Hot tier (bytes)         |
+| `warm_memory_bytes` | number | Estimated memory used by the Warm tier (bytes)        |
+| `cold_memory_bytes` | number | Estimated memory used by the Cold tier (bytes)        |
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections/docs/tiers \
   -H "Authorization: Bearer <api-key>"
 ```
 
-> **Nota:** Quando tiered storage não está habilitado na coleção, todos os pontos
-> são reportados na camada Hot. Habilite via `tiered_storage` na criação da coleção.
+> **Note:** When tiered storage is not enabled on the collection, all points
+> are reported in the Hot tier. Enable via `tiered_storage` at collection creation.
 
 ---
 
-### Tiered Storage (Configuração)
+### Tiered Storage (Configuration)
 
-O Tiered Storage é configurado via campo `tiered_storage` na criação da coleção:
+Tiered Storage is configured via the `tiered_storage` field at collection creation:
 
 ```json
 {
@@ -543,47 +543,47 @@ O Tiered Storage é configurado via campo `tiered_storage` na criação da cole�
 }
 ```
 
-| Campo                      | Tipo    | Default | Descrição                                                 |
-| -------------------------- | ------- | ------- | --------------------------------------------------------- |
-| `enabled`                  | boolean | false   | Habilita tiered storage                                   |
-| `hot_threshold_hours`      | number  | 24      | Pontos acessados nas últimas N horas ficam em Hot (RAM)   |
-| `warm_threshold_hours`     | number  | 168     | Pontos acessados nas últimas N horas ficam em Warm (mmap) |
-| `compaction_interval_secs` | number  | 3600    | Intervalo entre compactações automáticas (segundos)       |
+| Field                      | Type    | Default | Description                                                |
+| -------------------------- | ------- | ------- | ---------------------------------------------------------- |
+| `enabled`                  | boolean | false   | Enables tiered storage                                     |
+| `hot_threshold_hours`      | number  | 24      | Points accessed in the last N hours stay in Hot (RAM)      |
+| `warm_threshold_hours`     | number  | 168     | Points accessed in the last N hours stay in Warm (mmap)    |
+| `compaction_interval_secs` | number  | 3600    | Interval between automatic compactions (seconds)           |
 
-**Camadas:**
+**Tiers:**
 
-| Tier | Armazenamento             | Latência | Memória |
+| Tier | Storage                   | Latency  | Memory  |
 | ---- | ------------------------- | -------- | ------- |
-| Hot  | RAM completa              | ~0ms     | Alta    |
-| Warm | mmap (vetor) + RAM (meta) | ~1ms     | Média   |
-| Cold | Disco (on-demand)         | ~5-10ms  | Mínima  |
+| Hot  | Full RAM                  | ~0ms     | High    |
+| Warm | mmap (vector) + RAM (meta)| ~1ms     | Medium  |
+| Cold | Disk (on-demand)          | ~5–10ms  | Minimal |
 
-**Comportamento:**
+**Behavior:**
 
-- O grafo HNSW **sempre** permanece em memória (apenas dados dos pontos são tiered).
-- Qualquer acesso a um ponto Cold/Warm o promove automaticamente para Hot.
-- A compactação roda em background sem bloquear buscas.
-- Quando desabilitado (default), tudo fica em RAM como antes.
+- The HNSW graph **always** stays in memory — only point data is tiered.
+- Any access to a Cold/Warm point automatically promotes it to Hot.
+- Compaction runs in the background without blocking searches.
+- When disabled (default), everything stays in RAM as before.
 
 ---
 
 ## Reindex (Background Index Rebuild)
 
-Reconstrói o índice ANN de uma coleção em background sem bloquear buscas nem mutações. Remove tombstones acumulados e restaura performance de busca.
+Rebuilds the ANN index of a collection in the background without blocking searches or mutations. Removes accumulated tombstones and restores search performance.
 
-**Fluxo:**
+**Flow:**
 
-1. **Building**: Snapshot dos pontos → novo índice construído em thread separada. Buscas continuam no índice antigo.
-2. **Swapping**: Write lock < 1ms para trocar índice antigo pelo novo. Delta (ops durante build) é aplicado.
-3. **Cleanup**: Índice antigo é descartado (memória liberada).
+1. **Building**: Snapshot of points → new index built in a separate thread. Searches continue on the old index.
+2. **Swapping**: Write lock < 1ms to swap old index for the new one. Delta (ops during build) is applied.
+3. **Cleanup**: Old index is discarded (memory freed).
 
-**Auto-reindex**: Dispara automaticamente quando tombstones > 20% dos pontos indexados (após deleções).
+**Auto-reindex**: Triggers automatically when tombstones > 20% of indexed points (after deletions).
 
 ### POST /api/v1/collections/{name}/reindex
 
-Inicia um job de reindex em background. Apenas 1 job ativo por coleção.
+Starts a background reindex job. Only 1 active job per collection.
 
-**Resposta:** `202 Accepted`
+**Response:** `202 Accepted`
 
 ```json
 {
@@ -594,19 +594,19 @@ Inicia um job de reindex em background. Apenas 1 job ativo por coleção.
 }
 ```
 
-| Campo        | Tipo   | Descrição                   |
-| ------------ | ------ | --------------------------- |
-| `job_id`     | string | UUID do job criado          |
-| `collection` | string | Nome da coleção             |
-| `status`     | string | Status inicial (`Building`) |
-| `message`    | string | Mensagem descritiva         |
+| Field        | Type   | Description                    |
+| ------------ | ------ | ------------------------------ |
+| `job_id`     | string | UUID of the created job        |
+| `collection` | string | Collection name                |
+| `status`     | string | Initial status (`Building`)    |
+| `message`    | string | Descriptive message            |
 
-**Erros:**
+**Errors:**
 
-- `404` — coleção não encontrada.
-- `409` — já existe um job de reindex ativo para esta coleção.
+- `404` — collection not found.
+- `409` — an active reindex job already exists for this collection.
 
-**Exemplo:**
+**Example:**
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/collections/my-vectors/reindex \
@@ -615,9 +615,9 @@ curl -X POST http://localhost:8080/api/v1/collections/my-vectors/reindex \
 
 ### GET /api/v1/collections/{name}/reindex/{job_id}
 
-Retorna o status de um job de reindex específico.
+Returns the status of a specific reindex job.
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
 ```json
 {
@@ -638,26 +638,26 @@ Retorna o status de um job de reindex específico.
 }
 ```
 
-| Campo                        | Tipo    | Descrição                                               |
-| ---------------------------- | ------- | ------------------------------------------------------- |
-| `id`                         | string  | UUID do job                                             |
-| `collection`                 | string  | Nome da coleção                                         |
-| `status`                     | string  | `Queued`, `Building`, `Swapping`, `Completed`, `Failed` |
-| `progress`                   | number  | Progresso de 0.0 a 1.0                                  |
-| `started_at`                 | number  | Timestamp UNIX (segundos)                               |
-| `completed_at`               | number? | Timestamp de conclusão (null se em andamento)           |
-| `error`                      | string? | Mensagem de erro (null se sucesso)                      |
-| `stats.points_processed`     | number  | Pontos processados                                      |
-| `stats.points_total`         | number  | Total de pontos no snapshot                             |
-| `stats.tombstones_cleaned`   | number  | Tombstones removidos                                    |
-| `stats.old_index_size_bytes` | number  | Tamanho estimado do índice antigo (bytes)               |
-| `stats.new_index_size_bytes` | number  | Tamanho estimado do novo índice (bytes)                 |
+| Field                        | Type    | Description                                               |
+| ---------------------------- | ------- | --------------------------------------------------------- |
+| `id`                         | string  | Job UUID                                                  |
+| `collection`                 | string  | Collection name                                           |
+| `status`                     | string  | `Queued`, `Building`, `Swapping`, `Completed`, `Failed`   |
+| `progress`                   | number  | Progress from 0.0 to 1.0                                  |
+| `started_at`                 | number  | UNIX timestamp (seconds)                                  |
+| `completed_at`               | number? | Completion timestamp (null if still in progress)          |
+| `error`                      | string? | Error message (null on success)                           |
+| `stats.points_processed`     | number  | Points processed                                          |
+| `stats.points_total`         | number  | Total points in snapshot                                  |
+| `stats.tombstones_cleaned`   | number  | Tombstones removed                                        |
+| `stats.old_index_size_bytes` | number  | Estimated size of old index (bytes)                       |
+| `stats.new_index_size_bytes` | number  | Estimated size of new index (bytes)                       |
 
-**Erros:**
+**Errors:**
 
-- `404` — coleção ou job não encontrado.
+- `404` — collection or job not found.
 
-**Exemplo:**
+**Example:**
 
 ```bash
 curl http://localhost:8080/api/v1/collections/my-vectors/reindex/550e8400-e29b-41d4-a716-446655440000 \
@@ -666,9 +666,9 @@ curl http://localhost:8080/api/v1/collections/my-vectors/reindex/550e8400-e29b-4
 
 ### GET /api/v1/collections/{name}/reindex
 
-Lista todos os jobs de reindex de uma coleção (mais recentes primeiro).
+Lists all reindex jobs for a collection (most recent first).
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
 ```json
 {
@@ -693,11 +693,11 @@ Lista todos os jobs de reindex de uma coleção (mais recentes primeiro).
 }
 ```
 
-**Erros:**
+**Errors:**
 
-- `404` — coleção não encontrada.
+- `404` — collection not found.
 
-**Exemplo:**
+**Example:**
 
 ```bash
 curl http://localhost:8080/api/v1/collections/my-vectors/reindex \
@@ -706,32 +706,32 @@ curl http://localhost:8080/api/v1/collections/my-vectors/reindex \
 
 ---
 
-## Pontos
+## Points
 
 ### POST /api/v1/collections/{name}/points
 
-Insere ou atualiza pontos em lote (até 1000 pontos por request).
+Inserts or updates points in batch (up to 1000 points per request).
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Request body:**
 
-| Campo    | Tipo  | Descrição                                 |
-| -------- | ----- | ----------------------------------------- |
-| `points` | array | Lista de 1 a 1000 pontos (objeto abaixo). |
+| Field    | Type  | Description                              |
+| -------- | ----- | ---------------------------------------- |
+| `points` | array | List of 1 to 1000 points (object below). |
 
-Cada elemento de `points`:
+Each element of `points`:
 
-| Campo       | Tipo   | Obrigatório | Descrição                                                                                                                                                |
-| ----------- | ------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`        | string | sim         | ID único do ponto                                                                                                                                        |
-| `vector`    | array  | sim         | Vetor principal (array de float), dimensão igual à da coleção                                                                                            |
-| `metadata`  | object | não         | JSON arbitrário (default: `{}`)                                                                                                                          |
-| `namespace` | string | não         | Namespace lógico (multitenancy). Quando omitido, o ponto não tem namespace.                                                                              |
-| `ttl`       | number | não         | TTL em segundos; se presente, o ponto expira após esse tempo e é removido pelo worker de vacuum.                                                         |
-| `vectors`   | object | não         | Vetores nomeados adicionais: mapa de nome → array de float (ex.: `"title_vector"`, `"content_vector"`). Cada vetor deve ter a mesma dimensão da coleção. |
+| Field       | Type   | Required | Description                                                                                                                                                            |
+| ----------- | ------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`        | string | yes      | Unique point ID                                                                                                                                                        |
+| `vector`    | array  | yes      | Main vector (float array), dimension equal to the collection's                                                                                                         |
+| `metadata`  | object | no       | Arbitrary JSON (default: `{}`)                                                                                                                                         |
+| `namespace` | string | no       | Logical namespace (multitenancy). When omitted, the point has no namespace.                                                                                            |
+| `ttl`       | number | no       | TTL in seconds; if present, the point expires after that time and is removed by the vacuum worker.                                                                     |
+| `vectors`   | object | no       | Additional named vectors: map of name → float array (e.g. `"title_vector"`, `"content_vector"`). Each vector must have the same dimension as the collection.           |
 
-**Schema de request (um vetor):**
+**Request schema (single vector):**
 
 ```json
 {
@@ -739,14 +739,14 @@ Cada elemento de `points`:
     {
       "id": "doc-1",
       "vector": [0.1, 0.2, -0.1],
-      "metadata": { "text": "Conteúdo do documento" },
+      "metadata": { "text": "Document content" },
       "ttl": 3600
     }
   ]
 }
 ```
 
-**Schema de request (múltiplos vetores por ponto):**
+**Request schema (multiple vectors per point):**
 
 ```json
 {
@@ -758,15 +758,15 @@ Cada elemento de `points`:
         "title_vector": [0.2, 0.1, 0.0],
         "content_vector": [0.0, -0.1, 0.3]
       },
-      "metadata": { "text": "Conteúdo do documento" }
+      "metadata": { "text": "Document content" }
     }
   ]
 }
 ```
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -777,7 +777,7 @@ Cada elemento de `points`:
 }
 ```
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/points \
@@ -789,16 +789,16 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/points \
 
 ### DELETE /api/v1/collections/{name}/points
 
-Remove pontos pelo ID.
+Removes points by ID.
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Request body:**
 
-| Campo       | Tipo   | Obrigatório | Descrição                                                                   |
-| ----------- | ------ | ----------- | --------------------------------------------------------------------------- |
-| `ids`       | array  | sim         | Lista de IDs dos pontos a remover                                           |
-| `namespace` | string | não         | Quando informado, remove apenas pontos desse namespace (para os ids dados). |
+| Field       | Type   | Required | Description                                                                    |
+| ----------- | ------ | -------- | ------------------------------------------------------------------------------ |
+| `ids`       | array  | yes      | List of IDs of points to remove                                                |
+| `namespace` | string | no       | When provided, removes only points from this namespace (for the given IDs).    |
 
 ```json
 {
@@ -807,9 +807,9 @@ Remove pontos pelo ID.
 }
 ```
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -817,7 +817,7 @@ Remove pontos pelo ID.
 }
 ```
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X DELETE http://localhost:8080/api/v1/collections/docs/points \
@@ -829,36 +829,36 @@ curl -s -X DELETE http://localhost:8080/api/v1/collections/docs/points \
 
 ### GET /api/v1/collections/{name}/points/{id}
 
-Retorna um ponto pelo ID.
+Returns a point by ID.
 
-**Path:** `name` — nome da coleção; `id` — ID do ponto.
+**Path:** `name` — collection name; `id` — point ID.
 
 **Query params:**
 
-| Campo       | Tipo   | Descrição                                                              |
-| ----------- | ------ | ---------------------------------------------------------------------- |
-| `namespace` | string | Quando o ponto foi inserido com namespace, informe-o para localização. |
+| Field       | Type   | Description                                                                |
+| ----------- | ------ | -------------------------------------------------------------------------- |
+| `namespace` | string | When the point was inserted with a namespace, provide it for lookup.       |
 
-**Resposta:** `200 OK`. Inclui o campo `namespace` quando o ponto tiver namespace e `relations` quando o ponto tiver relações (grafo).
+**Response:** `200 OK`. Includes the `namespace` field when the point has a namespace and `relations` when the point has relations (graph).
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
   "id": "doc-1",
   "vector": [0.1, 0.2, -0.1],
-  "metadata": { "text": "Conteúdo" },
+  "metadata": { "text": "Content" },
   "created_at": 1707123456,
   "namespace": "tenant-a",
   "relations": ["doc-2", "doc-3"]
 }
 ```
 
-| Campo       | Tipo            | Descrição                                                              |
-| ----------- | --------------- | ---------------------------------------------------------------------- |
-| `relations` | array de string | IDs dos pontos relacionados (grafo não direcionado). Omitido se vazio. |
+| Field       | Type          | Description                                                              |
+| ----------- | ------------- | ------------------------------------------------------------------------ |
+| `relations` | string array  | IDs of related points (undirected graph). Omitted if empty.              |
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections/docs/points/doc-1
@@ -868,16 +868,16 @@ curl -s http://localhost:8080/api/v1/collections/docs/points/doc-1
 
 ### POST /api/v1/collections/{name}/points/link
 
-Cria uma relação não direcionada entre dois pontos (persistência de grafos). Atualiza o campo `relations` em ambos os pontos: o ponto `from` passa a incluir `to` na lista e o ponto `to` passa a incluir `from`. A persistência em disco ocorre no próximo snapshot (save).
+Creates an undirected relation between two points (graph persistence). Updates the `relations` field on both points: the `from` point now includes `to` in its list and the `to` point now includes `from`. Disk persistence happens on the next snapshot (save).
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Request body:**
 
-| Campo  | Tipo   | Obrigatório | Descrição                                                                            |
-| ------ | ------ | ----------- | ------------------------------------------------------------------------------------ |
-| `from` | string | sim         | ID do ponto de origem (storage_id; para pontos sem namespace, o id lógico do ponto). |
-| `to`   | string | sim         | ID do ponto de destino (storage_id).                                                 |
+| Field  | Type   | Required | Description                                                                              |
+| ------ | ------ | -------- | ---------------------------------------------------------------------------------------- |
+| `from` | string | yes      | Origin point ID (storage_id; for points without namespace, the logical point ID).        |
+| `to`   | string | yes      | Destination point ID (storage_id).                                                       |
 
 ```json
 {
@@ -886,9 +886,9 @@ Cria uma relação não direcionada entre dois pontos (persistência de grafos).
 }
 ```
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -898,9 +898,9 @@ Cria uma relação não direcionada entre dois pontos (persistência de grafos).
 }
 ```
 
-**Erros:** `404` se a coleção ou um dos pontos não existir; `400` se `from` e `to` forem iguais ou vazios; `403` se não tiver permissão de escrita na coleção.
+**Errors:** `404` if collection or one of the points does not exist; `400` if `from` and `to` are equal or empty; `403` if write permission on the collection is missing.
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/points/link \
@@ -912,22 +912,22 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/points/link \
 
 ### GET /api/v1/collections/{name}/graph/subgraph
 
-Retorna um subgrafo da coleção para visualização (ex.: Graph Explorer no dashboard). Formato de retorno: `{ "nodes": [...], "edges": [...] }`.
+Returns a subgraph of the collection for visualization (e.g. Graph Explorer in the dashboard). Return format: `{ "nodes": [...], "edges": [...] }`.
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Query params:**
 
-| Campo       | Tipo   | Obrigatório | Descrição                                                                                             |
-| ----------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------- |
-| `center_id` | string | não         | Centro do subgrafo; usado com `depth` para BFS (tem precedência sobre `seed` quando ambos presentes). |
-| `depth`     | number | não         | Profundidade em saltos para BFS a partir de `center_id` (ex.: 2 = até 2 saltos).                      |
-| `seed`      | string | não         | Se informado (e sem center_id), retorna o nó e seus vizinhos (1-hop).                                 |
-| `limit`     | number | não         | Sem center_id/seed: número máximo de nós (default 500, máx. 2000).                                    |
+| Field       | Type   | Required | Description                                                                                            |
+| ----------- | ------ | -------- | ------------------------------------------------------------------------------------------------------ |
+| `center_id` | string | no       | Subgraph center; used with `depth` for BFS (takes precedence over `seed` when both are present).       |
+| `depth`     | number | no       | Hop depth for BFS from `center_id` (e.g. 2 = up to 2 hops).                                           |
+| `seed`      | string | no       | If provided (and without center_id), returns the node and its neighbors (1-hop).                       |
+| `limit`     | number | no       | Without center_id/seed: maximum number of nodes (default 500, max 2000).                               |
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -947,18 +947,18 @@ Retorna um subgrafo da coleção para visualização (ex.: Graph Explorer no das
 }
 ```
 
-Cada nó inclui `id` (storage_id), `metadata`, `namespace`, `created_at`, `relations`. O campo `vector` é omitido para reduzir o payload. Use GET `/api/v1/collections/{name}/points/{id}` para detalhes completos do ponto.
+Each node includes `id` (storage_id), `metadata`, `namespace`, `created_at`, `relations`. The `vector` field is omitted to reduce payload. Use GET `/api/v1/collections/{name}/points/{id}` for full point details.
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
-# Subgrafo por BFS (center_id + depth)
+# BFS subgraph (center_id + depth)
 curl -s "http://localhost:8080/api/v1/collections/docs/graph/subgraph?center_id=id_A&depth=2"
 
-# Subgrafo 1-hop (seed)
+# 1-hop subgraph (seed)
 curl -s "http://localhost:8080/api/v1/collections/docs/graph/subgraph?seed=id_A"
 
-# Subgrafo completo (pontos com relações, até 500 nós)
+# Full subgraph (points with relations, up to 500 nodes)
 curl -s "http://localhost:8080/api/v1/collections/docs/graph/subgraph"
 ```
 
@@ -966,23 +966,23 @@ curl -s "http://localhost:8080/api/v1/collections/docs/graph/subgraph"
 
 ### POST /api/v1/collections/{name}/search
 
-Busca os pontos mais similares ao vetor de consulta (busca vetorial).
+Searches for the most similar points to the query vector (vector search).
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Request body:**
 
-| Campo          | Tipo    | Obrigatório | Descrição                                                                                                                                                                                                                                                                                              |
-| -------------- | ------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `vector`       | array   | sim         | Vetor de consulta (mesma dimensão da coleção)                                                                                                                                                                                                                                                          |
-| `limit`        | number  | sim         | Número máximo de resultados (> 0)                                                                                                                                                                                                                                                                      |
-| `filter`       | object  | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) abaixo.                                                                                                                                                                                                                              |
-| `namespace`    | string  | não         | Restringe resultados a este namespace (multitenancy).                                                                                                                                                                                                                                                  |
-| `vector_field` | string  | não         | Campo vetorial contra o qual buscar: omitido ou `"default"` = vetor principal; outro nome (ex.: `"title_vector"`, `"content_vector"`) = índice nomeado. Retorna 400 se o campo não existir em nenhum ponto.                                                                                            |
-| `budget_ms`    | number  | não         | Orçamento máximo em ms. Se a estimativa exceder, retorna 422 sem executar a busca.                                                                                                                                                                                                                     |
-| `rerank`       | boolean | não         | Quando `true`, re-pontua candidatos com Cross-Encoder (ONNX) e retorna os top `limit` reordenados. Requer que o servidor tenha modelo de re-ranking configurado e que a dimensão da coleção coincida com a do modelo. Se não houver reranker ou dimensão incompatível, a busca é feita sem re-ranking. |
+| Field          | Type    | Required | Description                                                                                                                                                                                                                                                                                            |
+| -------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `vector`       | array   | yes      | Query vector (same dimension as the collection)                                                                                                                                                                                                                                                        |
+| `limit`        | number  | yes      | Maximum number of results (> 0)                                                                                                                                                                                                                                                                        |
+| `filter`       | object  | no       | Metadata filter. See [Metadata filter](#metadata-filter) below.                                                                                                                                                                                                                                        |
+| `namespace`    | string  | no       | Restricts results to this namespace (multitenancy).                                                                                                                                                                                                                                                    |
+| `vector_field` | string  | no       | Vector field to search against: omitted or `"default"` = main vector; another name (e.g. `"title_vector"`, `"content_vector"`) = named index. Returns 400 if field does not exist on any point.                                                                                                        |
+| `budget_ms`    | number  | no       | Maximum budget in ms. If the estimate exceeds it, returns 422 without executing the search.                                                                                                                                                                                                            |
+| `rerank`       | boolean | no       | When `true`, re-scores candidates with Cross-Encoder (ONNX) and returns the top `limit` reordered. Requires the server to have a re-ranking model configured and the collection dimension to match the model's. If no reranker or incompatible dimension, search is performed without re-ranking.       |
 
-**Schema de request:**
+**Request schema:**
 
 ```json
 {
@@ -995,9 +995,9 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
 }
 ```
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:** cada resultado pode incluir `namespace` quando o ponto tiver namespace. O campo `rerank_ms` está presente apenas quando `rerank: true` foi enviado e o servidor aplicou re-ranking (modelo carregado e dimensão compatível).
+**Response schema:** each result may include `namespace` when the point has a namespace. The `rerank_ms` field is present only when `rerank: true` was sent and the server applied re-ranking (model loaded and compatible dimension).
 
 ```json
 {
@@ -1005,24 +1005,24 @@ Busca os pontos mais similares ao vetor de consulta (busca vetorial).
     {
       "id": "doc-1",
       "score": 0.92,
-      "metadata": { "text": "Conteúdo" },
+      "metadata": { "text": "Content" },
       "namespace": "tenant-a"
     }
   ],
   "took_ms": 2,
-  "query_id": "uuid-opcional",
+  "query_id": "optional-uuid",
   "rerank_ms": 12
 }
 ```
 
-| Campo resposta | Tipo   | Descrição                                                                                                         |
-| -------------- | ------ | ----------------------------------------------------------------------------------------------------------------- |
-| `results`      | array  | Lista de pontos ordenados por similaridade (ou por score do Cross-Encoder quando rerank foi aplicado).            |
-| `took_ms`      | number | Tempo total da busca (ms).                                                                                        |
-| `query_id`     | string | (opcional) ID da query para debug (`GET /api/v1/debug/query-profile/{query_id}`).                                 |
-| `rerank_ms`    | number | (opcional) Tempo gasto em re-ranking (ms). Presente apenas quando `rerank: true` e o servidor aplicou re-ranking. |
+| Response field | Type   | Description                                                                                                      |
+| -------------- | ------ | ---------------------------------------------------------------------------------------------------------------- |
+| `results`      | array  | List of points ordered by similarity (or by Cross-Encoder score when rerank was applied).                        |
+| `took_ms`      | number | Total search time (ms).                                                                                          |
+| `query_id`     | string | (optional) Query ID for debug (`GET /api/v1/debug/query-profile/{query_id}`).                                    |
+| `rerank_ms`    | number | (optional) Time spent on re-ranking (ms). Present only when `rerank: true` and the server applied re-ranking.    |
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search \
@@ -1030,22 +1030,22 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/search \
   -d '{"vector":[0.1,0.2,-0.1],"limit":5,"namespace":"tenant-a"}'
 ```
 
-#### Filtro de metadata
+#### Metadata filter
 
-Quando o campo `filter` é informado, a busca utiliza **pre-filtering nativo no HNSW**: o filtro é aplicado durante a exploração do grafo (nós que não satisfazem o filtro são ignorados antes de entrar na lista de candidatos). As buscas com filtro **garantem** o retorno de até `limit` resultados que satisfazem o filtro: a exploração continua (com aumento progressivo do parâmetro de busca) até atingir esse número de resultados válidos ou exaurir o grafo, sem depender de multiplicador fixo.
+When the `filter` field is provided, the search uses **native HNSW pre-filtering**: the filter is applied during graph exploration (nodes that do not satisfy the filter are ignored before entering the candidate list). Filtered searches **guarantee** returning up to `limit` results that satisfy the filter: exploration continues (with progressive increase of the search parameter) until that number of valid results is reached or the graph is exhausted, without relying on a fixed multiplier.
 
-O campo `filter` é um objeto JSON. Cada chave é um campo de metadata; o valor pode ser:
+The `filter` field is a JSON object. Each key is a metadata field; the value can be:
 
-- **Valor direto** — tratado como igualdade (`$eq`): `{"source": "manual"}`.
-- **Objeto com operadores** — use `$eq`, `$ne`, `$in`, `$gt`, `$lt`, `$gte`, `$lte`:
-  - `$eq`, `$ne`: valor exato (qualquer tipo JSON).
-  - `$in`: array de valores permitidos.
-  - `$gt`, `$lt`, `$gte`, `$lte`: comparação numérica (o campo no metadata deve ser número).
-- **Chave reservada `$namespace`** — restringe resultados ao namespace indicado (multitenancy): `{"$namespace": "tenant-id"}`. Pode ser combinada com outras condições.
+- **Direct value** — treated as equality (`$eq`): `{"source": "manual"}`.
+- **Object with operators** — use `$eq`, `$ne`, `$in`, `$gt`, `$lt`, `$gte`, `$lte`:
+  - `$eq`, `$ne`: exact value (any JSON type).
+  - `$in`: array of allowed values.
+  - `$gt`, `$lt`, `$gte`, `$lte`: numeric comparison (the metadata field must be a number).
+- **Reserved key `$namespace`** — restricts results to the indicated namespace (multitenancy): `{"$namespace": "tenant-id"}`. Can be combined with other conditions.
 
-Alternativamente, use o parâmetro de primeiro nível `namespace` no body da busca em vez de `$namespace` no filter.
+Alternatively, use the top-level `namespace` parameter in the search body instead of `$namespace` in the filter.
 
-Múltiplos campos são combinados com **AND**. Exemplo:
+Multiple fields are combined with **AND**. Example:
 
 ```json
 {
@@ -1063,48 +1063,48 @@ Múltiplos campos são combinados com **AND**. Exemplo:
 
 ### POST /api/v1/collections/{name}/search/hybrid
 
-Busca híbrida: combina resultados vetoriais e BM25 (keyword) via estratégia de fusão configurável. A coleção deve ter sido criada com `enable_bm25: true`.
+Hybrid search: combines vector and BM25 (keyword) results via a configurable fusion strategy. The collection must have been created with `enable_bm25: true`.
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Request body:**
 
-| Campo          | Tipo   | Obrigatório | Descrição                                                                                                            |
-| -------------- | ------ | ----------- | -------------------------------------------------------------------------------------------------------------------- |
-| `query_text`   | string | sim         | Texto para busca keyword (BM25)                                                                                      |
-| `query_vector` | array  | sim         | Vetor para busca vetorial                                                                                            |
-| `limit`        | number | sim         | Número máximo de resultados (> 0)                                                                                    |
-| `alpha`        | number | não         | Peso da busca vetorial 0..1 (default: 0.5). (1 - alpha) = peso keyword. Usado com `fusion: "weighted"`               |
-| `fusion`       | string | não         | Estratégia de fusão: `"weighted"` (default) ou `"rrf"`                                                               |
-| `rrf_k`        | number | não         | Constante k para RRF (default: 60). Apenas usado quando `fusion: "rrf"`. Valores maiores suavizam diferenças de rank |
-| `namespace`    | string | não         | Restringe resultados a este namespace (multitenancy)                                                                 |
+| Field          | Type   | Required | Description                                                                                                           |
+| -------------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| `query_text`   | string | yes      | Text for keyword search (BM25)                                                                                        |
+| `query_vector` | array  | yes      | Vector for vector search                                                                                              |
+| `limit`        | number | yes      | Maximum number of results (> 0)                                                                                       |
+| `alpha`        | number | no       | Vector search weight 0..1 (default: 0.5). (1 - alpha) = keyword weight. Used with `fusion: "weighted"`               |
+| `fusion`       | string | no       | Fusion strategy: `"weighted"` (default) or `"rrf"`                                                                    |
+| `rrf_k`        | number | no       | k constant for RRF (default: 60). Only used when `fusion: "rrf"`. Larger values smooth rank differences               |
+| `namespace`    | string | no       | Restricts results to this namespace (multitenancy)                                                                    |
 
-**Estratégias de fusão:**
+**Fusion strategies:**
 
-- **`weighted`** (default): Pondera os rankings por `alpha`. Score = `alpha × 1/(k + rank_vec) + (1-alpha) × 1/(k + rank_bm25)`. Permite controlar o balanço entre busca vetorial e keyword.
-- **`rrf`** (Reciprocal Rank Fusion): Fusão pura por rank sem ponderação. Score = `Σ 1/(k + rank_i)` para cada ranker. Produz resultados mais estáveis pois trata todos os rankers igualmente e não depende da escala dos scores originais.
+- **`weighted`** (default): Weights rankings by `alpha`. Score = `alpha × 1/(k + rank_vec) + (1-alpha) × 1/(k + rank_bm25)`. Allows controlling the balance between vector and keyword search.
+- **`rrf`** (Reciprocal Rank Fusion): Pure rank-based fusion without weighting. Score = `Σ 1/(k + rank_i)` for each ranker. Produces more stable results as it treats all rankers equally and does not depend on the scale of the original scores.
 
-**Quando usar RRF vs Weighted:**
+**When to use RRF vs Weighted:**
 
-- Use **weighted** quando quiser controlar manualmente o balanço entre vetorial e keyword via `alpha`.
-- Use **rrf** quando quiser resultados mais estáveis, independentes da escala dos scores de cada ranker.
+- Use **weighted** when you want to manually control the balance between vector and keyword via `alpha`.
+- Use **rrf** when you want more stable results, independent of each ranker's score scale.
 
-**Schema de request (weighted — default):**
+**Request schema (weighted — default):**
 
 ```json
 {
-  "query_text": "como fazer deploy",
+  "query_text": "how to deploy",
   "query_vector": [0.1, 0.2, -0.1],
   "limit": 5,
   "alpha": 0.5
 }
 ```
 
-**Schema de request (RRF):**
+**Request schema (RRF):**
 
 ```json
 {
-  "query_text": "como fazer deploy",
+  "query_text": "how to deploy",
   "query_vector": [0.1, 0.2, -0.1],
   "limit": 5,
   "fusion": "rrf",
@@ -1112,7 +1112,7 @@ Busca híbrida: combina resultados vetoriais e BM25 (keyword) via estratégia de
 }
 ```
 
-**Resposta:** `200 OK` (mesmo schema de resposta de search)
+**Response:** `200 OK` (same response schema as search)
 
 ```json
 {
@@ -1121,7 +1121,7 @@ Busca híbrida: combina resultados vetoriais e BM25 (keyword) via estratégia de
 }
 ```
 
-**Exemplo curl (weighted):**
+**curl example (weighted):**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/hybrid \
@@ -1129,7 +1129,7 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/hybrid \
   -d '{"query_text":"deploy","query_vector":[0.1,0.2,-0.1],"limit":5,"alpha":0.5}'
 ```
 
-**Exemplo curl (RRF):**
+**curl example (RRF):**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/hybrid \
@@ -1141,20 +1141,20 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/hybrid \
 
 ### POST /api/v1/collections/{name}/search/explain
 
-Busca vetorial com explicação detalhada de cada resultado. Retorna **por que** cada resultado foi retornado (ou filtrado): score breakdown, avaliação de filtros condição-a-condição, posição no ranking e estatísticas do índice HNSW.
+Vector search with detailed explanation of each result. Returns **why** each result was returned (or filtered): score breakdown, per-condition filter evaluation, ranking position and HNSW index statistics.
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Request body:**
 
-| Campo       | Tipo   | Obrigatório | Descrição                                                                |
-| ----------- | ------ | ----------- | ------------------------------------------------------------------------ |
-| `vector`    | array  | sim         | Vetor de consulta (mesma dimensão da coleção)                            |
-| `limit`     | number | sim         | Número máximo de resultados (> 0)                                        |
-| `filter`    | object | não         | Filtro em metadata. Ver [Filtro de metadata](#filtro-de-metadata) acima. |
-| `namespace` | string | não         | Restringe resultados a este namespace (multitenancy)                     |
+| Field       | Type   | Required | Description                                                              |
+| ----------- | ------ | -------- | ------------------------------------------------------------------------ |
+| `vector`    | array  | yes      | Query vector (same dimension as the collection)                          |
+| `limit`     | number | yes      | Maximum number of results (> 0)                                          |
+| `filter`    | object | no       | Metadata filter. See [Metadata filter](#metadata-filter) above.          |
+| `namespace` | string | no       | Restricts results to this namespace (multitenancy)                       |
 
-**Schema de request:**
+**Request schema:**
 
 ```json
 {
@@ -1165,9 +1165,9 @@ Busca vetorial com explicação detalhada de cada resultado. Retorna **por que**
 }
 ```
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -1214,24 +1214,24 @@ Busca vetorial com explicação detalhada de cada resultado. Retorna **por que**
 }
 ```
 
-| Campo                             | Tipo   | Descrição                                                                            |
-| --------------------------------- | ------ | ------------------------------------------------------------------------------------ |
-| `query_vector_norm`               | number | Norma L2 do vetor de consulta                                                        |
-| `distance_metric`                 | string | Métrica: `Cosine`, `Euclidean`, `DotProduct`                                         |
-| `candidates_scanned`              | number | Total de candidatos escaneados pelo índice                                           |
-| `candidates_after_filter`         | number | Candidatos que passaram no filtro de metadata (impacto do pre-filtering)             |
-| `results`                         | array  | Resultados explicados individualmente                                                |
-| `results[].score_breakdown`       | object | Componentes do score (`vector_score`, etc.)                                          |
-| `results[].filter_evaluation`     | object | Avaliação detalhada do filtro (presente se filtro foi aplicado)                      |
-| `results[].rank_before_filter`    | number | Posição no ranking antes de filtros (1-indexed)                                      |
-| `results[].rank_after_filter`     | number | Posição após filtros (1-indexed, 0 se não passou)                                    |
-| `index_stats`                     | object | Estatísticas do índice HNSW no momento da busca                                      |
-| `explain_meta`                    | object | _Opcional._ Metadados do percurso da busca (HNSW). Ausente se o índice não fornecer. |
-| `explain_meta.candidates_visited` | number | Número de comparações de distância realizadas durante a busca                        |
-| `explain_meta.layers_traversed`   | number | Número de camadas do grafo HNSW percorridas                                          |
-| `explain_meta.tombstones_skipped` | number | Tombstones (pontos removidos) ignorados durante a busca                              |
+| Field                             | Type   | Description                                                                            |
+| --------------------------------- | ------ | -------------------------------------------------------------------------------------- |
+| `query_vector_norm`               | number | L2 norm of the query vector                                                            |
+| `distance_metric`                 | string | Metric: `Cosine`, `Euclidean`, `DotProduct`                                            |
+| `candidates_scanned`              | number | Total candidates scanned by the index                                                  |
+| `candidates_after_filter`         | number | Candidates that passed the metadata filter (pre-filtering impact)                      |
+| `results`                         | array  | Individually explained results                                                         |
+| `results[].score_breakdown`       | object | Score components (`vector_score`, etc.)                                                |
+| `results[].filter_evaluation`     | object | Detailed filter evaluation (present if filter was applied)                             |
+| `results[].rank_before_filter`    | number | Ranking position before filters (1-indexed)                                            |
+| `results[].rank_after_filter`     | number | Position after filters (1-indexed, 0 if did not pass)                                 |
+| `index_stats`                     | object | HNSW index statistics at the time of search                                            |
+| `explain_meta`                    | object | _Optional._ Metadata of the search traversal (HNSW). Absent if index does not provide.|
+| `explain_meta.candidates_visited` | number | Number of distance comparisons performed during search                                 |
+| `explain_meta.layers_traversed`   | number | Number of HNSW graph layers traversed                                                  |
+| `explain_meta.tombstones_skipped` | number | Tombstones (removed points) skipped during search                                      |
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/explain \
@@ -1243,20 +1243,20 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/explain \
 
 ### POST /api/v1/collections/{name}/search/estimate
 
-Estima o custo de uma busca vetorial **antes de executá-la**. Retorna latência estimada, consumo de memória, nós HNSW que serão visitados, se a query é "cara" e recomendações de otimização. Não executa nenhuma busca real.
+Estimates the cost of a vector search **before executing it**. Returns estimated latency, memory consumption, HNSW nodes that will be visited, whether the query is "expensive" and optimization recommendations. Does not execute any real search.
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
 **Request body:**
 
-| Campo             | Tipo    | Obrigatório | Descrição                                                        |
-| ----------------- | ------- | ----------- | ---------------------------------------------------------------- |
-| `limit`           | number  | sim         | Número de resultados que serão solicitados na busca              |
-| `filter`          | object  | não         | Filtro de metadata (mesmo formato do endpoint de busca)          |
-| `namespace`       | string  | não         | Restringe a estimativa ao cenário com filtro por este namespace  |
-| `include_history` | boolean | não         | Se `true`, inclui dados históricos de latência (p50/p95/p99/avg) |
+| Field             | Type    | Required | Description                                                         |
+| ----------------- | ------- | -------- | ------------------------------------------------------------------- |
+| `limit`           | number  | yes      | Number of results that will be requested in the search              |
+| `filter`          | object  | no       | Metadata filter (same format as the search endpoint)                |
+| `namespace`       | string  | no       | Restricts the estimate to the scenario with this namespace filter   |
+| `include_history` | boolean | no       | If `true`, includes historical latency data (p50/p95/p99/avg)       |
 
-**Schema de request:**
+**Request schema:**
 
 ```json
 {
@@ -1266,9 +1266,9 @@ Estima o custo de uma busca vetorial **antes de executá-la**. Retorna latência
 }
 ```
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -1294,18 +1294,18 @@ Estima o custo de uma busca vetorial **antes de executá-la**. Retorna latência
 }
 ```
 
-| Campo                     | Tipo    | Descrição                                                                   |
-| ------------------------- | ------- | --------------------------------------------------------------------------- |
-| `estimated_ms`            | number  | Latência estimada em milissegundos                                          |
-| `confidence_range`        | array   | Faixa de confiança `[min, max]` em ms                                       |
-| `estimated_memory_bytes`  | number  | Bytes estimados de memória que a query consumirá                            |
-| `estimated_nodes_visited` | number  | Nós HNSW estimados que serão visitados                                      |
-| `is_expensive`            | boolean | `true` se a estimativa excede o p95 histórico                               |
-| `recommendations`         | array   | Sugestões de otimização (ex: "reduza limit")                                |
-| `breakdown`               | object  | Componentes individuais do custo (index_scan, filter, hydration, network)   |
-| `historical_latency`      | object  | Presente se `include_history=true`. Percentis e média de latência histórica |
+| Field                     | Type    | Description                                                                    |
+| ------------------------- | ------- | ------------------------------------------------------------------------------ |
+| `estimated_ms`            | number  | Estimated latency in milliseconds                                              |
+| `confidence_range`        | array   | Confidence range `[min, max]` in ms                                            |
+| `estimated_memory_bytes`  | number  | Estimated bytes of memory the query will consume                               |
+| `estimated_nodes_visited` | number  | Estimated HNSW nodes that will be visited                                      |
+| `is_expensive`            | boolean | `true` if the estimate exceeds the historical p95                              |
+| `recommendations`         | array   | Optimization suggestions (e.g. "reduce limit")                                 |
+| `breakdown`               | object  | Individual cost components (index_scan, filter, hydration, network)            |
+| `historical_latency`      | object  | Present if `include_history=true`. Percentiles and average historical latency  |
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/estimate \
@@ -1315,7 +1315,7 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/search/estimate \
 
 #### Budget-Based Queries
 
-O campo `budget_ms` no endpoint `POST /search` permite definir um orçamento máximo de latência. Se a estimativa de custo exceder o orçamento, a busca **não é executada** e o servidor retorna `422 Unprocessable Entity` com a estimativa detalhada:
+The `budget_ms` field in the `POST /search` endpoint allows defining a maximum latency budget. If the cost estimate exceeds the budget, the search **is not executed** and the server returns `422 Unprocessable Entity` with the detailed estimate:
 
 ```json
 {
@@ -1326,7 +1326,7 @@ O campo `budget_ms` no endpoint `POST /search` permite definir um orçamento má
     "estimated_ms": 12.5,
     "confidence_range": [6.25, 18.75],
     "is_expensive": true,
-    "recommendations": ["Considere reduzir limit para melhor performance"],
+    "recommendations": ["Consider reducing limit for better performance"],
     "breakdown": { "...": "..." }
   }
 }
@@ -1338,27 +1338,27 @@ O campo `budget_ms` no endpoint `POST /search` permite definir um orçamento má
 
 ### GET /dashboard
 
-Retorna a página HTML do dashboard (single-file com Alpine.js, Tailwind CDN e Chart.js). Exibe lista de coleções com stats, gráfico de queries/min (24h), top 10 queries mais lentas (`GET /api/v1/stats/slow-queries`) e distribuição de latências. Atualiza via polling a cada 5s usando `GET /api/v1/stats/global`, `GET /api/v1/stats/queries`, `GET /api/v1/stats/slow-queries` e `GET /api/v1/collections/{name}/stats`.
+Returns the dashboard HTML page (single-file with Alpine.js, Tailwind CDN and Chart.js). Displays collection list with stats, queries/min chart (24h), top 10 slowest queries (`GET /api/v1/stats/slow-queries`) and latency distribution. Updates via polling every 5s using `GET /api/v1/stats/global`, `GET /api/v1/stats/queries`, `GET /api/v1/stats/slow-queries` and `GET /api/v1/collections/{name}/stats`.
 
-**Resposta:** `200 OK` (HTML)
+**Response:** `200 OK` (HTML)
 
 ---
 
-## Estatísticas e analytics
+## Statistics and Analytics
 
-Os endpoints de analytics leem o arquivo `queries.log` (JSONL) e mantêm cache em memória por 1h.
+Analytics endpoints read the `queries.log` file (JSONL) and maintain an in-memory cache for 1h.
 
-**Auto-reindex em background:** Um worker interno percorre todas as coleções a cada 30 minutos e, quando o rácio de tombstones (`tombstone_count / total_indexed`) excede 20%, dispara um reindex automático (mesma lógica de swap de índice dos endpoints de reindex). O estado do worker não é exposto em nenhum endpoint de stats; a observabilidade é feita via logs estruturados (`tracing`): início e fim de cada ciclo do worker e início e fim de cada compactação.
+**Background auto-reindex:** An internal worker iterates over all collections every 30 minutes and, when the tombstone ratio (`tombstone_count / total_indexed`) exceeds 20%, triggers an automatic reindex (same index swap logic as the reindex endpoints). The worker state is not exposed in any stats endpoint; observability is done via structured logs (`tracing`): start and end of each worker cycle and start and end of each compaction.
 
-**Retention policy (retenção de dados):** Um worker em background a cada 1 hora percorre as coleções que têm `retention_days` configurado e compacta o ficheiro `wal.log`, removendo entradas com timestamp anterior a `(now - retention_days dias)`. Isto reduz o tamanho do WAL e limita o histórico disponível para PITR ao período configurado. A retenção pode ser definida na criação da coleção (`POST /api/v1/collections` com `retention_days`), alterada via `PATCH /api/v1/collections/{name}` (body: `{ "retention_days": number | null }`) e configurada na página **Settings** do Dashboard (secção "Data retention").
+**Retention policy (data retention):** A background worker every 1 hour iterates over collections that have `retention_days` configured and compacts the `wal.log` file, removing entries with timestamps older than `(now - retention_days days)`. This reduces the WAL size and limits the history available for PITR to the configured period. Retention can be set at collection creation (`POST /api/v1/collections` with `retention_days`), changed via `PATCH /api/v1/collections/{name}` (body: `{ "retention_days": number | null }`) and configured on the Dashboard's **Settings** page ("Data retention" section).
 
 ### GET /api/v1/stats/global
 
-Retorna estatísticas globais: totais do servidor (coleções, pontos) e agregados das últimas 24h a partir do log de queries.
+Returns global statistics: server totals (collections, points) and aggregates for the last 24h from the query log.
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -1375,28 +1375,28 @@ Retorna estatísticas globais: totais do servidor (coleções, pontos) e agregad
 }
 ```
 
-| Campo                          | Tipo    | Descrição                                                                            |
-| ------------------------------ | ------- | ------------------------------------------------------------------------------------ |
-| `total_collections`            | number  | Número de coleções                                                                   |
-| `total_points`                 | number  | Soma de pontos em todas as coleções                                                  |
-| `total_queries_24h`            | number  | Queries nas últimas 24h (do log)                                                     |
-| `avg_latency_ms`               | number  | Latência média (ms) nas últimas 24h                                                  |
-| `queries_per_minute`           | array   | Buckets por minuto: `timestamp` (Unix do minuto), `count`                            |
-| `simd_enabled`                 | boolean | Se as instruções SIMD (AVX2/SSE4.1) estão ativas em runtime nos kernels de distância |
-| `role`                         | string  | Replication role: `"leader"` ou `"replica"` (experimental)                           |
-| `namespace_physical_isolation` | boolean | Se o armazenamento por namespace está isolado (multitenancy)                         |
-| `hnsw_auto_tune_enabled`       | boolean | Se o auto-tune dinâmico de `ef_search` HNSW está ativo (FerresEngine)                |
-| `index_optimization_label`     | string  | Rótulo para o dashboard, ex.: `"Optimized by FerresEngine"`                          |
+| Field                          | Type    | Description                                                                              |
+| ------------------------------ | ------- | ---------------------------------------------------------------------------------------- |
+| `total_collections`            | number  | Number of collections                                                                    |
+| `total_points`                 | number  | Sum of points across all collections                                                     |
+| `total_queries_24h`            | number  | Queries in the last 24h (from log)                                                       |
+| `avg_latency_ms`               | number  | Average latency (ms) in the last 24h                                                     |
+| `queries_per_minute`           | array   | Per-minute buckets: `timestamp` (Unix of minute), `count`                                |
+| `simd_enabled`                 | boolean | Whether SIMD instructions (AVX2/SSE4.1) are active at runtime in distance kernels        |
+| `role`                         | string  | Replication role: `"leader"` or `"replica"` (experimental)                               |
+| `namespace_physical_isolation` | boolean | Whether namespace storage is physically isolated (multitenancy)                          |
+| `hnsw_auto_tune_enabled`       | boolean | Whether dynamic `ef_search` HNSW auto-tuning is active (FerresEngine)                   |
+| `index_optimization_label`     | string  | Label for the dashboard, e.g. `"Optimized by FerresEngine"`                              |
 
-**HNSW Auto-Tune (FerresEngine):** O servidor ajusta `ef_search` dinamicamente com base na latência P95 observada por coleção (fonte: `query_stats`). A cada 60 segundos, para cada coleção: se P95 &lt; 10 ms e recall é prioridade, `ef_search` é aumentado (até um máximo); se P95 &gt; 50 ms (proxy para CPU sob estresse), é reduzido. A lógica está em `ferres_db_core::collection::Collection::apply_hnsw_auto_tune`. Os valores atuais são expostos em `GET /api/v1/collections/{name}/stats` (`ef_search_current`) e no Dashboard (Overview: "Optimized by FerresEngine").
+**HNSW Auto-Tune (FerresEngine):** The server dynamically adjusts `ef_search` based on the observed P95 latency per collection (source: `query_stats`). Every 60 seconds, for each collection: if P95 < 10 ms and recall is the priority, `ef_search` is increased (up to a maximum); if P95 > 50 ms (proxy for CPU under stress), it is reduced. The logic is in `ferres_db_core::collection::Collection::apply_hnsw_auto_tune`. Current values are exposed in `GET /api/v1/collections/{name}/stats` (`ef_search_current`) and in the Dashboard (Overview: "Optimized by FerresEngine").
 
 ### GET /api/v1/cluster
 
-Retorna o estado do cluster (nós ativos, líder e status de replicação). Usado pela página **Cluster** do Dashboard para exibir Leader e Followers. Em modo standalone (sem feature `raft`), retorna um único nó com role `leader` ou `replica` conforme `--replica-of`. Com a feature `raft` ativa, reflete o estado do Raft (nodes, leader_id).
+Returns the cluster state (active nodes, leader and replication status). Used by the Dashboard's **Cluster** page to show Leader and Followers. In standalone mode (without `raft` feature), returns a single node with role `leader` or `replica` depending on `--replica-of`. With the `raft` feature active, reflects the Raft state (nodes, leader_id).
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -1413,17 +1413,17 @@ Retorna o estado do cluster (nós ativos, líder e status de replicação). Usad
 }
 ```
 
-| Campo                     | Tipo    | Descrição                                                                             |
-| ------------------------- | ------- | ------------------------------------------------------------------------------------- |
-| `raft_enabled`            | boolean | Se o consenso Raft está ativo (build com `--features raft` e configurado).            |
-| `leader_id`               | string  | _Opcional._ ID do nó líder (ex.: `"1"`). Ausente se ainda não houver líder.           |
-| `nodes`                   | array   | Lista de nós conhecidos (incluindo este).                                             |
-| `nodes[].id`              | string  | Identificador do nó.                                                                  |
-| `nodes[].addr`            | string  | Endereço (host:port).                                                                 |
-| `nodes[].role`            | string  | Papel: `"leader"`, `"follower"`, `"learner"` ou `"replica"` (modo réplica).           |
-| `nodes[].replication_lag` | number  | _Opcional._ Lag de replicação (índice do último log aplicado). Apenas para followers. |
+| Field                     | Type    | Description                                                                              |
+| ------------------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `raft_enabled`            | boolean | Whether Raft consensus is active (built with `--features raft` and configured).          |
+| `leader_id`               | string  | _Optional._ Leader node ID (e.g. `"1"`). Absent if no leader yet.                       |
+| `nodes`                   | array   | List of known nodes (including this one).                                                |
+| `nodes[].id`              | string  | Node identifier.                                                                         |
+| `nodes[].addr`            | string  | Address (host:port).                                                                     |
+| `nodes[].role`            | string  | Role: `"leader"`, `"follower"`, `"learner"` or `"replica"` (replica mode).              |
+| `nodes[].replication_lag` | number  | _Optional._ Replication lag (index of last log applied). For followers only.            |
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -H "Authorization: Bearer YOUR_KEY" http://localhost:8080/api/v1/cluster
@@ -1433,66 +1433,66 @@ curl -s -H "Authorization: Bearer YOUR_KEY" http://localhost:8080/api/v1/cluster
 
 ## Replication (Experimental)
 
-Read Replicas permitem escalar leituras (busca, listagem) mantendo um único nó líder para escritas. O recurso é **experimental**.
+Read Replicas allow scaling reads (search, listing) while maintaining a single leader node for writes. This feature is **experimental**.
 
-### Modo réplica
+### Replica mode
 
-- **Inicialização:** Inicie o servidor com `--replica-of <ADDR>` ou defina a variável de ambiente `FERRESDB_REPLICA_OF` (ex.: `127.0.0.1:50051` para o gRPC do líder).
-- **Comportamento:** O nó inicia como **réplica**: aceita apenas operações de leitura (GET, e POST em `/search`, `/search/hybrid`, `/search/explain`, `/search/estimate`, `/auth/login`). Qualquer outra escrita (POST/PUT/DELETE em coleções, pontos, save, reindex, etc.) retorna **405 Method Not Allowed** com corpo `{ "error": "method_not_allowed", "message": "Write operations are not allowed on a read replica", "code": 405 }`.
-- **Worker de replicação:** Com a feature `grpc` ativa, um worker em background conecta ao líder via gRPC, lista as coleções, e para cada uma consome o WAL via RPC `StreamWal(collection_name, from_position)`, aplicando upserts e deletes no VectorDB local. O líder expõe `StreamWal` no serviço FerresDB (proto `ferresdb.v1`).
-- **API e Dashboard:** `GET /api/v1/stats/global` inclui o campo `role` (`"leader"` ou `"replica"`). O dashboard (Overview) exibe um indicador visual "Role: Leader" ou "Role: Replica".
+- **Initialization:** Start the server with `--replica-of <ADDR>` or set the environment variable `FERRESDB_REPLICA_OF` (e.g. `127.0.0.1:50051` for the leader's gRPC).
+- **Behavior:** The node starts as a **replica**: accepts only read operations (GET, and POST on `/search`, `/search/hybrid`, `/search/explain`, `/search/estimate`, `/auth/login`). Any other write (POST/PUT/DELETE on collections, points, save, reindex, etc.) returns **405 Method Not Allowed** with body `{ "error": "method_not_allowed", "message": "Write operations are not allowed on a read replica", "code": 405 }`.
+- **Replication worker:** With the `grpc` feature active, a background worker connects to the leader via gRPC, lists the collections, and for each one consumes the WAL via RPC `StreamWal(collection_name, from_position)`, applying upserts and deletes to the local VectorDB. The leader exposes `StreamWal` in the FerresDB service (proto `ferresdb.v1`).
+- **API and Dashboard:** `GET /api/v1/stats/global` includes the `role` field (`"leader"` or `"replica"`). The Dashboard (Overview) shows a visual indicator "Role: Leader" or "Role: Replica".
 
-### WAL incremental (core)
+### Incremental WAL (core)
 
-No core, o método `Wal::stream_from(collection_dir, position)` retorna as entradas do WAL a partir do índice `position` (0-based), permitindo que o líder sirva apenas as entradas novas em chamadas subsequentes de `StreamWal`.
+In core, the method `Wal::stream_from(collection_dir, position)` returns WAL entries starting from index `position` (0-based), allowing the leader to serve only new entries in subsequent `StreamWal` calls.
 
-### Requisitos
+### Requirements
 
-- Líder e réplica devem usar a build do servidor com **feature `grpc`** para o worker de replicação e o RPC `StreamWal`.
-- O endereço em `--replica-of` deve ser o host:porta do **servidor gRPC** do líder (por padrão a porta 50051, configurável com `GRPC_PORT`).
+- Leader and replica must use the server build with **`grpc` feature** for the replication worker and `StreamWal` RPC.
+- The address in `--replica-of` must be the host:port of the leader's **gRPC server** (default port 50051, configurable with `GRPC_PORT`).
 
 ---
 
 ### GET /api/v1/stats/analytics
 
-Retorna JSON consolidado para o dashboard: distribuição por tier, latência (avg, P50/P95/P99, histórico por minuto nas 24h), tombstones, circuit breaker, **séries temporais dos últimos 10 minutos** e **Cache Hit Rate** do search_cache.
+Returns consolidated JSON for the dashboard: tier distribution, latency (avg, P50/P95/P99, per-minute history in 24h), tombstones, circuit breaker, **time series for the last 10 minutes** and **search_cache Cache Hit Rate**.
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Campos de agregação de séries temporais (últimos 10 min):**
+**Time series aggregation fields (last 10 min):**
 
-| Campo                                   | Tipo           | Descrição                                                                                                                                                                                                                       |
-| --------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `time_series_10m`                       | object         | Agregados da janela de 10 minutos para monitoramento em tempo real                                                                                                                                                              |
-| `time_series_10m.avg_points_per_second` | number         | Média de pontos inseridos por segundo (ingestão) nos últimos 10 min                                                                                                                                                             |
-| `time_series_10m.p95_latency_ms`        | number         | P95 da latência de busca (ms) nas últimas 10 min (queries.log)                                                                                                                                                                  |
-| `time_series_10m.throughput_per_minute` | array          | Buckets por minuto para gráfico de throughput: `{ "timestamp": number, "points": number }`                                                                                                                                      |
-| `time_series_10m.recent_latencies`      | array          | Últimas consultas para gráfico de latência: `{ "timestamp": number, "took_ms": number }` (até 100 entradas)                                                                                                                     |
-| `cache_hit_rate_pct`                    | number \| null | Percentual de hits do search_cache (core) agregado em todas as coleções; `null` se ainda não houve buscas                                                                                                                       |
-| `top_namespaces_by_storage`             | array          | Top namespaces por armazenamento (até 30): `{ "namespace": string, "point_count": number, "storage_bytes_estimate": number }`. Identifica tenants que mais consomem recursos. Pontos sem namespace aparecem como `"(default)"`. |
-| `rerank_overhead_ms_avg`                | number \| null | Média do tempo gasto em re-ranking (ms) nas queries recentes que usaram rerank; `null` se nenhuma. Usado no Dashboard (Analytics) como métrica "Re-ranking Overhead (ms)".                                                      |
+| Field                                   | Type           | Description                                                                                                                                                                                                                       |
+| --------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `time_series_10m`                       | object         | Aggregates of the 10-minute window for real-time monitoring                                                                                                                                                                       |
+| `time_series_10m.avg_points_per_second` | number         | Average points inserted per second (ingestion) in the last 10 min                                                                                                                                                                |
+| `time_series_10m.p95_latency_ms`        | number         | P95 search latency (ms) in the last 10 min (queries.log)                                                                                                                                                                         |
+| `time_series_10m.throughput_per_minute` | array          | Per-minute buckets for throughput chart: `{ "timestamp": number, "points": number }`                                                                                                                                             |
+| `time_series_10m.recent_latencies`      | array          | Recent queries for latency chart: `{ "timestamp": number, "took_ms": number }` (up to 100 entries)                                                                                                                               |
+| `cache_hit_rate_pct`                    | number \| null | search_cache (core) hit rate percentage aggregated across all collections; `null` if no searches yet                                                                                                                              |
+| `top_namespaces_by_storage`             | array          | Top namespaces by storage (up to 30): `{ "namespace": string, "point_count": number, "storage_bytes_estimate": number }`. Identifies tenants consuming the most resources. Points without namespace appear as `"(default)"`.      |
+| `rerank_overhead_ms_avg`                | number \| null | Average time spent on re-ranking (ms) in recent queries that used rerank; `null` if none. Used in Dashboard (Analytics) as the "Re-ranking Overhead (ms)" metric.                                                                 |
 
-O buffer de ingestão é alimentado a cada upsert (REST, gRPC e WebSocket). Para a janela de **10 minutos**, o endpoint de analytics usa leitura fresca do `queries.log` (sem depender do cache de 1h), de modo que `time_series_10m.throughput_per_minute`, `time_series_10m.recent_latencies` e `time_series_10m.p95_latency_ms` reflitam os dados mais recentes. O Cache Hit Rate é calculado a partir dos contadores `search_cache_hits` e `search_cache_misses` de cada coleção (quando `search_cache_size` > 0).
+The ingestion buffer is fed on every upsert (REST, gRPC and WebSocket). For the **10-minute** window, the analytics endpoint uses fresh reading of `queries.log` (without relying on the 1h cache), so that `time_series_10m.throughput_per_minute`, `time_series_10m.recent_latencies` and `time_series_10m.p95_latency_ms` reflect the most recent data. Cache Hit Rate is calculated from the `search_cache_hits` and `search_cache_misses` counters per collection (when `search_cache_size` > 0).
 
-**Flag SIMD:** O campo `simd_enabled` não está no corpo de `GET /api/v1/stats/analytics`; use `GET /api/v1/stats/global`, que retorna `simd_enabled: boolean` indicando se as instruções AVX2/SSE4.1 estão ativas nos kernels de distância.
+**SIMD flag:** The `simd_enabled` field is not in the body of `GET /api/v1/stats/analytics`; use `GET /api/v1/stats/global`, which returns `simd_enabled: boolean` indicating whether AVX2/SSE4.1 instructions are active in distance kernels.
 
 ---
 
 ### GET /api/v1/stats/queries
 
-Lista queries das últimas 24h (lê de `queries.log`, cache 1h).
+Lists queries from the last 24h (reads from `queries.log`, 1h cache).
 
 **Query params:**
 
-| Param        | Tipo   | Default | Descrição                                               |
-| ------------ | ------ | ------- | ------------------------------------------------------- |
-| `collection` | string | —       | Filtrar por nome da coleção                             |
-| `limit`      | number | 100     | Máximo de entradas                                      |
-| `sort`       | string | —       | `latency` = ordenar por latência (mais lentas primeiro) |
+| Param        | Type   | Default | Description                                         |
+| ------------ | ------ | ------- | --------------------------------------------------- |
+| `collection` | string | —       | Filter by collection name                           |
+| `limit`      | number | 100     | Maximum entries                                     |
+| `sort`       | string | —       | `latency` = sort by latency (slowest first)         |
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:** array de objetos:
+**Response schema:** array of objects:
 
 ```json
 [
@@ -1512,28 +1512,28 @@ Lista queries das últimas 24h (lê de `queries.log`, cache 1h).
 
 ### GET /api/v1/stats/slow-queries
 
-Queries com latência acima do threshold (lê de `queries.log`, cache 1h).
+Queries with latency above the threshold (reads from `queries.log`, 1h cache).
 
 **Query params:**
 
-| Param          | Tipo   | Default | Descrição            |
-| -------------- | ------ | ------- | -------------------- |
-| `threshold_ms` | number | 100     | Latência mínima (ms) |
-| `limit`        | number | 10      | Máximo de entradas   |
+| Param          | Type   | Default | Description             |
+| -------------- | ------ | ------- | ----------------------- |
+| `threshold_ms` | number | 100     | Minimum latency (ms)    |
+| `limit`        | number | 10      | Maximum entries         |
 
-**Resposta:** `200 OK` — mesmo schema de array que `GET /api/v1/stats/queries`.
+**Response:** `200 OK` — same array schema as `GET /api/v1/stats/queries`.
 
 ---
 
 ### GET /api/v1/collections/{name}/stats
 
-Retorna estatísticas de uso da coleção (pontos, queries, percentis de latência e parâmetros do índice HNSW).
+Returns usage statistics for the collection (points, queries, latency percentiles and HNSW index parameters).
 
-**Path:** `name` — nome da coleção.
+**Path:** `name` — collection name.
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -1550,17 +1550,17 @@ Retorna estatísticas de uso da coleção (pontos, queries, percentis de latênc
 }
 ```
 
-| Campo                                                                  | Tipo    | Descrição                                                                 |
-| ---------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------- |
-| `num_points`                                                           | number  | Número de pontos na coleção                                               |
-| `num_queries`                                                          | number  | Total de queries registradas (buffer recente)                             |
-| `avg_latency_ms`, `p50_latency_ms`, `p95_latency_ms`, `p99_latency_ms` | number  | Latência média e percentis (ms)                                           |
-| `tombstone_count`                                                      | number  | Pontos marcados como removidos (ainda no índice até reindex)              |
-| `tombstone_memory_waste_bytes`                                         | number  | Bytes estimados de tombstones (índice quantizado)                         |
-| `ef_search_current`                                                    | number  | Valor atual de `ef_search` HNSW usado na busca (pode estar auto-ajustado) |
-| `hnsw_auto_tune_enabled`                                               | boolean | Se o auto-tune FerresEngine está ativo para esta instância                |
+| Field                                                                  | Type    | Description                                                                    |
+| ---------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------ |
+| `num_points`                                                           | number  | Number of points in the collection                                             |
+| `num_queries`                                                          | number  | Total registered queries (recent buffer)                                       |
+| `avg_latency_ms`, `p50_latency_ms`, `p95_latency_ms`, `p99_latency_ms` | number  | Average latency and percentiles (ms)                                           |
+| `tombstone_count`                                                      | number  | Points marked as removed (still in index until reindex)                        |
+| `tombstone_memory_waste_bytes`                                         | number  | Estimated bytes of tombstones (quantized index)                                |
+| `ef_search_current`                                                    | number  | Current `ef_search` HNSW value used in search (may be auto-tuned)             |
+| `hnsw_auto_tune_enabled`                                               | boolean | Whether FerresEngine auto-tuning is active for this instance                  |
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s http://localhost:8080/api/v1/collections/docs/stats
@@ -1572,13 +1572,13 @@ curl -s http://localhost:8080/api/v1/collections/docs/stats
 
 ### GET /api/v1/debug/query-profile/{query_id}
 
-Retorna o perfil de execução de uma query (tempo por fase: validação, busca, hydrate). Útil para debug de performance quando a resposta de search inclui `query_id`.
+Returns the execution profile of a query (time per phase: validation, search, hydrate). Useful for performance debugging when the search response includes `query_id`.
 
-**Path:** `query_id` — UUID retornado em `SearchPointsResponse.query_id`.
+**Path:** `query_id` — UUID returned in `SearchPointsResponse.query_id`.
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
-**Schema de resposta:**
+**Response schema:**
 
 ```json
 {
@@ -1592,18 +1592,18 @@ Retorna o perfil de execução de uma query (tempo por fase: validação, busca,
 }
 ```
 
-| Campo                  | Tipo   | Descrição                                  |
-| ---------------------- | ------ | ------------------------------------------ |
-| `query_id`             | string | ID da query                                |
-| `total_ms`             | number | Tempo total em ms                          |
-| `phases`               | array  | Tempo por fase                             |
-| `phases[].name`        | string | Nome da fase (validation, search, hydrate) |
-| `phases[].duration_ms` | number | Duração da fase em ms                      |
-| `phases[].percentage`  | number | Percentual do total                        |
+| Field                  | Type   | Description                                  |
+| ---------------------- | ------ | -------------------------------------------- |
+| `query_id`             | string | Query ID                                     |
+| `total_ms`             | number | Total time in ms                             |
+| `phases`               | array  | Time per phase                               |
+| `phases[].name`        | string | Phase name (validation, search, hydrate)     |
+| `phases[].duration_ms` | number | Phase duration in ms                         |
+| `phases[].percentage`  | number | Percentage of total                          |
 
-**Erro:** `404` com `error: "query_profile_not_found"` se o `query_id` não existir (perfis são mantidos em memória com capacidade limitada).
+**Error:** `404` with `error: "query_profile_not_found"` if the `query_id` does not exist (profiles are kept in memory with limited capacity).
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s http://localhost:8080/api/v1/debug/query-profile/550e8400-e29b-41d4-a716-446655440000
@@ -1611,74 +1611,74 @@ curl -s http://localhost:8080/api/v1/debug/query-profile/550e8400-e29b-41d4-a716
 
 ---
 
-## RBAC — Controle de Acesso Granular
+## RBAC — Granular Access Control
 
-O FerresDB suporta controle de acesso baseado em roles (RBAC) com permissões granulares por coleção e restrições de metadata.
+FerresDB supports role-based access control (RBAC) with granular permissions per collection and metadata restrictions.
 
-### Modelo de Permissões
+### Permissions Model
 
-Cada usuário possui um `role` (Admin, Editor, Viewer) e opcionalmente `permissions` granulares. Se `permissions` estiver configurado, tem precedência sobre o role legado.
+Each user has a `role` (Admin, Editor, Viewer) and optionally granular `permissions`. If `permissions` is configured, it takes precedence over the legacy role.
 
-**Recursos:**
+**Resources:**
 
-| Tipo              | Descrição                     |
-| ----------------- | ----------------------------- |
-| `all_collections` | Wildcard: todas as coleções   |
-| `collection`      | Coleção específica (por nome) |
+| Type              | Description                          |
+| ----------------- | ------------------------------------ |
+| `all_collections` | Wildcard: all collections            |
+| `collection`      | Specific collection (by name)        |
 
-**Ações:**
+**Actions:**
 
-| Ação     | Descrição                      |
-| -------- | ------------------------------ |
-| `read`   | search, get, list              |
-| `write`  | upsert, delete pontos          |
-| `create` | criar coleção                  |
-| `delete` | deletar coleção                |
-| `admin`  | gerenciar usuários, save, etc. |
+| Action   | Description                         |
+| -------- | ----------------------------------- |
+| `read`   | search, get, list                   |
+| `write`  | upsert, delete points               |
+| `create` | create collection                   |
+| `delete` | delete collection                   |
+| `admin`  | manage users, save, etc.            |
 
-**Restrição de Metadata:**
+**Metadata Restriction:**
 
-Opcional. Quando presente, resultados de busca são filtrados automaticamente (AND com filtros do request). Garante isolamento de dados por equipe/departamento.
+Optional. When present, search results are automatically filtered (AND with request filters). Ensures data isolation per team/department.
 
 **Namespace Allowance (API keys):**
 
 API keys can be restricted to one or more namespaces (multitenancy). When `allowed_namespaces` is set on a key (non-empty list), that key may only access the requested namespace if it appears in the list. If the key has no restriction (null or empty), it may access any namespace.
 
 - **Validation:** The server checks the requested namespace from: (1) query parameter `namespace` (e.g. `GET /api/v1/collections?namespace=tenant-a`), (2) header `X-Namespace`, and (3) request body fields `namespace` (search, upsert, delete points). If the key is restricted and the requested namespace is not in its list, the server returns `403` with `code: "forbidden_namespace"`.
-- **Creating/updating keys:** Use `allowed_namespaces` in `POST /api/v1/keys` (optional) and `PUT /api/v1/keys/:id` (body: `{ "allowed_namespaces": ["tenant-a", "tenant-b"] }` or `null` for “all”). Omitted or empty list = no restriction (all namespaces).
+- **Creating/updating keys:** Use `allowed_namespaces` in `POST /api/v1/keys` (optional) and `PUT /api/v1/keys/:id` (body: `{ "allowed_namespaces": ["tenant-a", "tenant-b"] }` or `null` for "all"). Omitted or empty list = no restriction (all namespaces).
 
 ### API Keys (list, create, update namespaces, delete)
 
-**GET /api/v1/keys** — Lista todas as chaves (Editor ou Admin). Resposta: array de objetos com `id`, `name`, `key_prefix`, `created_at`, e opcionalmente `allowed_namespaces` (array de strings; ausente ou vazio = todos os namespaces).
+**GET /api/v1/keys** — Lists all keys (Editor or Admin). Response: array of objects with `id`, `name`, `key_prefix`, `created_at`, and optionally `allowed_namespaces` (string array; absent or empty = all namespaces).
 
-**POST /api/v1/keys** — Cria uma nova API key (Editor ou Admin).
-
-**Request body:**
-
-| Campo                | Tipo     | Obrigatório | Descrição                                                          |
-| -------------------- | -------- | ----------- | ------------------------------------------------------------------ |
-| `name`               | string   | sim         | Nome da chave (ex.: "production", "staging").                      |
-| `allowed_namespaces` | string[] | não         | Lista de namespaces permitidos. Omitido ou vazio = acesso a todos. |
-
-**Resposta:** `200 OK` com `id`, `name`, `key`, `key_prefix`, `created_at`. O valor `key` é mostrado apenas uma vez.
-
-**PUT /api/v1/keys/{id}** — Atualiza os namespaces permitidos (Editor ou Admin).
+**POST /api/v1/keys** — Creates a new API key (Editor or Admin).
 
 **Request body:**
 
-| Campo                | Tipo            | Descrição                                   |
-| -------------------- | --------------- | ------------------------------------------- |
-| `allowed_namespaces` | array ou `null` | Lista de namespaces ou `null` para “todos”. |
+| Field                | Type     | Required | Description                                                          |
+| -------------------- | -------- | -------- | -------------------------------------------------------------------- |
+| `name`               | string   | yes      | Key name (e.g. "production", "staging").                             |
+| `allowed_namespaces` | string[] | no       | List of allowed namespaces. Omitted or empty = access to all.        |
 
-**Resposta:** `200 OK` com `{ "updated": true, "id": <id> }`.
+**Response:** `200 OK` with `id`, `name`, `key`, `key_prefix`, `created_at`. The `key` value is shown only once.
 
-**DELETE /api/v1/keys/{id}** — Remove a chave (Editor ou Admin). Resposta: `200 OK` com `{ "deleted": true, "id": <id> }`.
+**PUT /api/v1/keys/{id}** — Updates allowed namespaces (Editor or Admin).
 
-### POST /api/v1/users (com permissões)
+**Request body:**
 
-Cria um usuário com permissões granulares.
+| Field                | Type            | Description                                      |
+| -------------------- | --------------- | ------------------------------------------------ |
+| `allowed_namespaces` | array or `null` | List of namespaces or `null` for "all".          |
 
-**Request body (exemplo com permissões):**
+**Response:** `200 OK` with `{ "updated": true, "id": <id> }`.
+
+**DELETE /api/v1/keys/{id}** — Removes the key (Editor or Admin). Response: `200 OK` with `{ "deleted": true, "id": <id> }`.
+
+### POST /api/v1/users (with permissions)
+
+Creates a user with granular permissions.
+
+**Request body (example with permissions):**
 
 ```json
 {
@@ -1702,7 +1702,7 @@ Cria um usuário com permissões granulares.
 }
 ```
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/users \
@@ -1715,9 +1715,9 @@ curl -s -X POST http://localhost:8080/api/v1/users \
 
 ### PUT /api/v1/users/{username}/permissions
 
-Atualiza permissões granulares de um usuário (apenas Admin).
+Updates granular permissions for a user (Admin only).
 
-**Path:** `username` — nome do usuário.
+**Path:** `username` — username.
 
 **Request body:**
 
@@ -1732,7 +1732,7 @@ Atualiza permissões granulares de um usuário (apenas Admin).
 }
 ```
 
-Para remover permissões granulares (voltar ao comportamento legado de role):
+To remove granular permissions (revert to legacy role behavior):
 
 ```json
 {
@@ -1740,7 +1740,7 @@ Para remover permissões granulares (voltar ao comportamento legado de role):
 }
 ```
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
 ```json
 {
@@ -1749,7 +1749,7 @@ Para remover permissões granulares (voltar ao comportamento legado de role):
 }
 ```
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
 curl -s -X PUT http://localhost:8080/api/v1/users/analyst/permissions \
@@ -1760,53 +1760,53 @@ curl -s -X PUT http://localhost:8080/api/v1/users/analyst/permissions \
 
 ---
 
-### Enforcement de Permissões
+### Permission Enforcement
 
-| Endpoint                                 | Permissão Necessária |
-| ---------------------------------------- | -------------------- |
-| POST /collections                        | `create`             |
-| DELETE /collections/{name}               | `delete`             |
-| POST /collections/{name}/points          | `write`              |
-| POST /collections/{name}/points/link     | `write`              |
-| DELETE /collections/{name}/points        | `write`              |
-| POST /collections/{name}/search          | `read`               |
-| POST /collections/{name}/search/hybrid   | `read`               |
-| POST /collections/{name}/search/explain  | `read`               |
-| POST /collections/{name}/search/estimate | `read`               |
-| GET /api/v1/audit                        | Admin only           |
+| Endpoint                                 | Required Permission |
+| ---------------------------------------- | ------------------- |
+| POST /collections                        | `create`            |
+| DELETE /collections/{name}               | `delete`            |
+| POST /collections/{name}/points          | `write`             |
+| POST /collections/{name}/points/link     | `write`             |
+| DELETE /collections/{name}/points        | `write`             |
+| POST /collections/{name}/search          | `read`              |
+| POST /collections/{name}/search/hybrid   | `read`              |
+| POST /collections/{name}/search/explain  | `read`              |
+| POST /collections/{name}/search/estimate | `read`              |
+| GET /api/v1/audit                        | Admin only          |
 
-**Regras de precedência:**
+**Precedence rules:**
 
-1. **Admin** → sempre permitido
-2. **Permissões granulares** → verificadas se configuradas
-3. **Role legado** → Editor pode read/write/create; Viewer pode read
+1. **Admin** → always allowed
+2. **Granular permissions** → checked if configured
+3. **Legacy role** → Editor can read/write/create; Viewer can read
 
-**MetadataRestriction:** Se o usuário tem uma `metadata_restriction` na permissão de Read, o filtro é injetado automaticamente (AND com filtros do request). Exemplo: um usuário com `department=sales` só verá resultados com `department=sales`.
+**MetadataRestriction:** If the user has a `metadata_restriction` in their Read permission, the filter is automatically injected (AND with request filters). Example: a user with `department=sales` will only see results with `department=sales`.
 
-**Namespace (API keys):** Se a API key tiver `allowed_namespaces` definido, o servidor valida o namespace solicitado (query `namespace`, header `X-Namespace` ou body `namespace`). Se não permitido, retorna `403` com `code: "forbidden_namespace"`.
+**Namespace (API keys):** If the API key has `allowed_namespaces` set, the server validates the requested namespace (query `namespace`, header `X-Namespace` or body `namespace`). If not allowed, returns `403` with `code: "forbidden_namespace"`.
 
 ---
 
 ## Audit Trail
 
-O FerresDB registra todas as ações em um audit trail persistente (arquivos JSONL com rotação diária).
+FerresDB records all actions in a persistent audit trail (JSONL files with daily rotation).
 
 ### GET /api/v1/audit
 
-Consulta entradas de auditoria filtradas (apenas Admin).
+Queries filtered audit entries (Admin only).
 
 **Query params:**
 
-| Param      | Tipo   | Default | Descrição                                              |
-| ---------- | ------ | ------- | ------------------------------------------------------ |
-| `user`     | string | —       | Filtrar por user_id                                    |
-| `action`   | string | —       | Filtrar por ação (ex: "search", "upsert", "login")     |
-| `resource` | string | —       | Filtrar por recurso (substring, ex: "collection:docs") |
-| `from`     | string | 7d ago  | Data/hora de início (RFC 3339)                         |
-| `to`       | string | now     | Data/hora de fim (RFC 3339)                            |
-| `limit`    | number | 100     | Máximo de entradas (max: 1000)                         |
+| Param      | Type   | Default | Description                                                |
+| ---------- | ------ | ------- | ---------------------------------------------------------- |
+| `user`     | string | —       | Filter by user_id                                          |
+| `action`   | string | —       | Filter by action (e.g. "search", "upsert", "login")        |
+| `resource` | string | —       | Filter by resource (substring, e.g. "collection:docs")     |
+| `from`     | string | 7d ago  | Start date/time (RFC 3339)                                 |
+| `to`       | string | now     | End date/time (RFC 3339)                                   |
+| `limit`    | number | 100     | Maximum entries (max: 1000)                                |
 
-**Resposta:** `200 OK`
+**Response:** `200 OK`
 
 ```json
 [
@@ -1831,20 +1831,20 @@ Consulta entradas de auditoria filtradas (apenas Admin).
 ]
 ```
 
-| Campo         | Tipo   | Descrição                                                                                           |
-| ------------- | ------ | --------------------------------------------------------------------------------------------------- |
-| `timestamp`   | string | Data/hora UTC (RFC 3339)                                                                            |
-| `user_id`     | string | Usuário que executou a ação                                                                         |
-| `action`      | string | Ação: search, upsert, delete_points, create_collection, delete_collection, login, create_user, etc. |
-| `resource`    | string | Recurso: collection:nome, user:nome, api_key:nome, system:collections                               |
-| `details`     | object | Detalhes resumidos (sem vetores)                                                                    |
-| `result`      | string | success, denied, error                                                                              |
-| `ip_address`  | string | IP do cliente (se disponível)                                                                       |
-| `duration_ms` | number | Duração em ms (se disponível)                                                                       |
+| Field         | Type   | Description                                                                                          |
+| ------------- | ------ | ---------------------------------------------------------------------------------------------------- |
+| `timestamp`   | string | UTC date/time (RFC 3339)                                                                             |
+| `user_id`     | string | User who performed the action                                                                        |
+| `action`      | string | Action: search, upsert, delete_points, create_collection, delete_collection, login, create_user, etc.|
+| `resource`    | string | Resource: collection:name, user:name, api_key:name, system:collections                              |
+| `details`     | object | Summary details (without vectors)                                                                    |
+| `result`      | string | success, denied, error                                                                               |
+| `ip_address`  | string | Client IP (if available)                                                                             |
+| `duration_ms` | number | Duration in ms (if available)                                                                        |
 
-**Ações auditadas:**
+**Audited actions:**
 
-- `login` (sucesso e falha)
+- `login` (success and failure)
 - `search`, `search_hybrid`
 - `upsert`, `delete_points`
 - `create_collection`, `delete_collection`
@@ -1852,62 +1852,62 @@ Consulta entradas de auditoria filtradas (apenas Admin).
 - `create_api_key`, `delete_api_key`
 - `save`
 
-**Exemplo curl:**
+**curl example:**
 
 ```bash
-# Todas as ações das últimas 24h
+# All actions in the last 24h
 curl -s http://localhost:8080/api/v1/audit?limit=50 \
   -H "Authorization: Bearer <admin-key>"
 
-# Ações de um usuário específico
+# Actions from a specific user
 curl -s "http://localhost:8080/api/v1/audit?user=analyst&action=search" \
   -H "Authorization: Bearer <admin-key>"
 
-# Ações negadas
+# Actions in a time range
 curl -s "http://localhost:8080/api/v1/audit?from=2026-02-07T00:00:00Z&to=2026-02-08T00:00:00Z" \
   -H "Authorization: Bearer <admin-key>"
 ```
 
-### Armazenamento
+### Storage
 
-Os logs de auditoria são escritos em arquivos JSONL no diretório de dados:
+Audit logs are written to JSONL files in the data directory:
 
 ```
 data/logs/audit-2026-02-07.jsonl
 data/logs/audit-2026-02-08.jsonl
 ```
 
-- Rotação diária (novo arquivo por dia)
-- Append-only (como o WAL)
-- Escrita assíncrona (não impacta latência dos handlers)
+- Daily rotation (new file per day)
+- Append-only (like WAL)
+- Asynchronous writes (do not impact handler latency)
 
 ---
 
 ## WebSocket Streaming
 
-O FerresDB suporta ingestão e subscrição de eventos em tempo real via WebSocket. O protocolo é JSON sobre WebSocket com mensagens tipadas.
+FerresDB supports real-time point ingestion and event subscription via WebSocket. The protocol is JSON over WebSocket with typed messages.
 
 ### GET /api/v1/ws
 
-Endpoint para upgrade HTTP → WebSocket.
+Endpoint for HTTP → WebSocket upgrade.
 
-**Autenticação:** Obrigatória. Aceita API key de duas formas:
+**Authentication:** Required. Accepts API key in two ways:
 
 - **Query param:** `?token=sk-xxx`
 - **Header:** `Authorization: Bearer <key>`
 
-**Limites:**
+**Limits:**
 
-| Parâmetro                  | Valor                                  |
-| -------------------------- | -------------------------------------- |
-| Máximo de conexões         | 100 (configurável)                     |
-| Tamanho máximo de mensagem | 10 MB                                  |
-| Heartbeat (ping)           | a cada 30s                             |
-| Timeout de pong            | 10s (se não chegar, conexão é fechada) |
-| Timeout de inatividade     | 5 minutos                              |
-| Debounce de batch (upsert) | 10ms                                   |
+| Parameter                  | Value                                     |
+| -------------------------- | ----------------------------------------- |
+| Maximum connections        | 100 (configurable)                        |
+| Maximum message size       | 10 MB                                     |
+| Heartbeat (ping)           | every 30s                                 |
+| Pong timeout               | 10s (if not received, connection is closed)|
+| Inactivity timeout         | 5 minutes                                 |
+| Batch debounce (upsert)    | 10ms                                      |
 
-**Exemplo de conexão (JavaScript):**
+**JavaScript connection example:**
 
 ```javascript
 const ws = new WebSocket("ws://localhost:8080/api/v1/ws?token=sk-xxx");
@@ -1915,30 +1915,30 @@ ws.onopen = () => console.log("Connected");
 ws.onmessage = (event) => console.log(JSON.parse(event.data));
 ```
 
-**Exemplo com wscat:**
+**Example with wscat:**
 
 ```bash
 wscat -c "ws://localhost:8080/api/v1/ws?token=sk-xxx"
 ```
 
-**Erros de conexão:**
+**Connection errors:**
 
-| Status | Descrição                               |
-| ------ | --------------------------------------- |
-| `401`  | API key inválida ou ausente             |
-| `503`  | Limite de conexões simultâneas atingido |
+| Status | Description                               |
+| ------ | ----------------------------------------- |
+| `401`  | Invalid or missing API key                |
+| `503`  | Simultaneous connection limit reached     |
 
 ---
 
-### Protocolo de Mensagens
+### Message Protocol
 
-Todas as mensagens são objetos JSON com campo `type` discriminador.
+All messages are JSON objects with a `type` discriminator field.
 
-#### Mensagens do Cliente → Servidor
+#### Client → Server Messages
 
-##### `upsert` — Ingestão de pontos em tempo real
+##### `upsert` — Real-time point ingestion
 
-Insere ou atualiza pontos numa coleção. Mensagens de upsert são acumuladas internamente por 10ms (debounce) antes do flush para melhor throughput em alta frequência.
+Inserts or updates points in a collection. Upsert messages are accumulated internally for 10ms (debounce) before flushing for better throughput at high frequency.
 
 ```json
 {
@@ -1948,36 +1948,36 @@ Insere ou atualiza pontos numa coleção. Mensagens de upsert são acumuladas in
     {
       "id": "doc-1",
       "vector": [0.1, 0.2, -0.1],
-      "metadata": { "text": "conteúdo do documento" }
+      "metadata": { "text": "document content" }
     },
     {
       "id": "doc-2",
       "vector": [0.3, -0.1, 0.5],
-      "metadata": { "text": "outro documento" }
+      "metadata": { "text": "another document" }
     }
   ]
 }
 ```
 
-| Campo        | Tipo   | Obrigatório | Descrição                              |
-| ------------ | ------ | ----------- | -------------------------------------- |
-| `type`       | string | sim         | Sempre `"upsert"`                      |
-| `collection` | string | sim         | Nome da coleção alvo                   |
-| `points`     | array  | sim         | Array de pontos (id, vector, metadata) |
+| Field        | Type   | Required | Description                              |
+| ------------ | ------ | -------- | ---------------------------------------- |
+| `type`       | string | yes      | Always `"upsert"`                        |
+| `collection` | string | yes      | Target collection name                   |
+| `points`     | array  | yes      | Array of points (id, vector, metadata)   |
 
-Cada ponto:
+Each point:
 
-| Campo      | Tipo   | Obrigatório | Descrição                                   |
-| ---------- | ------ | ----------- | ------------------------------------------- |
-| `id`       | string | sim         | ID único do ponto                           |
-| `vector`   | array  | sim         | Array de floats (mesma dimensão da coleção) |
-| `metadata` | object | não         | JSON arbitrário (default: `{}`)             |
+| Field      | Type   | Required | Description                                   |
+| ---------- | ------ | -------- | --------------------------------------------- |
+| `id`       | string | yes      | Unique point ID                               |
+| `vector`   | array  | yes      | Float array (same dimension as collection)    |
+| `metadata` | object | no       | Arbitrary JSON (default: `{}`)                |
 
-**Resposta:** mensagem `ack` (ver abaixo).
+**Response:** `ack` message (see below).
 
-##### `subscribe` — Subscrição a eventos de uma coleção
+##### `subscribe` — Subscription to collection events
 
-Inscreve a conexão para receber notificações em tempo real quando pontos são inseridos ou deletados numa coleção.
+Subscribes the connection to receive real-time notifications when points are inserted or deleted in a collection.
 
 ```json
 {
@@ -1987,20 +1987,20 @@ Inscreve a conexão para receber notificações em tempo real quando pontos são
 }
 ```
 
-| Campo        | Tipo   | Obrigatório | Descrição                                                                                        |
-| ------------ | ------ | ----------- | ------------------------------------------------------------------------------------------------ |
-| `type`       | string | sim         | Sempre `"subscribe"`                                                                             |
-| `collection` | string | sim         | Nome da coleção para subscrever                                                                  |
-| `events`     | array  | não         | Filtro de tipos de evento: `["upsert"]`, `["delete"]`, ou ambos. Se vazio/ausente, recebe todos. |
+| Field        | Type   | Required | Description                                                                                        |
+| ------------ | ------ | -------- | -------------------------------------------------------------------------------------------------- |
+| `type`       | string | yes      | Always `"subscribe"`                                                                               |
+| `collection` | string | yes      | Collection name to subscribe to                                                                    |
+| `events`     | array  | no       | Event type filter: `["upsert"]`, `["delete"]`, or both. If empty/absent, receives all.             |
 
-**Resposta:** mensagem `ack` confirmando a subscrição (com `upserted: 0, failed: 0, took_ms: 0`).
+**Response:** `ack` message confirming the subscription (with `upserted: 0, failed: 0, took_ms: 0`).
 
-**Erros:**
+**Errors:**
 
-- `404` — coleção não encontrada
-- `409` — já está subscrito nesta coleção
+- `404` — collection not found
+- `409` — already subscribed to this collection
 
-##### `ping` — Heartbeat aplicacional
+##### `ping` — Application heartbeat
 
 ```json
 {
@@ -2008,15 +2008,15 @@ Inscreve a conexão para receber notificações em tempo real quando pontos são
 }
 ```
 
-**Resposta:** mensagem `pong`.
+**Response:** `pong` message.
 
 ---
 
-#### Mensagens do Servidor → Cliente
+#### Server → Client Messages
 
-##### `ack` — Confirmação de operação
+##### `ack` — Operation confirmation
 
-Enviada após um `upsert` ou `subscribe` bem-sucedido.
+Sent after a successful `upsert` or `subscribe`.
 
 ```json
 {
@@ -2027,16 +2027,16 @@ Enviada após um `upsert` ou `subscribe` bem-sucedido.
 }
 ```
 
-| Campo      | Tipo   | Descrição                                     |
-| ---------- | ------ | --------------------------------------------- |
-| `type`     | string | Sempre `"ack"`                                |
-| `upserted` | number | Pontos inseridos/atualizados com sucesso      |
-| `failed`   | number | Pontos que falharam (dimensão inválida, etc.) |
-| `took_ms`  | number | Tempo de processamento em ms                  |
+| Field      | Type   | Description                                      |
+| ---------- | ------ | ------------------------------------------------ |
+| `type`     | string | Always `"ack"`                                   |
+| `upserted` | number | Points successfully inserted/updated             |
+| `failed`   | number | Points that failed (invalid dimension, etc.)     |
+| `took_ms`  | number | Processing time in ms                            |
 
-##### `event` — Notificação de mudança em coleção
+##### `event` — Collection change notification
 
-Enviada para subscribers quando pontos são inseridos ou deletados (via REST ou WebSocket).
+Sent to subscribers when points are inserted or deleted (via REST or WebSocket).
 
 ```json
 {
@@ -2048,17 +2048,17 @@ Enviada para subscribers quando pontos são inseridos ou deletados (via REST ou 
 }
 ```
 
-| Campo        | Tipo   | Descrição                                  |
-| ------------ | ------ | ------------------------------------------ |
-| `type`       | string | Sempre `"event"`                           |
-| `collection` | string | Nome da coleção                            |
-| `action`     | string | Tipo de operação: `"upsert"` ou `"delete"` |
-| `point_ids`  | array  | IDs dos pontos afetados                    |
-| `timestamp`  | number | Timestamp UNIX (segundos) da operação      |
+| Field        | Type   | Description                                  |
+| ------------ | ------ | -------------------------------------------- |
+| `type`       | string | Always `"event"`                             |
+| `collection` | string | Collection name                              |
+| `action`     | string | Operation type: `"upsert"` or `"delete"`     |
+| `point_ids`  | array  | IDs of affected points                       |
+| `timestamp`  | number | UNIX timestamp (seconds) of the operation    |
 
-**Nota:** Eventos são emitidos tanto por operações REST (`POST /points`, `DELETE /points`) quanto por upserts via WebSocket. Todos os subscribers ativos recebem a notificação.
+**Note:** Events are emitted both by REST operations (`POST /points`, `DELETE /points`) and by WebSocket upserts. All active subscribers receive the notification.
 
-##### `error` — Erro
+##### `error` — Error
 
 ```json
 {
@@ -2068,23 +2068,23 @@ Enviada para subscribers quando pontos são inseridos ou deletados (via REST ou 
 }
 ```
 
-| Campo     | Tipo   | Descrição                                       |
+| Field     | Type   | Description                                     |
 | --------- | ------ | ----------------------------------------------- |
-| `type`    | string | Sempre `"error"`                                |
-| `message` | string | Mensagem legível do erro                        |
-| `code`    | number | Código HTTP semântico (400, 404, 408, 409, 500) |
+| `type`    | string | Always `"error"`                                |
+| `message` | string | Human-readable error message                    |
+| `code`    | number | Semantic HTTP code (400, 404, 408, 409, 500)    |
 
-Códigos de erro comuns:
+Common error codes:
 
-| Code | Descrição                            |
-| ---- | ------------------------------------ |
-| 400  | Mensagem JSON inválida ou malformada |
-| 404  | Coleção não encontrada               |
-| 408  | Timeout (inatividade ou pong)        |
-| 409  | Já subscrito nesta coleção           |
-| 500  | Erro interno (lock, insert, etc.)    |
+| Code | Description                              |
+| ---- | ---------------------------------------- |
+| 400  | Invalid or malformed JSON message        |
+| 404  | Collection not found                     |
+| 408  | Timeout (inactivity or pong)             |
+| 409  | Already subscribed to this collection    |
+| 500  | Internal error (lock, insert, etc.)      |
 
-##### `pong` — Resposta a ping
+##### `pong` — Ping response
 
 ```json
 {
@@ -2094,49 +2094,49 @@ Códigos de erro comuns:
 
 ---
 
-### Comportamento de Batch (Debounce)
+### Batch Behavior (Debounce)
 
-Mensagens `upsert` enviadas em rápida sucessão são acumuladas automaticamente por **10ms** antes de serem processadas. Isso melhora significativamente o throughput em cenários de alta frequência de ingestão:
+`upsert` messages sent in quick succession are automatically accumulated for **10ms** before being processed. This significantly improves throughput in high-frequency ingestion scenarios:
 
-1. O cliente envia múltiplas mensagens `upsert` rapidamente
-2. O servidor acumula todas durante a janela de 10ms
-3. Pontos são agrupados por coleção
-4. Cada grupo é inserido em batch único
-5. Um `ack` é enviado por coleção com o total consolidado
-
----
-
-### Heartbeat e Timeouts
-
-O servidor mantém a conexão saudável com heartbeat bidirecional:
-
-1. **Ping do servidor** (a cada 30s): o servidor envia `{"type":"ping"}` ao cliente
-2. **Pong do cliente**: o cliente deve responder com `{"type":"ping"}` (que recebe `{"type":"pong"}`)
-3. **Timeout de pong**: se o pong não chegar dentro de um intervalo de heartbeat (~30s), a conexão é fechada com `{"type":"error","message":"pong timeout","code":408}`
-4. **Timeout de inatividade**: se não houver atividade (nenhuma mensagem recebida) por 5 minutos, a conexão é fechada com `{"type":"error","message":"inactivity timeout","code":408}`
+1. The client sends multiple `upsert` messages quickly
+2. The server accumulates all of them during the 10ms window
+3. Points are grouped by collection
+4. Each group is inserted as a single batch
+5. One `ack` is sent per collection with the consolidated total
 
 ---
 
-### Métricas Prometheus
+### Heartbeat and Timeouts
 
-O WebSocket expõe métricas para observabilidade:
+The server maintains the connection with bidirectional heartbeat:
 
-| Métrica                      | Tipo    | Labels | Descrição                                           |
-| ---------------------------- | ------- | ------ | --------------------------------------------------- |
-| `ws_connections_active`      | Gauge   | —      | Conexões WebSocket ativas no momento                |
-| `ws_messages_received_total` | Counter | `type` | Mensagens recebidas (text, upsert, subscribe, ping) |
-| `ws_messages_sent_total`     | Counter | `type` | Mensagens enviadas (outgoing, event)                |
+1. **Server ping** (every 30s): the server sends `{"type":"ping"}` to the client
+2. **Client pong**: the client must respond with `{"type":"ping"}` (which receives `{"type":"pong"}`)
+3. **Pong timeout**: if the pong does not arrive within a heartbeat interval (~30s), the connection is closed with `{"type":"error","message":"pong timeout","code":408}`
+4. **Inactivity timeout**: if there is no activity (no messages received) for 5 minutes, the connection is closed with `{"type":"error","message":"inactivity timeout","code":408}`
 
 ---
 
-### Exemplo Completo: Ingestão + Subscrição
+### Prometheus Metrics
+
+WebSocket exposes metrics for observability:
+
+| Metric                       | Type    | Labels | Description                                          |
+| ---------------------------- | ------- | ------ | ---------------------------------------------------- |
+| `ws_connections_active`      | Gauge   | —      | Currently active WebSocket connections               |
+| `ws_messages_received_total` | Counter | `type` | Messages received (text, upsert, subscribe, ping)    |
+| `ws_messages_sent_total`     | Counter | `type` | Messages sent (outgoing, event)                      |
+
+---
+
+### Full Example: Ingestion + Subscription
 
 ```javascript
-// Conectar
+// Connect
 const ws = new WebSocket("ws://localhost:8080/api/v1/ws?token=sk-xxx");
 
 ws.onopen = () => {
-  // 1. Subscrever a eventos da coleção "docs"
+  // 1. Subscribe to events from the "docs" collection
   ws.send(
     JSON.stringify({
       type: "subscribe",
@@ -2145,7 +2145,7 @@ ws.onopen = () => {
     }),
   );
 
-  // 2. Inserir pontos via WebSocket
+  // 2. Insert points via WebSocket
   ws.send(
     JSON.stringify({
       type: "upsert",
@@ -2188,7 +2188,7 @@ ws.onmessage = (event) => {
   }
 };
 
-// Heartbeat: responder pings do servidor
+// Heartbeat: respond to server pings
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
   if (msg.type === "ping") {
@@ -2197,7 +2197,7 @@ ws.onmessage = (event) => {
 };
 ```
 
-**Exemplo Python (websockets):**
+**Python example (websockets):**
 
 ```python
 import asyncio
@@ -2207,7 +2207,7 @@ import websockets
 async def main():
     uri = "ws://localhost:8080/api/v1/ws?token=sk-xxx"
     async with websockets.connect(uri) as ws:
-        # Subscrever
+        # Subscribe
         await ws.send(json.dumps({
             "type": "subscribe",
             "collection": "docs"
@@ -2222,7 +2222,7 @@ async def main():
             ]
         }))
 
-        # Receber mensagens
+        # Receive messages
         async for message in ws:
             msg = json.loads(message)
             print(f"[{msg['type']}] {msg}")
@@ -2232,34 +2232,34 @@ asyncio.run(main())
 
 ---
 
-## API gRPC (feature `grpc`)
+## gRPC API (feature `grpc`)
 
-O FerresDB oferece uma **API gRPC nativa** como alternativa à API REST, ideal para comunicação server-to-server com alta performance, streaming bidirecional e geração automática de clientes em qualquer linguagem.
+FerresDB offers a **native gRPC API** as an alternative to the REST API, ideal for server-to-server communication with high performance, bidirectional streaming and automatic client generation in any language.
 
-### Ativação
+### Activation
 
-A API gRPC é opcional e controlada por feature flag. Para compilar com suporte gRPC:
+The gRPC API is optional and controlled by feature flag. To build with gRPC support:
 
 ```bash
 cargo build -p ferres-db-server --features grpc
 ```
 
-O servidor REST continua funcionando normalmente mesmo sem a feature `grpc`.
+The REST server continues to work normally even without the `grpc` feature.
 
-### Portas
+### Ports
 
-| Protocolo | Porta padrão | Configuração         |
+| Protocol  | Default port | Configuration        |
 | --------- | ------------ | -------------------- |
-| REST/HTTP | 8080         | `PORT` env ou config |
+| REST/HTTP | 8080         | `PORT` env or config |
 | gRPC      | 50051        | `GRPC_PORT` env      |
 
-Ambos os servidores rodam simultaneamente quando a feature está habilitada.
+Both servers run simultaneously when the feature is enabled.
 
 ### Proto file
 
-O arquivo de definição está em `crates/server/proto/ferresdb.proto` (package `ferresdb.v1`).
+The definition file is at `crates/server/proto/ferresdb.proto` (package `ferresdb.v1`).
 
-### Serviço `FerresDB`
+### `FerresDB` service
 
 ```protobuf
 service FerresDB {
@@ -2280,13 +2280,13 @@ service FerresDB {
   rpc HybridSearch(HybridSearchRequest) returns (SearchResponse);
   rpc ExplainSearch(ExplainSearchRequest) returns (ExplainSearchResponse);
 
-  // Streaming bidirecional
+  // Bidirectional streaming
   rpc StreamUpsert(stream UpsertPointsRequest) returns (stream UpsertPointsResponse);
   rpc StreamSearch(stream SearchRequest) returns (stream SearchResponse);
 }
 ```
 
-### Mapeamento REST → gRPC
+### REST → gRPC mapping
 
 | REST Endpoint                                    | gRPC RPC                        |
 | ------------------------------------------------ | ------------------------------- |
@@ -2304,16 +2304,16 @@ service FerresDB {
 | `POST /api/v1/collections/{name}/search/explain` | `ExplainSearch`                 |
 | WebSocket streaming                              | `StreamUpsert` / `StreamSearch` |
 
-### Diferenças em relação à API REST
+### Differences from the REST API
 
-- **Metadata**: no gRPC, metadata é transmitido como JSON string no campo `metadata_json` (em vez de objeto JSON inline).
-- **Filtros**: filtros são JSON strings no campo `filter_json`.
-- **Distance Metric**: enum protobuf `DistanceMetric` (1=Cosine, 2=DotProduct, 3=Euclidean).
-- **Autenticação**: a API gRPC não inclui middleware de autenticação por API key (ideal para redes internas/service mesh). Para ambientes expostos, use um proxy com mTLS.
+- **Metadata**: in gRPC, metadata is transmitted as a JSON string in the `metadata_json` field (instead of inline JSON object).
+- **Filters**: filters are JSON strings in the `filter_json` field.
+- **Distance Metric**: protobuf enum `DistanceMetric` (1=Cosine, 2=DotProduct, 3=Euclidean).
+- **Authentication**: the gRPC API does not include API key authentication middleware (ideal for internal networks/service mesh). For exposed environments, use a proxy with mTLS.
 
-### Exemplos com `grpcurl`
+### Examples with `grpcurl`
 
-**Criar coleção:**
+**Create collection:**
 
 ```bash
 grpcurl -plaintext -d '{
@@ -2323,13 +2323,13 @@ grpcurl -plaintext -d '{
 }' localhost:50051 ferresdb.v1.FerresDB/CreateCollection
 ```
 
-**Listar coleções:**
+**List collections:**
 
 ```bash
 grpcurl -plaintext localhost:50051 ferresdb.v1.FerresDB/ListCollections
 ```
 
-**Upsert de pontos:**
+**Upsert points:**
 
 ```bash
 grpcurl -plaintext -d '{
@@ -2344,7 +2344,7 @@ grpcurl -plaintext -d '{
 }' localhost:50051 ferresdb.v1.FerresDB/UpsertPoints
 ```
 
-**Busca vetorial:**
+**Vector search:**
 
 ```bash
 grpcurl -plaintext -d '{
@@ -2354,7 +2354,7 @@ grpcurl -plaintext -d '{
 }' localhost:50051 ferresdb.v1.FerresDB/Search
 ```
 
-**Busca híbrida:**
+**Hybrid search:**
 
 ```bash
 grpcurl -plaintext -d '{
@@ -2368,7 +2368,7 @@ grpcurl -plaintext -d '{
 }' localhost:50051 ferresdb.v1.FerresDB/HybridSearch
 ```
 
-### Gerando clientes gRPC
+### Generating gRPC clients
 
 **Python:**
 
@@ -2404,45 +2404,45 @@ protoc --go_out=. --go-grpc_out=. \
 
 ## Model Context Protocol (MCP)
 
-O FerresDB pode atuar como **servidor MCP** (Model Context Protocol) via STDIO, permitindo que clientes como Claude Desktop se conectem ao binário e usem ferramentas para busca vetorial, upsert e estatísticas. O protocolo usa **stdin** para entrada e **stdout** para saída; os logs do servidor são redirecionados para **stderr** quando o modo MCP está ativo, para não corromper as mensagens MCP.
+FerresDB can act as an **MCP server** (Model Context Protocol) via STDIO, allowing clients such as Claude Desktop to connect to the binary and use tools for vector search, upsert and statistics. The protocol uses **stdin** for input and **stdout** for output; server logs are redirected to **stderr** when MCP mode is active, to avoid corrupting MCP messages.
 
-### Ativação
+### Activation
 
-- **Linha de comando:** execute o binário com a flag `--mcp`.
-- **Variável de ambiente:** `FERRESDB_ENABLE_MCP=true` ou `FERRESDB_ENABLE_MCP=1`.
+- **Command line:** run the binary with the `--mcp` flag.
+- **Environment variable:** `FERRESDB_ENABLE_MCP=true` or `FERRESDB_ENABLE_MCP=1`.
 
-O servidor REST (e gRPC, se habilitado) continua ativo no mesmo processo. O modo MCP requer que o binário tenha sido compilado com a feature `mcp`:
+The REST server (and gRPC, if enabled) remains active in the same process. MCP mode requires the binary to have been compiled with the `mcp` feature:
 
 ```bash
 cargo build -p ferres-db-server --features mcp
 ```
 
-Exemplo para uso com Claude Desktop (stdio):
+Example for use with Claude Desktop (stdio):
 
 ```bash
 /path/to/ferres-db-server --mcp
 ```
 
-### Ferramentas MCP
+### MCP Tools
 
-Três ferramentas estão disponíveis quando o servidor MCP está ativo.
+Three tools are available when the MCP server is active.
 
 #### `search_points`
 
-Busca por similaridade vetorial em uma coleção. Utiliza o **pre-filtering nativo** do core: quando `filter` ou `namespace` é informado, o filtro é aplicado durante a exploração do grafo HNSW (não apenas pós-busca).
+Vector similarity search in a collection. Uses the core's **native pre-filtering**: when `filter` or `namespace` is provided, the filter is applied during HNSW graph exploration (not just post-search).
 
-| Argumento      | Tipo   | Obrigatório | Descrição                                                                   |
-| -------------- | ------ | ----------- | --------------------------------------------------------------------------- |
-| `collection`   | string | sim         | Nome da coleção.                                                            |
-| `vector`       | array  | sim         | Vetor de consulta (array de números).                                       |
-| `limit`        | number | sim         | Número máximo de resultados (1 a 10000).                                    |
-| `filter`       | object | não         | Filtro de metadata (JSON). Ex.: `{"category": "tech"}`.                     |
-| `namespace`    | string | não         | Restringe a um namespace lógico (multitenancy).                             |
-| `vector_field` | string | não         | Campo vetorial (omitido ou `"default"` = vetor principal; outro = nomeado). |
+| Argument       | Type   | Required | Description                                                                   |
+| -------------- | ------ | -------- | ----------------------------------------------------------------------------- |
+| `collection`   | string | yes      | Collection name.                                                              |
+| `vector`       | array  | yes      | Query vector (array of numbers).                                              |
+| `limit`        | number | yes      | Maximum number of results (1 to 10000).                                       |
+| `filter`       | object | no       | Metadata filter (JSON). E.g. `{"category": "tech"}`.                          |
+| `namespace`    | string | no       | Restricts to a logical namespace (multitenancy).                              |
+| `vector_field` | string | no       | Vector field (omitted or `"default"` = main vector; other = named).           |
 
-**Resposta (sucesso):** objeto com chave `results`, array de objetos `{ "id", "score", "metadata", "namespace" }`.
+**Response (success):** object with key `results`, array of objects `{ "id", "score", "metadata", "namespace" }`.
 
-**Exemplo de argumentos:**
+**Example arguments:**
 
 ```json
 {
@@ -2456,35 +2456,35 @@ Busca por similaridade vetorial em uma coleção. Utiliza o **pre-filtering nati
 
 #### `upsert_points`
 
-Insere ou atualiza pontos em uma coleção. No canal MCP não há autenticação (canal confiável). Reutiliza a mesma validação e lógica de inserção da API REST (dimensão, batch, `Point::new`, `insert_batch`).
+Inserts or updates points in a collection. The MCP channel has no authentication (trusted channel). Reuses the same validation and insertion logic as the REST API (dimension, batch, `Point::new`, `insert_batch`).
 
-| Argumento    | Tipo   | Obrigatório | Descrição        |
-| ------------ | ------ | ----------- | ---------------- |
-| `collection` | string | sim         | Nome da coleção. |
-| `points`     | array  | sim         | Array de pontos. |
+| Argument     | Type   | Required | Description         |
+| ------------ | ------ | -------- | ------------------- |
+| `collection` | string | yes      | Collection name.    |
+| `points`     | array  | yes      | Array of points.    |
 
-Cada elemento de `points` deve ter:
+Each element of `points` must have:
 
-| Campo       | Tipo   | Obrigatório | Descrição                 |
-| ----------- | ------ | ----------- | ------------------------- |
-| `id`        | string | sim         | Identificador do ponto.   |
-| `vector`    | array  | sim         | Vetor (array de números). |
-| `metadata`  | object | não         | Metadados JSON.           |
-| `namespace` | string | não         | Namespace lógico.         |
-| `ttl`       | number | não         | TTL em segundos.          |
+| Field       | Type   | Required | Description               |
+| ----------- | ------ | -------- | ------------------------- |
+| `id`        | string | yes      | Point identifier.         |
+| `vector`    | array  | yes      | Vector (array of numbers).|
+| `metadata`  | object | no       | JSON metadata.            |
+| `namespace` | string | no       | Logical namespace.        |
+| `ttl`       | number | no       | TTL in seconds.           |
 
-**Resposta (sucesso):** objeto `{ "upserted": number, "failed": array }`, onde `failed` contém itens com `id` e `reason` em caso de erro por ponto.
+**Response (success):** object `{ "upserted": number, "failed": array }`, where `failed` contains items with `id` and `reason` in case of per-point error.
 
 #### `get_stats`
 
-Retorna estatísticas globais ou por coleção.
+Returns global or per-collection statistics.
 
-| Argumento    | Tipo   | Obrigatório | Descrição                                                                |
-| ------------ | ------ | ----------- | ------------------------------------------------------------------------ |
-| `collection` | string | não         | Se omitido: estatísticas globais. Se informado: estatísticas da coleção. |
+| Argument     | Type   | Required | Description                                                                 |
+| ------------ | ------ | -------- | --------------------------------------------------------------------------- |
+| `collection` | string | no       | If omitted: global statistics. If provided: collection statistics.          |
 
-**Resposta (global):** `total_collections`, `total_points`, `total_queries_24h`, `avg_latency_ms`, `queries_per_minute`, `simd_enabled`.
+**Response (global):** `total_collections`, `total_points`, `total_queries_24h`, `avg_latency_ms`, `queries_per_minute`, `simd_enabled`.
 
-**Resposta (por coleção):** `num_points`, `num_queries`, `avg_latency_ms`, `p50_latency_ms`, `p95_latency_ms`, `p99_latency_ms`, `tombstone_count`, `tombstone_memory_waste_bytes`.
+**Response (per collection):** `num_points`, `num_queries`, `avg_latency_ms`, `p50_latency_ms`, `p95_latency_ms`, `p99_latency_ms`, `tombstone_count`, `tombstone_memory_waste_bytes`.
 
-Erros (coleção não encontrada, dimensão inválida, etc.) são retornados como conteúdo de erro no resultado da ferramenta (estrutura `error` / `message` em JSON).
+Errors (collection not found, invalid dimension, etc.) are returned as error content in the tool result (`error` / `message` structure in JSON).
