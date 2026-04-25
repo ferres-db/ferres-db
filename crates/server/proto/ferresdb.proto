@@ -264,6 +264,7 @@ message WalEntryMessage {
   oneof operation {
     WalUpsert upsert = 2;
     WalDelete delete = 3;
+    WalLink   link   = 4;
   }
 }
 
@@ -277,6 +278,11 @@ message WalUpsert {
 
 message WalDelete {
   string id = 1;
+}
+
+message WalLink {
+  string from = 1;
+  string to   = 2;
 }
 
 message StreamWalResponse {
