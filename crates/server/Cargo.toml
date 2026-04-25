@@ -46,14 +46,14 @@ thiserror = { workspace = true }
 toml = "0.8"
 dotenvy = "0.15"
 chrono = { workspace = true }
-validator = { version = "0.18", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 regex = "1.10"
 lazy_static = "1.5"
 dashmap = "6"
 tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 futures = "0.3"
-prometheus = "0.13"
+prometheus = "0.14"
 uuid = { workspace = true }
 sysinfo = "0.31"
 fs4 = "0.6"
