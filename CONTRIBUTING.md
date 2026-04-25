@@ -1,16 +1,16 @@
-# Guia de Contribuição
+# Contribution Guide
 
-Obrigado por considerar contribuir com o FerresDB Core. Este guia cobre ambiente de desenvolvimento, testes, padrões de código e processo de PR.
+Thank you for considering contributing to FerresDB Core. This guide covers the development environment, testing, code standards and PR process.
 
-## Pré-requisitos
+## Prerequisites
 
-- **Rust**: 1.70+ (`rustup` recomendado)
-- **Python**: 3.10+ (para scripts, exemplos e testes E2E)
-- **Make** (opcional): para alvos do `Makefile`
+- **Rust**: 1.70+ (`rustup` recommended)
+- **Python**: 3.10+ (for scripts, examples and E2E tests)
+- **Make** (optional): for `Makefile` targets
 
-## Configuração do ambiente
+## Environment setup
 
-### 1. Clone e build
+### 1. Clone and build
 
 ```bash
 git clone <repo-url>
@@ -18,61 +18,61 @@ cd ferres-db-core
 cargo build
 ```
 
-### 2. Executar testes
+### 2. Run tests
 
 ```bash
-# Testes unitários e de integração (workspace)
+# Unit and integration tests (workspace)
 cargo test --workspace
 
-# Ou via Makefile
+# Or via Makefile
 make test
 ```
 
-### 3. Servidor local
+### 3. Local server
 
 ```bash
 cargo run --bin ferres-db-server
-# ou: make run
+# or: make run
 ```
 
-O servidor sobe em `http://localhost:8080`. Documentação da API: [docs/api.md](docs/api.md).
+The server starts at `http://localhost:8080`. API documentation: [docs/api.md](docs/api.md).
 
-## Estrutura do projeto
+## Project structure
 
-| Pasta / Crate     | Descrição                                                |
+| Folder / Crate    | Description                                              |
 | ----------------- | -------------------------------------------------------- |
-| `crates/core`     | Motor vetorial: VectorDB, Collection, HNSW, Storage, WAL |
-| `crates/server`   | Servidor HTTP (Axum), handlers, métricas                 |
-| `crates/sdk-rust` | Cliente Rust (HTTP, busca híbrida)                       |
-| `docs/`           | Documentação (API, arquitetura, ADRs)                    |
-| `examples/`       | Ingestão, simple_rag (Python)                            |
-| `tests/`          | Testes E2E e fixtures                                    |
+| `crates/core`     | Vector engine: VectorDB, Collection, HNSW, Storage, WAL  |
+| `crates/server`   | HTTP server (Axum), handlers, metrics                    |
+| `crates/sdk-rust` | Rust client (HTTP, hybrid search)                        |
+| `docs/`           | Documentation (API, architecture, ADRs)                  |
+| `examples/`       | Ingestion, simple_rag (Python)                           |
+| `tests/`          | E2E tests and fixtures                                   |
 
-Arquitetura e decisões: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/architecture.md](docs/architecture.md), [docs/ADR/](docs/ADR/).
+Architecture and decisions: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/architecture.md](docs/architecture.md), [docs/ADR/](docs/ADR/).
 
-## Padrões de código
+## Code standards
 
 ### Rust
 
-- **Formatação**: `cargo fmt` antes de commitar.
-- **Lint**: `cargo clippy --workspace` sem warnings.
-- **Doc**: Documentar APIs públicas com `///`; exemplos em doc tests quando fizer sentido.
+- **Formatting**: run `cargo fmt` before committing.
+- **Lint**: `cargo clippy --workspace` with no warnings.
+- **Docs**: document public APIs with `///`; add doc test examples where they make sense.
 
-### Convenções
+### Conventions
 
-- Tratamento de erros com `thiserror` e tipos específicos (`FerresError`).
-- Logs com `tracing` (evitar `println!` em código de produção).
-- Testes unitários no mesmo arquivo (`#[cfg(test)] mod tests`) ou em `tests/` para integração.
+- Error handling with `thiserror` and specific types (`FerresError`).
+- Logging with `tracing` (avoid `println!` in production code).
+- Unit tests in the same file (`#[cfg(test)] mod tests`) or in `tests/` for integration tests.
 
-## Testes
+## Testing
 
-### Unitários e integração (Rust)
+### Unit and integration (Rust)
 
 ```bash
 cargo test --workspace
 ```
 
-Inclui property tests em `crates/server/tests/`. Garanta que todos passem antes do PR.
+Includes property tests in `crates/server/tests/`. Make sure all tests pass before opening a PR.
 
 ### E2E (Python)
 
@@ -82,41 +82,66 @@ pip install -r requirements.txt
 pytest
 ```
 
-Recomendado rodar com o servidor já em execução (ou via script que sobe/derruba o servidor, se houver).
+Recommended to run with the server already running (or via a script that starts/stops the server, if available).
 
 ### Benchmarks
 
 ```bash
-# Gerar corpus de teste (se necessário)
+# Generate test corpus (if needed)
 python tests/fixtures/generate_corpus.py
 
 cd crates/core
 cargo bench
 ```
 
-## Fluxo de contribuição
+## Contribution flow
 
-1. **Issue** (recomendado): Abra uma issue descrevendo a mudança ou correção.
-2. **Branch**: Crie uma branch a partir de `main` (ex.: `feature/nome` ou `fix/descricao`).
-3. **Alterações**: Implemente com testes e documentação quando aplicável.
-4. **Checks locais**:
+1. **Issue** (recommended): Open an issue describing the change or fix.
+2. **Branch**: Create a branch from `main` (e.g. `feature/name` or `fix/description`).
+3. **Changes**: Implement with tests and documentation where applicable.
+4. **Local checks**:
    - `cargo fmt`
    - `cargo clippy --workspace`
    - `cargo test --workspace`
-5. **Commit**: Mensagens claras; prefira imperativo (“Add X” em vez de “Added X”).
-6. **Pull Request**: Descreva o que foi feito e referencie a issue, se houver. Um maintainer fará o review.
+5. **Commit**: Write clear messages; prefer imperative ("Add X" instead of "Added X").
+6. **Pull Request**: Describe what was done and reference the issue, if any. A maintainer will review it.
 
-## Documentação
+## Documentation
 
-- **API REST**: [docs/api.md](docs/api.md)
-- **Arquitetura**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/architecture.md](docs/architecture.md)
-- **Decisões (ADRs)**: [docs/ADR/](docs/ADR/)
-- **SDK e clientes**: [docs/sdk.md](docs/sdk.md)
+- **REST API**: [docs/api.md](docs/api.md)
+- **Architecture**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/architecture.md](docs/architecture.md)
+- **Decisions (ADRs)**: [docs/ADR/](docs/ADR/)
+- **SDK and clients**: [docs/sdk.md](docs/sdk.md)
 
-Ao adicionar comportamento novo ou mudar contratos, atualize a documentação correspondente e, se for decisão de design, considere um novo ADR em `docs/ADR/`.
+When adding new behavior or changing contracts, update the corresponding documentation and, if it is a design decision, consider a new ADR in `docs/ADR/`.
 
-## Dúvidas
+## Developer Certificate of Origin (DCO)
 
-Em caso de dúvidas sobre arquitetura ou onde implementar algo, consulte a documentação em `docs/` ou abra uma issue.
+All contributions must be signed off with `Signed-off-by`, indicating that you agree to the [Developer Certificate of Origin](DCO.txt).
 
-Obrigado por contribuir.
+To sign off automatically, use the `-s` flag when committing:
+
+```bash
+git commit -s -m "Add new feature"
+```
+
+This appends a line like:
+
+```
+Signed-off-by: Your Name your-email@domain.com
+```
+
+Set your name and email in git once:
+
+```bash
+git config user.name "Your Name"
+git config user.email "your-email@domain.com"
+```
+
+PRs missing `Signed-off-by` in any commit will not be accepted.
+
+## Questions
+
+If you have questions about architecture or where to implement something, consult the documentation in `docs/` or open an issue.
+
+Thank you for contributing.

@@ -683,12 +683,8 @@ fn benchmark_quantization_comparison(c: &mut Criterion) {
         let sq8_bytes = n * dim; // 1 byte per dim
         let polar_bytes = n * (4 + dim.saturating_sub(1)); // f32 radius + (dim-1) angles
 
-        println!(
-            "\n[quantization_comparison] dim={dim}, n={n}, k={k}"
-        );
-        println!(
-            "  Recall@{k}: SQ8={sq_recall:.3}  PolarQuant={polar_recall:.3}"
-        );
+        println!("\n[quantization_comparison] dim={dim}, n={n}, k={k}");
+        println!("  Recall@{k}: SQ8={sq_recall:.3}  PolarQuant={polar_recall:.3}");
         println!(
             "  Memory (per-vector data): f32={f32_bytes}B  SQ8={sq8_bytes}B ({:.1}x)  Polar={polar_bytes}B ({:.1}x)",
             f32_bytes as f64 / sq8_bytes as f64,
@@ -838,9 +834,7 @@ fn benchmark_qjl_latency(c: &mut Criterion) {
             0.0
         };
 
-        println!(
-            "\n[qjl_latency] dim={dim}, n={n}, k={k}"
-        );
+        println!("\n[qjl_latency] dim={dim}, n={n}, k={k}");
         println!(
             "  Recall@{k}: SQ8={sq_recall:.3}  SQ8+QJL={qjl_recall:.3}  (delta={qjl_overhead_pct:+.1}%)"
         );

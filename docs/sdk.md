@@ -1,24 +1,24 @@
-# Guia de uso — SDK e clientes HTTP
+# Usage Guide — SDK and HTTP Clients
 
-Este documento descreve o **SDK Rust** oficial e como usar a API REST do FerresDB a partir de **Python** e **TypeScript/JavaScript**. Para a referência completa dos endpoints, veja [api.md](api.md).
+This document describes the official **Rust SDK** and how to use the FerresDB REST API from **Python** and **TypeScript/JavaScript**. For the complete endpoint reference, see [api.md](api.md).
 
 ---
 
-## SDK Rust (oficial)
+## Rust SDK (official)
 
-O crate **ferres-db-sdk** (`crates/sdk-rust`) fornece o cliente HTTP e expõe busca híbrida de forma type-safe. Operações de coleções e pontos (criar, listar, upsert, busca vetorial) são feitas via API REST; use `reqwest` diretamente ou a [referência da API](api.md) para montar as chamadas.
+The **ferres-db-sdk** crate (`crates/sdk-rust`) provides the HTTP client and exposes hybrid search in a type-safe way. Collection and point operations (create, list, upsert, vector search) are done via REST API; use `reqwest` directly or the [API reference](api.md) to build the calls.
 
-### Dependência
+### Dependency
 
-No `Cargo.toml` do seu projeto:
+In your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
 ferres-db-sdk = { path = "../ferres-db-core/crates/sdk-rust" }
-# ou, se publicado: ferres-db-sdk = "0.1"
+# or, if published: ferres-db-sdk = "0.1"
 ```
 
-### Cliente e busca híbrida
+### Client and hybrid search
 
 ```rust
 use ferres_db_sdk::{FerresDbClient, HybridSearchResponse, SearchResultItem};
@@ -27,8 +27,8 @@ use ferres_db_sdk::{FerresDbClient, HybridSearchResponse, SearchResultItem};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = FerresDbClient::new("http://localhost:8080");
 
-    let query_text = "como fazer deploy";
-    let query_vector: Vec<f32> = vec![0.1; 384]; // use o mesmo embedding da ingestão
+    let query_text = "how to deploy";
+    let query_vector: Vec<f32> = vec![0.1; 384]; // use the same embedding as ingestion
 
     let response: HybridSearchResponse = client
         .hybrid_search("docs", query_text, &query_vector, 5, 0.5)
@@ -43,16 +43,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Tipos públicos
+### Public types
 
-| Tipo                   | Descrição                                           |
-| ---------------------- | --------------------------------------------------- |
-| `FerresDbClient`       | Cliente HTTP; `new(base_url)`, `hybrid_search(...)` |
-| `HybridSearchResponse` | `{ results: Vec<SearchResultItem>, took_ms: u64 }`  |
-| `SearchResultItem`     | `{ id, score, metadata }`                           |
-| `SdkError`             | Erros de rede, API (status + message) ou decode     |
+| Type                   | Description                                          |
+| ---------------------- | ---------------------------------------------------- |
+| `FerresDbClient`       | HTTP client; `new(base_url)`, `hybrid_search(...)`   |
+| `HybridSearchResponse` | `{ results: Vec<SearchResultItem>, took_ms: u64 }`   |
+| `SearchResultItem`     | `{ id, score, metadata }`                            |
+| `SdkError`             | Network, API (status + message) or decode errors     |
 
-### Tratamento de erros
+### Error handling
 
 ```rust
 match client.hybrid_search("docs", "text", &vec![0.1; 384], 5, 0.5).await {
@@ -64,21 +64,21 @@ match client.hybrid_search("docs", "text", &vec![0.1; 384], 5, 0.5).await {
 }
 ```
 
-Operações que não estão no SDK Rust (criar coleção, upsert, busca vetorial) devem usar a API REST com `reqwest` e os schemas em [api.md](api.md).
+Operations not in the Rust SDK (create collection, upsert, vector search) should use the REST API with `reqwest` and the schemas in [api.md](api.md).
 
 ### Framework Integrations
 
-O SDK expõe um wrapper **VectorStore** para integração com ecossistema RAG (LangChain, LlamaIndex e ferramentas que esperam uma interface de armazenamento vetorial).
+The SDK exposes a **VectorStore** wrapper for integration with the RAG ecosystem (LangChain, LlamaIndex and tools that expect a vector storage interface).
 
-- **Módulo:** `ferres_db_sdk::integrations`
-- **Trait:** `VectorStore` — métodos assíncronos:
-  - `add_vectors(ids, vectors, metadatas)` — insere ou atualiza documentos (vetor + metadata).
-  - `similarity_search(query_vector, k)` — retorna os `k` documentos mais similares (sem score).
-  - `similarity_search_with_score(query_vector, k)` — retorna `(documento, score)`.
-- **Implementação:** `FerresDbVectorStore` — usa um `FerresDbClient` e o nome da coleção.
-- **Helper:** `FerresDbVectorStore::ensure_collection(client, name, dimension, distance)` — cria a coleção se não existir (útil para demos e scripts).
+- **Module:** `ferres_db_sdk::integrations`
+- **Trait:** `VectorStore` — async methods:
+  - `add_vectors(ids, vectors, metadatas)` — inserts or updates documents (vector + metadata).
+  - `similarity_search(query_vector, k)` — returns the `k` most similar documents (without score).
+  - `similarity_search_with_score(query_vector, k)` — returns `(document, score)`.
+- **Implementation:** `FerresDbVectorStore` — uses a `FerresDbClient` and the collection name.
+- **Helper:** `FerresDbVectorStore::ensure_collection(client, name, dimension, distance)` — creates the collection if it doesn't exist (useful for demos and scripts).
 
-Exemplo mínimo (coleção já existente):
+Minimal example (collection already exists):
 
 ```rust
 use ferres_db_sdk::{FerresDbClient, integrations::{FerresDbVectorStore, VectorStore}};
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.add_vectors(
         &["id1".into()],
         &[vec![0.1; 384]],
-        Some(&[serde_json::json!({"text": "Conteúdo do doc"})]),
+        Some(&[serde_json::json!({"text": "Document content"})]),
     ).await?;
 
     let docs = store.similarity_search(&vec![0.1; 384], 5).await?;
@@ -107,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Exemplo completo: `crates/sdk-rust/examples/langchain_integration.rs`. Execute com o servidor FerresDB em `http://localhost:8080` (ou `FERRESDB_URL`):
+Full example: `crates/sdk-rust/examples/langchain_integration.rs`. Run with the FerresDB server at `http://localhost:8080` (or `FERRESDB_URL`):
 
 ```bash
 cargo run -p ferres-db-sdk --example langchain_integration
@@ -115,11 +115,11 @@ cargo run -p ferres-db-sdk --example langchain_integration
 
 ---
 
-## Uso da API a partir de Python
+## Using the API from Python
 
-Não há SDK oficial em Python. Use a API REST com `requests` ou `httpx`. Os exemplos abaixo seguem os schemas de [api.md](api.md).
+There is no official Python SDK. Use the REST API with `requests` or `httpx`. The examples below follow the schemas from [api.md](api.md).
 
-### Configuração
+### Setup
 
 ```bash
 pip install requests
@@ -133,7 +133,7 @@ session = requests.Session()
 session.headers.setdefault("Content-Type", "application/json")
 ```
 
-### Criar coleção
+### Create collection
 
 ```python
 def create_collection(
@@ -160,22 +160,22 @@ def create_collection(
         raise RuntimeError(err.get("message", resp.text))
     return resp.json()
 
-# SQ8 com QJL (correção residual, opt-in):
+# SQ8 with QJL (residual correction, opt-in):
 create_collection("docs", 384, quantization={
     "Scalar": {"dtype": "Int8", "always_ram": False, "quantile": 0.99,
                "enable_qjl": True, "qjl_m": 64, "qjl_seed": 42}
 })
 
-# PolarQuant (8 bits por ângulo):
+# PolarQuant (8 bits per angle):
 create_collection("docs_polar", 384, quantization={"Polar": {"bits_per_angle": 8}})
 
-# Com retenção de 30 dias:
+# With 30-day retention:
 create_collection("logs", 128, retention_days=30)
 ```
 
-### Upsert de pontos
+### Upsert points
 
-Até 1000 pontos por request. Dimensão do vetor deve ser igual à da coleção.
+Up to 1000 points per request. Vector dimension must match the collection's dimension.
 
 ```python
 def upsert_points(collection: str, points: list[dict]):
@@ -189,14 +189,14 @@ def upsert_points(collection: str, points: list[dict]):
     data = resp.json()
     return data.get("upserted", 0), data.get("failed", [])
 
-# Exemplo: pontos com id, vector, metadata
+# Example: points with id, vector, metadata
 points = [
-    {"id": "doc-1", "vector": [0.1] * 384, "metadata": {"text": "Conteúdo do doc"}},
+    {"id": "doc-1", "vector": [0.1] * 384, "metadata": {"text": "Document content"}},
 ]
 upserted, failed = upsert_points("docs", points)
 ```
 
-### Busca vetorial
+### Vector search
 
 ```python
 def search(
@@ -216,13 +216,13 @@ def search(
         err = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         raise RuntimeError(err.get("message", resp.text))
     data = resp.json()
-    # data["rerank_ms"] disponível quando rerank=True foi aplicado
+    # data["rerank_ms"] available when rerank=True was applied
     return data.get("results", [])
 ```
 
-### Busca híbrida (vetorial + BM25)
+### Hybrid search (vector + BM25)
 
-Requer coleção criada com `enable_bm25: true`.
+Requires a collection created with `enable_bm25: true`.
 
 ```python
 def search_hybrid(
@@ -235,9 +235,9 @@ def search_hybrid(
     rrf_k: int = 60,
 ):
     """
-    fusion: "weighted" (default) ou "rrf" (Reciprocal Rank Fusion).
-    alpha: peso vetor vs BM25 quando fusion="weighted" (1.0 = só vetorial, 0.0 = só BM25).
-    rrf_k: constante k do RRF quando fusion="rrf".
+    fusion: "weighted" (default) or "rrf" (Reciprocal Rank Fusion).
+    alpha: vector vs BM25 weight when fusion="weighted" (1.0 = vector only, 0.0 = BM25 only).
+    rrf_k: k constant for RRF when fusion="rrf".
     """
     payload = {
         "query_text": query_text,
@@ -259,11 +259,11 @@ def search_hybrid(
     return resp.json().get("results", [])
 ```
 
-### Grafos (relações entre pontos)
+### Graphs (relations between points)
 
 ```python
 def link_points(collection: str, from_id: str, to_id: str):
-    """Cria uma relação não-direcionada entre dois pontos."""
+    """Creates an undirected relation between two points."""
     resp = session.post(
         f"{BASE}/api/v1/collections/{collection}/points/link",
         json={"from": from_id, "to": to_id},
@@ -281,11 +281,11 @@ def get_subgraph(
     limit: int | None = None,
 ):
     """
-    Retorna subgrafo via BFS.
-    center_id + depth: expansão a partir de um nó central.
-    seed: nó semente para 1-hop.
-    limit: máximo de nós no grafo completo.
-    Resposta: { "nodes": [...], "edges": [...] }
+    Returns subgraph via BFS.
+    center_id + depth: expansion from a central node.
+    seed: seed node for 1-hop.
+    limit: maximum nodes in the full graph.
+    Response: { "nodes": [...], "edges": [...] }
     """
     params = {}
     if center_id is not None:
@@ -305,31 +305,31 @@ def get_subgraph(
         raise RuntimeError(err.get("message", resp.text))
     return resp.json()  # { "nodes": [...], "edges": [...] }
 
-# Exemplo:
+# Example:
 link_points("docs", "doc-1", "doc-2")
 subgraph = get_subgraph("docs", center_id="doc-1", depth=2)
 ```
 
-### Referência no repositório
+### Repository reference
 
-- [examples/simple_rag/app.py](../examples/simple_rag/app.py) — busca vetorial e híbrida no pipeline RAG.
-- [examples/ingestion/ingest.py](../examples/ingestion/ingest.py) — criação de coleção e upsert em batch.
+- [examples/simple_rag/app.py](../examples/simple_rag/app.py) — vector and hybrid search in the RAG pipeline.
+- [examples/ingestion/ingest.py](../examples/ingestion/ingest.py) — collection creation and batch upsert.
 
-### Boas práticas (Python)
+### Best practices (Python)
 
-- Reutilize `requests.Session()` para conexões e headers.
-- Trate sempre `resp.status_code` e o body de erro (campo `message` quando JSON).
-- Faça upsert em batches de até 1000 pontos.
-- Use a **mesma dimensão e mesmo provedor de embedding** na ingestão e na query.
-- Para RAG, inclua o campo `text` (ou o configurado em `bm25_text_field`) no metadata dos pontos.
+- Reuse `requests.Session()` for connections and headers.
+- Always check `resp.status_code` and the error body (`message` field when JSON).
+- Upsert in batches of up to 1000 points.
+- Use the **same dimension and same embedding provider** for ingestion and query.
+- For RAG, include the `text` field (or the one configured in `bm25_text_field`) in the point metadata.
 
 ---
 
-## Uso da API a partir de TypeScript/JavaScript
+## Using the API from TypeScript/JavaScript
 
-Não há SDK oficial em TypeScript. Use `fetch` ou `axios` com os mesmos endpoints e schemas de [api.md](api.md).
+There is no official TypeScript SDK. Use `fetch` or `axios` with the same endpoints and schemas from [api.md](api.md).
 
-### Configuração (fetch nativo)
+### Setup (native fetch)
 
 ```typescript
 const BASE = "http://localhost:8080";
@@ -350,7 +350,7 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 ```
 
-### Criar coleção
+### Create collection
 
 ```typescript
 interface CreateCollectionBody {
@@ -372,7 +372,7 @@ await api("/api/v1/collections", {
 });
 ```
 
-### Upsert de pontos
+### Upsert points
 
 ```typescript
 interface PointInput {
@@ -385,7 +385,7 @@ const points: PointInput[] = [
   {
     id: "doc-1",
     vector: new Array(384).fill(0.1),
-    metadata: { text: "Conteúdo" },
+    metadata: { text: "Content" },
   },
 ];
 const out = await api<{
@@ -398,7 +398,7 @@ const out = await api<{
 console.log("upserted", out.upserted, "failed", out.failed.length);
 ```
 
-### Busca vetorial
+### Vector search
 
 ```typescript
 const results = await api<{
@@ -411,7 +411,7 @@ const results = await api<{
 console.log(results.results, results.took_ms);
 ```
 
-### Busca híbrida
+### Hybrid search
 
 ```typescript
 const hybrid = await api<{
@@ -420,7 +420,7 @@ const hybrid = await api<{
 }>("/api/v1/collections/docs/search/hybrid", {
   method: "POST",
   body: JSON.stringify({
-    query_text: "como fazer deploy",
+    query_text: "how to deploy",
     query_vector: new Array(384).fill(0.1),
     limit: 5,
     alpha: 0.5,
@@ -428,19 +428,19 @@ const hybrid = await api<{
 });
 ```
 
-### Boas práticas (TypeScript/JavaScript)
+### Best practices (TypeScript/JavaScript)
 
-- Use `async/await` e verifique `response.ok` antes de fazer `response.json()`.
-- Trate erros parseando o JSON de erro e exibindo `message`.
-- Faça batching de pontos (até 1000 por request).
-- Defina timeouts (ex.: `AbortController` com `setTimeout` em `fetch`).
+- Use `async/await` and check `response.ok` before calling `response.json()`.
+- Handle errors by parsing the error JSON and displaying `message`.
+- Batch points (up to 1000 per request).
+- Set timeouts (e.g. `AbortController` with `setTimeout` in `fetch`).
 
 ---
 
-## Boas práticas gerais
+## General best practices
 
-- **Timeouts:** Configure timeout em todos os clientes (ex.: 30s para escrita, 10s para busca).
-- **Retries:** Em erros 5xx ou falha de rede, use retry com backoff leve (ex.: 1s, 2s, 4s).
-- **Logs:** Evite logar vetores completos; use apenas dimensão ou um preview pequeno.
-- **Filtros:** Use o parâmetro `filter` na busca vetorial quando precisar restringir por metadata (igualdade).
-- **Busca híbrida:** Prefira busca híbrida quando a coleção tiver BM25 habilitado; ajuste `alpha` conforme o peso desejado (vetorial vs keyword).
+- **Timeouts:** Set a timeout on all clients (e.g. 30s for writes, 10s for searches).
+- **Retries:** On 5xx errors or network failures, use retry with light backoff (e.g. 1s, 2s, 4s).
+- **Logs:** Avoid logging full vectors; use only the dimension or a small preview.
+- **Filters:** Use the `filter` parameter in vector search when you need to restrict by metadata (equality).
+- **Hybrid search:** Prefer hybrid search when the collection has BM25 enabled; adjust `alpha` according to the desired weight (vector vs keyword).

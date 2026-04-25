@@ -27,6 +27,7 @@
 //!     bm25_text_field: "text".to_string(),
 //!     quantization: Default::default(),
 //!     tiered_storage: Default::default(),
+//!     retention_days: None,
 //! };
 //!
 //! db.create_collection(config).unwrap();
@@ -552,6 +553,7 @@ impl VectorDB {
     ///     bm25_text_field: "text".to_string(),
     ///     quantization: Default::default(),
     ///     tiered_storage: Default::default(),
+    ///     retention_days: None,
     /// };
     ///
     /// db.create_collection(config)?;

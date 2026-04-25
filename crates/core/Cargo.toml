@@ -2,8 +2,12 @@
 name = "ferres-db-core"
 version = "0.1.0"
 edition = "2021"
-description = "Motor de busca vetorial do FerresDB — coleções, pontos, storage e HNSW search"
-license = "MIT"
+description = "FerresDB vector search engine — collections, points, storage and HNSW search"
+license = "MIT OR Apache-2.0"
+authors = ["Rafael Ferrés"]
+repository = "https://github.com/ferres-db/ferres-db"
+readme = "../../README.md"
+
 
 [features]
 default = []

@@ -1,123 +1,184 @@
-# Docker Setup - FerresDB
+# Docker Setup — FerresDB
 
-Este projeto usa Docker Compose para rodar o backend (Rust) e frontend (React) em serviços separados.
+This project uses Docker Compose to run the backend (Rust) and frontend (React) as separate services.
 
-## Estrutura
+## Quick Start
 
-- **Backend (Rust)**: Porta `8080` - API REST
-- **Frontend (React)**: 
-  - Desenvolvimento: Porta `5173` (Vite dev server)
-  - Produção: Porta `3000` (Nginx)
-
-## Desenvolvimento
-
-Para rodar em modo desenvolvimento (com hot reload):
+### Development (with hot reload)
 
 ```bash
 docker-compose -f docker-compose.dev.yml up --build
 ```
 
-Isso vai:
-- Rodar o backend Rust na porta `8080`
-- Rodar o frontend React com Vite na porta `5173` (hot reload habilitado)
-- Frontend acessível em `http://localhost:5173`
-- API acessível em `http://localhost:8080`
+- **Backend**: http://localhost:8080
+- **Frontend**: http://localhost:5173 (Vite dev server with hot reload)
 
-### Desenvolvimento Local (sem Docker)
+### Production
+
+```bash
+docker-compose up --build
+```
+
+- **Backend**: http://localhost:8080
+- **Frontend**: http://localhost:3000 (Nginx)
+
+---
+
+## Project Structure
+
+```
+ferres-db-core/
+├── docker-compose.yml          # Production
+├── docker-compose.dev.yml      # Development
+├── Dockerfile                  # Backend (Rust)
+└── dashboard/
+    ├── Dockerfile              # Frontend React (production)
+    ├── Dockerfile.dev          # Frontend React (dev)
+    └── nginx.conf              # Nginx configuration
+```
+
+- **Backend (Rust)**: Port `8080` — REST API
+- **Frontend (React)**:
+  - Development: Port `5173` (Vite dev server)
+  - Production: Port `3000` (Nginx)
+
+---
+
+## Local Development (without Docker)
 
 **Backend:**
 ```bash
 cargo run -p ferres-db-server
-# API em http://localhost:8080
+# API at http://localhost:8080
 ```
 
 **Frontend:**
 ```bash
 cd dashboard
 npm run dev
-# Frontend em http://localhost:5173
+# Frontend at http://localhost:5173
 ```
 
-Configure o `.env` do dashboard:
+Configure `dashboard/.env`:
 ```env
 VITE_API_BASE_URL=http://localhost:8080
 VITE_API_KEY=sk-dev-abc123
 ```
 
-## Produção
+---
 
-Para rodar em modo produção:
-
-```bash
-docker-compose up --build
-```
-
-Isso vai:
-- Rodar o backend Rust na porta `8080`
-- Buildar e servir o frontend React via Nginx na porta `3000`
-- Frontend acessível em `http://localhost:3000`
-- API acessível em `http://localhost:8080`
-
-## Variáveis de Ambiente
+## Environment Variables
 
 ### Backend
 
-Configure via `config.toml` ou variáveis de ambiente:
-- `HOST`: Host do servidor (padrão: `0.0.0.0`)
-- `PORT`: Porta do servidor (padrão: `8080`)
-- `STORAGE_PATH`: Caminho para dados (padrão: `./data`)
-- `LOG_LEVEL`: Nível de log (padrão: `info`)
+Configure via `config.toml` or environment variables:
+
+| Variable       | Default     | Description                          |
+| -------------- | ----------- | ------------------------------------ |
+| `HOST`         | `0.0.0.0`   | Server bind host                     |
+| `PORT`         | `8080`      | Server port                          |
+| `STORAGE_PATH` | `/data`     | Path for persistent data             |
+| `LOG_LEVEL`    | `info`      | Log level (`info`, `debug`, etc.)    |
 
 ### Frontend
 
-Configure via `.env`:
-- `VITE_API_BASE_URL`: URL da API (padrão: `http://localhost:8080`)
-- `VITE_API_KEY`: Chave de API (opcional)
+Configure via `dashboard/.env` or as build-time args in the Dockerfile:
 
-## Comandos Úteis
+| Variable            | Default                  | Description             |
+| ------------------- | ------------------------ | ----------------------- |
+| `VITE_API_BASE_URL` | `http://localhost:8080`  | API URL                 |
+| `VITE_API_KEY`      | —                        | API key (optional)      |
+
+---
+
+## Useful Commands
 
 ```bash
-# Parar todos os serviços
+# Stop all services
 docker-compose down
 
-# Parar e remover volumes
+# Stop and remove volumes
 docker-compose down -v
 
-# Ver logs
+# View logs (all services)
 docker-compose logs -f
 
-# Ver logs de um serviço específico
+# View logs of a specific service
 docker-compose logs -f backend
 docker-compose logs -f frontend
 
-# Rebuild sem cache
+# Full rebuild without cache
 docker-compose build --no-cache
 
-# Executar comandos no container
+# Run commands in a container
 docker-compose exec backend /app/ferres-db-server --help
-docker-compose exec frontend npm run build
+docker-compose exec frontend sh
 ```
+
+---
+
+## Publishing to Docker Hub (GitHub Actions)
+
+The workflow `.github/workflows/docker-publish.yml` builds and pushes images to Docker Hub.
+
+### When it runs
+
+- **Push to `main` branch**: build + push images
+- **Pull request to `main`**: build only (no push), to validate
+- **Manual**: in **Actions** → **Docker Publish** → **Run workflow**
+
+### Repository configuration
+
+1. **Secrets** (Settings → Secrets and variables → Actions):
+   - `DOCKERHUB_USERNAME`: your Docker Hub username
+   - `DOCKERHUB_TOKEN`: access token ([Docker Hub security settings](https://hub.docker.com/settings/security))
+   - `VITE_API_KEY`: (optional) key used by the frontend at build time
+
+2. **Variable** (optional):
+   - `VITE_API_BASE_URL`: API URL in the frontend build (default: `http://localhost:8080`). In production, use the public URL of your API.
+
+### Published images
+
+- `DOCKERHUB_USERNAME/ferres-db-core`
+- `DOCKERHUB_USERNAME/ferres-db-frontend`
+
+Tags: `latest` (only on push to `main`), branch name and commit SHA.
+
+### Using published images
+
+```yaml
+# docker-compose using Hub images instead of local build
+services:
+  backend:
+    image: YOUR_USER/ferres-db-core:latest
+    # ...
+  frontend:
+    image: YOUR_USER/ferres-db-frontend:latest
+    # ...
+```
+
+---
 
 ## Troubleshooting
 
-### Frontend não consegue conectar na API
+### Frontend cannot connect to the API
 
-1. Verifique se o backend está rodando: `curl http://localhost:8080/health`
-2. Verifique a variável `VITE_API_BASE_URL` no `.env` do dashboard
-3. Verifique se o CORS está configurado corretamente no backend
+1. Check if the backend is running: `curl http://localhost:8080/health`
+2. Check the `VITE_API_BASE_URL` variable in the dashboard `.env` or build args
+3. Check that CORS is correctly configured in the backend (must allow `Any` origin)
 
-### Portas já em uso
+### Ports already in use
 
-Altere as portas no `docker-compose.yml`:
+Change the ports in `docker-compose.yml`:
+
 ```yaml
 ports:
-  - "8081:8080"  # Backend na porta 8081
-  - "3001:80"    # Frontend na porta 3001
+  - "8081:8080"  # Backend on port 8081
+  - "3001:80"    # Frontend on port 3001
 ```
 
-### Rebuild necessário
+### Rebuild required after code changes
 
-Se houver mudanças no código:
 ```bash
 docker-compose up --build
 ```

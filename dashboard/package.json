@@ -3,6 +3,11 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "license": "(MIT OR Apache-2.0)",
+  "authors": ["Rafael Ferrés"],
+  "repository": "https://github.com/ferres-db/ferres-db",
+  "readme": "../../README.md",
+  "description": "FerresDB dashboard",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
