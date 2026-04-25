@@ -1,26 +1,33 @@
-# Stage 1: Builder
-# Rust: 1.78+ for Cargo.lock v4; recent stable for edition2024 (deps como time 0.3.x)
-FROM rust:bookworm AS builder
+# Stage 1: cargo-chef planner — gera recipe.json com o grafo de dependências
+FROM rust:bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /app
 
-# Instala dependências do sistema necessárias para compilar
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 2: builder — compila deps (layer cacheável) e depois o binário final
+FROM chef AS builder
+
+# Dependências do sistema para compilação
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-# Define o diretório de trabalho
-WORKDIR /app
+# 1) Compila apenas as dependências (camada cached enquanto Cargo.toml/lock não mudar)
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --bin ferres-db-server --recipe-path recipe.json
 
-# Copia todo o código (sem estágio de cache com stubs, para evitar lib.rs dummy no build)
+# 2) Copia o código-fonte e compila o binário final
 COPY . .
-
-# Build release do binário
 RUN cargo build --release --bin ferres-db-server
 
-# Stage 2: Runtime
+# Stage 3: imagem de runtime mínima
 FROM debian:bookworm-slim
 
-# Instala dependências + gosu para rodar o servidor como usuário não-root após ajustar permissões do volume
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
@@ -28,23 +35,16 @@ RUN apt-get update && apt-get install -y \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Usuário não-root para rodar o servidor
 RUN useradd -m -u 1000 ferres
 
-# Define o diretório de trabalho
 WORKDIR /app
 
-# Copia o binário compilado do stage builder
 COPY --from=builder /app/target/release/ferres-db-server /app/ferres-db-server
 
-# Entrypoint roda como root para criar/ajustar permissões de STORAGE_PATH, depois exec como ferres
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
-# Mantém root como USER padrão; o entrypoint faz chown e exec gosu ferres
-
 EXPOSE 8080
-
 VOLUME ["/data"]
 
 ENV HOST=0.0.0.0
@@ -53,10 +53,6 @@ ENV STORAGE_PATH=/data
 ENV LOG_LEVEL=info
 ENV RUST_LOG=info
 ENV RUST_BACKTRACE=1
-
-# CORS: origens permitidas (ex.: docker run -e CORS_ORIGINS=https://app.example.com,https://dashboard.example.com)
-# Se não definido, usa localhost:3000 e localhost:5173.
-# MCP: FERRESDB_ENABLE_MCP=true ativa o servidor MCP via STDIO (requer build com --features mcp).
 ENV FERRESDB_ENABLE_MCP=false
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
