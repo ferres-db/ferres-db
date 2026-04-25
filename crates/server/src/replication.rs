@@ -13,7 +13,7 @@ use ferres_db_core::{Collection, CollectionConfig, DistanceMetric, FileStorage, 
 
 use crate::grpc::pb::{
     ferres_db_client::FerresDbClient, GetCollectionRequest, ListCollectionsRequest,
-    StreamWalRequest, WalDelete, WalEntryMessage, WalUpsert,
+    StreamWalRequest, WalDelete, WalEntryMessage,
 };
 use crate::state::AppState;
 
@@ -201,6 +201,11 @@ fn apply_wal_entry(
             let mut coll = coll_arc.write().map_err(|e| e.to_string())?;
             let _ = coll.remove(id);
             coll.mark_dirty();
+        }
+        Operation::Link(link) => {
+            let mut coll = coll_arc.write().map_err(|e| e.to_string())?;
+            coll.add_relation(link.from, link.to)
+                .map_err(|e| e.to_string())?;
         }
     }
 

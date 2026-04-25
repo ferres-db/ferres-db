@@ -1,7 +1,7 @@
 //! # Collection Routes — rotas de gerenciamento de coleções
 
 use axum::{
-    routing::{get, patch, post},
+    routing::{get, post},
     Router,
 };
 

@@ -652,23 +652,23 @@ fn benchmark_quantization_comparison(c: &mut Criterion) {
             let mut pq_overlap = 0usize;
             let mut total = 0usize;
             for q in &queries {
-                let truth: std::collections::HashSet<&str> = normal_index
+                let truth: std::collections::HashSet<String> = normal_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
-                let sq_ids: std::collections::HashSet<&str> = sq_index
+                let sq_ids: std::collections::HashSet<String> = sq_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
-                let pq_ids: std::collections::HashSet<&str> = polar_index
+                let pq_ids: std::collections::HashSet<String> = polar_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
                 sq_overlap += truth.intersection(&sq_ids).count();
                 pq_overlap += truth.intersection(&pq_ids).count();
@@ -802,23 +802,23 @@ fn benchmark_qjl_latency(c: &mut Criterion) {
             let mut qjl_overlap = 0usize;
             let mut total = 0usize;
             for q in &queries {
-                let truth: std::collections::HashSet<&str> = ref_index
+                let truth: std::collections::HashSet<String> = ref_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
-                let sq_ids: std::collections::HashSet<&str> = sq_index
+                let sq_ids: std::collections::HashSet<String> = sq_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
-                let qjl_ids: std::collections::HashSet<&str> = qjl_index
+                let qjl_ids: std::collections::HashSet<String> = qjl_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
                 sq_overlap += truth.intersection(&sq_ids).count();
                 qjl_overlap += truth.intersection(&qjl_ids).count();
