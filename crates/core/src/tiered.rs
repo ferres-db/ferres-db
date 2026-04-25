@@ -2035,9 +2035,18 @@ mod tests {
             "filter category=tech must match 3 points, got: {:?}",
             tech_ids
         );
-        assert!(tech_ids.contains("hot_tech"),   "hot_tech must pass category=tech filter");
-        assert!(tech_ids.contains("warm_tech"),  "warm_tech must pass category=tech filter");
-        assert!(tech_ids.contains("warm_tech2"), "warm_tech2 must pass category=tech filter");
+        assert!(
+            tech_ids.contains("hot_tech"),
+            "hot_tech must pass category=tech filter"
+        );
+        assert!(
+            tech_ids.contains("warm_tech"),
+            "warm_tech must pass category=tech filter"
+        );
+        assert!(
+            tech_ids.contains("warm_tech2"),
+            "warm_tech2 must pass category=tech filter"
+        );
 
         // Filtro: category=tech AND status=active  →  hot_tech (Hot), warm_tech2 (Warm)
         let active_tech_ids: std::collections::HashSet<&str> = all_ids
@@ -2073,7 +2082,11 @@ mod tests {
             .copied()
             .collect();
 
-        assert_eq!(sci_ids.len(), 1, "only cold_sci should match category=science");
+        assert_eq!(
+            sci_ids.len(),
+            1,
+            "only cold_sci should match category=science"
+        );
         assert_eq!(sci_ids[0], "cold_sci");
 
         let _ = fs::remove_dir_all(&tmp);

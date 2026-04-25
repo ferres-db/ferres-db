@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - uses: christophebedard/dco-check@a37f7a1ba9be03ef4d3c8b35167e89ae8edc40a4 # v2.4.0
+      - uses: christophebedard/dco-check@7b0205d25ead0f898e0b706b58227dd5fa7e3f55 # v0.5.0
         with:
           python-version: "3.11"
 
