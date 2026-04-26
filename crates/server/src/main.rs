@@ -264,7 +264,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             match ferres_db_core::CrossEncoderOrt::load(path, dim, None, None) {
                 Ok(r) => {
                     info!(path = %path.display(), dimension = dim, "cross-encoder reranker loaded");
-                    Some(std::sync::Arc::new(r))
+                    Some(std::sync::Arc::new(r) as std::sync::Arc<dyn ferres_db_core::Reranker>)
                 }
                 Err(e) => {
                     warn!(path = %path.display(), error = %e, "failed to load reranker, continuing without");
@@ -370,7 +370,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if app_state.config.replica_of.is_some() {
         let state_for_replication = app_state.clone();
         tokio::spawn(async move {
-            ferres_db_server::replication::run_replication_worker(state_for_replication).await;
+            ferres_db_server::replication::run_replication_worker(state_for_replication.into()).await;
         });
         info!("replication worker started (replica-of)");
     }
