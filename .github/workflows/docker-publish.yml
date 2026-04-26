@@ -1,78 +1,231 @@
-# Build e push das imagens (backend + frontend) para o Docker Hub.
-# Requer secrets: DOCKERHUB_USERNAME e DOCKERHUB_TOKEN.
+# Build multi-arch, security scan, SBOM, signing e push das imagens Docker.
+# Só roda em push para main/develop e tags v*.
 
 name: Docker Publish
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
+    tags: ["v*"]
   workflow_dispatch:
 
 env:
   REGISTRY: docker.io
-  # Fallback para PRs/forks onde o secret pode não existir (só build, sem push)
   DOCKER_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME || github.repository_owner }}
 
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false # Não cancelar publish em andamento
+
 jobs:
-  build-and-push:
+  semver:
+    name: 🔢 Calculate Version
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      version: ${{ steps.semver.outputs.version }}
+      version_tag: ${{ steps.semver.outputs.version_tag }}
+      changed: ${{ steps.semver.outputs.changed }}
+      is_tagged: ${{ steps.semver.outputs.is_tagged }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - id: semver
+        uses: PaulHatch/semantic-version@de157b15a0825b9ce4e2bce0664de4f23dbcca9f # v5.4.0
+        with:
+          tag_prefix: "v"
+          major_pattern: "/(BREAKING CHANGE)|!:/"
+          major_regexp_flags: "i"
+          minor_pattern: "/^feat(\\(.+\\))?:/"
+          minor_regexp_flags: "i"
+          search_commit_body: true
+          bump_each_commit: false
+          version_format: "{major}.{minor}.{patch}"
+
+  build:
+    name: 🐳 Build (${{ matrix.image }} / ${{ matrix.platform_name }})
+    # Runners nativos por arquitetura — elimina emulação QEMU no Rust
+    runs-on: ${{ matrix.runner }}
+    needs: [semver]
+    if: |
+      always() &&
+      (needs.semver.result == 'success' || needs.semver.result == 'skipped')
     permissions:
       contents: read
-      id-token: write
+      packages: write
+      id-token: write      # para cosign
+      attestations: write  # para SBOM/provenance
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ferres-db-core
+            context: .
+            dockerfile: ./Dockerfile
+            platform: linux/amd64
+            platform_name: amd64
+            runner: ubuntu-latest
+          - image: ferres-db-core
+            context: .
+            dockerfile: ./Dockerfile
+            platform: linux/arm64
+            platform_name: arm64
+            runner: ubuntu-24.04-arm
+          - image: ferres-db-frontend
+            context: ./dashboard
+            dockerfile: ./dashboard/Dockerfile
+            platform: linux/amd64
+            platform_name: amd64
+            runner: ubuntu-latest
+          - image: ferres-db-frontend
+            context: ./dashboard
+            dockerfile: ./dashboard/Dockerfile
+            platform: linux/arm64
+            platform_name: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata (backend)
-        id: meta-backend
-        uses: docker/metadata-action@v5
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5.6.1
         with:
-          images: ${{ env.DOCKER_NAMESPACE }}/ferres-db-core
+          images: ${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}
           tags: |
-            type=ref,event=branch
-            type=sha,prefix=
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=sha,prefix=develop-,enable=${{ github.ref == 'refs/heads/develop' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ needs.semver.outputs.version_tag }},enable=${{ github.ref == 'refs/heads/main' && needs.semver.outputs.changed == 'true' }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
 
-      - name: Build and push backend
-        uses: docker/build-push-action@v5
+      # Pusha como digest único por arch (sem tag), para merge posterior
+      - name: Build and push (single arch)
+        id: build
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
         with:
-          context: .
-          file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta-backend.outputs.tags }}
-          labels: ${{ steps.meta-backend.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}:${{ matrix.platform_name }}-${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform_name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform_name }}
+          provenance: false
+          sbom: false
 
-      - name: Extract metadata (frontend)
-        id: meta-frontend
-        uses: docker/metadata-action@v5
+      - name: Run Trivy vulnerability scan (table)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          images: ${{ env.DOCKER_NAMESPACE }}/ferres-db-frontend
+          image-ref: ${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}:${{ matrix.platform_name }}-${{ github.sha }}
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Run Trivy vulnerability scan (sarif artifact)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}:${{ matrix.platform_name }}-${{ github.sha }}
+          format: "sarif"
+          output: "trivy-${{ matrix.image }}-${{ matrix.platform_name }}.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-${{ matrix.image }}-${{ matrix.platform_name }}
+          path: trivy-${{ matrix.image }}-${{ matrix.platform_name }}.sarif
+          retention-days: 30
+
+  # Merge dos digests amd64+arm64 num manifesto multi-arch e assina com cosign
+  manifest:
+    name: 🔀 Merge manifest (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: [semver, build]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ferres-db-core
+          - image: ferres-db-frontend
+    steps:
+      - uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5.6.1
+        with:
+          images: ${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}
           tags: |
-            type=ref,event=branch
-            type=sha,prefix=
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=sha,prefix=develop-,enable=${{ github.ref == 'refs/heads/develop' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ needs.semver.outputs.version_tag }},enable=${{ github.ref == 'refs/heads/main' && needs.semver.outputs.changed == 'true' }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
-      # Frontend usa valores padrão do Dockerfile; URL e API key são passados em docker run
-      - name: Build and push frontend
-        uses: docker/build-push-action@v5
-        with:
-          context: ./dashboard
-          file: ./dashboard/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta-frontend.outputs.tags }}
-          labels: ${{ steps.meta-frontend.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create and push multi-arch manifest
+        id: manifest
+        run: |
+          AMD64=${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}:amd64-${{ github.sha }}
+          ARM64=${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}:arm64-${{ github.sha }}
+          TAGS=$(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' ')
+          TAG_ARGS=$(for t in $TAGS; do echo "--tag $t"; done | tr '\n' ' ')
+          docker buildx imagetools create $TAG_ARGS $AMD64 $ARM64
+          # Captura o digest do manifesto para cosign
+          DIGEST=$(docker buildx imagetools inspect \
+            ${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}:$(echo "$TAGS" | awk '{print $1}' | sed 's|.*/||') \
+            --format '{{.Manifest.Digest}}' 2>/dev/null || \
+            docker manifest inspect ${{ env.DOCKER_NAMESPACE }}/${{ matrix.image }}:$(echo "$TAGS" | awk '{print $1}') \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['config']['digest'])" 2>/dev/null || echo "")
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      - name: Sign multi-arch manifest with cosign
+        if: steps.manifest.outputs.digest != ''
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}

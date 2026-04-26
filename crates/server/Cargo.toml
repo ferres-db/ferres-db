@@ -2,8 +2,11 @@
 name = "ferres-db-server"
 version = "0.1.0"
 edition = "2021"
-description = "Servidor HTTP/gRPC do FerresDB"
-license = "MIT"
+description = "FerresDB vector search engine — collections, points, storage and HNSW search"
+license = "MIT OR Apache-2.0"
+authors = ["Rafael Ferrés"]
+repository = "https://github.com/ferres-db/ferres-db"
+readme = "../../README.md"
 
 [lib]
 name = "ferres_db_server"
@@ -43,14 +46,14 @@ thiserror = { workspace = true }
 toml = "0.8"
 dotenvy = "0.15"
 chrono = { workspace = true }
-validator = { version = "0.18", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 regex = "1.10"
 lazy_static = "1.5"
 dashmap = "6"
 tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 futures = "0.3"
-prometheus = "0.13"
+prometheus = "0.14"
 uuid = { workspace = true }
 sysinfo = "0.31"
 fs4 = "0.6"

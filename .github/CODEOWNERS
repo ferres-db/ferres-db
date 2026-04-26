@@ -1,0 +1,9 @@
+# Default reviewer
+*                       @rafaelferres
+
+# Áreas críticas
+/crates/core/           @rafaelferres
+/.github/workflows/     @rafaelferres
+/Dockerfile             @rafaelferres
+/docker-compose*.yml    @rafaelferres
+LICENSE-*               @rafaelferres

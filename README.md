@@ -1,39 +1,39 @@
 # FerresDB Core
 
-Motor de busca vetorial de alta performance escrito em Rust, projetado para aplicações de busca semântica, RAG (Retrieval-Augmented Generation) e sistemas de recomendação.
+High-performance vector search engine written in Rust, designed for semantic search, RAG (Retrieval-Augmented Generation) and recommendation systems.
 
-## Visão geral
+## Overview
 
-O FerresDB Core é um motor de busca vetorial em Rust para busca semântica, RAG e recomendação. Inclui **servidor HTTP** com API REST para criar coleções, inserir pontos e buscar por similaridade (vetorial e híbrida com BM25).
+FerresDB Core is a Rust vector search engine for semantic search, RAG and recommendation. It includes an **HTTP server** with a REST API to create collections, insert points and search by similarity (vector and hybrid with BM25).
 
-- **Busca vetorial** com HNSW; métricas: Cosine, Euclidean, Dot Product
-- **Persistência** em disco (JSON-lines, WAL, crash recovery)
-- **API REST** para coleções, pontos, busca e stats; SDK Rust para busca híbrida
-- **Uso como biblioteca** (`VectorDB`) ou via servidor para pipelines RAG (ex.: [simple_rag](examples/simple_rag/README.md))
+- **Vector search** with HNSW; metrics: Cosine, Euclidean, Dot Product
+- **Disk persistence** (JSON-lines, WAL, crash recovery)
+- **REST API** for collections, points, search and stats; Rust SDK for hybrid search
+- **Use as a library** (`VectorDB`) or via server for RAG pipelines (e.g. [simple_rag](examples/simple_rag/README.md))
 
-### Características principais
+### Key features
 
-- ✅ **Alta performance**: Busca em milissegundos mesmo com milhões de vetores
-- ✅ **Thread-safe**: Pronto para uso em servidores multi-threaded
-- ✅ **Persistente**: Dados salvos automaticamente em disco após cada operação
-- ✅ **Write-Ahead Log (WAL)**: Garante durabilidade e recuperação após crash
-- ✅ **Snapshots periódicos**: A cada 1000 operações, cria snapshot completo e trunca WAL
-- ✅ **Crash recovery**: Recuperação automática do estado consistente após falhas
-- ✅ **Extensível**: Trait `ANNIndex` permite trocar o backend de busca
-- ✅ **Type-safe**: Tipos de erro específicos facilitam tratamento e debugging
+- ✅ **High performance**: Search in milliseconds even with millions of vectors
+- ✅ **Thread-safe**: Ready for use in multi-threaded servers
+- ✅ **Persistent**: Data automatically saved to disk after each operation
+- ✅ **Write-Ahead Log (WAL)**: Guarantees durability and recovery after crash
+- ✅ **Periodic snapshots**: Every 1000 operations, creates a full snapshot and truncates WAL
+- ✅ **Crash recovery**: Automatic recovery to a consistent state after failures
+- ✅ **Extensible**: `ANNIndex` trait allows swapping the search backend
+- ✅ **Type-safe**: Specific error types make handling and debugging easier
 
-## Quick start (3 passos)
+## Quick start (3 steps)
 
-**1. Subir o servidor**
+**1. Start the server**
 
 ```bash
 cargo run --bin server
-# ou: make run   /  docker-compose up -d
+# or: make run   /  docker-compose up -d
 ```
 
-Por padrão o servidor fica em `http://localhost:8080`.
+The server runs at `http://localhost:8080` by default.
 
-**2. Criar uma coleção**
+**2. Create a collection**
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/collections \
@@ -41,7 +41,7 @@ curl -s -X POST http://localhost:8080/api/v1/collections \
   -d '{"name":"docs","dimension":384,"distance":"Cosine"}'
 ```
 
-**3. Inserir pontos e buscar**
+**3. Insert points and search**
 
 ```bash
 # Upsert
@@ -49,55 +49,55 @@ curl -s -X POST http://localhost:8080/api/v1/collections/docs/points \
   -H "Content-Type: application/json" \
   -d '{"points":[{"id":"doc-1","vector":[0.1,0.2,-0.1],"metadata":{"text":"Hello world"}}]}'
 
-# Busca vetorial (ajuste o vetor para a dimensão da coleção, ex.: 384)
+# Vector search (adjust vector to the collection dimension, e.g. 384)
 curl -s -X POST http://localhost:8080/api/v1/collections/docs/search \
   -H "Content-Type: application/json" \
   -d '{"vector":[0.1,0.2,-0.1],"limit":5}'
 ```
 
-Referência completa dos endpoints e schemas: [docs/api.md](docs/api.md).
+Full endpoint and schema reference: [docs/api.md](docs/api.md).
 
-### Conectar Claude Desktop ao FerresDB (MCP)
+### Connect Claude Desktop to FerresDB (MCP)
 
-O FerresDB pode atuar como servidor **Model Context Protocol (MCP)** via STDIO, permitindo que o Claude Desktop (ou outros clientes MCP) usem ferramentas de busca vetorial, upsert e estatísticas no mesmo processo em que rodam a API REST e gRPC.
+FerresDB can act as a **Model Context Protocol (MCP)** server via STDIO, allowing Claude Desktop (or other MCP clients) to use vector search, upsert and stats tools in the same process that runs the REST and gRPC APIs.
 
-1. **Compile o servidor com suporte MCP:**
+1. **Build the server with MCP support:**
 
    ```bash
    cargo build -p ferres-db-server --features mcp --release
    ```
 
-2. **No Claude Desktop**, configure o servidor MCP para iniciar o binário com a flag `--mcp`. Por exemplo, em `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`):
+2. **In Claude Desktop**, configure the MCP server to start the binary with the `--mcp` flag. For example, in `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`):
 
    ```json
    {
      "mcpServers": {
        "ferresdb": {
-         "command": "/caminho/para/ferres-db-server",
+         "command": "/path/to/ferres-db-server",
          "args": ["--mcp"]
        }
      }
    }
    ```
 
-   Use o caminho real do binário (ex.: `target/release/ferres-db-server` no diretório do projeto).
+   Use the actual binary path (e.g. `target/release/ferres-db-server` in the project directory).
 
-3. O processo do FerresDB continuará servindo REST e gRPC normalmente; a comunicação MCP ocorre apenas por stdin/stdout. Os logs do servidor são enviados para **stderr** para não interferir no protocolo MCP.
+3. The FerresDB process will continue serving REST and gRPC normally; MCP communication happens only via stdin/stdout. Server logs are sent to **stderr** to avoid interfering with the MCP protocol.
 
-Ferramentas disponíveis: `search_points`, `upsert_points`, `get_stats`. Detalhes em [docs/api.md](docs/api.md#model-context-protocol-mcp).
+Available tools: `search_points`, `upsert_points`, `get_stats`. Details in [docs/api.md](docs/api.md#model-context-protocol-mcp).
 
 ---
 
-## Uso como biblioteca (Rust)
+## Use as a library (Rust)
 
-Adicione ao seu `Cargo.toml`:
+Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 ferres-db-core = { path = "crates/core" }
 ```
 
-### Exemplo básico
+### Basic example
 
 ```rust
 use ferres_db_core::{VectorDB, CollectionConfig, DistanceMetric, Point};
@@ -115,8 +115,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.create_collection(config)?;
 
     let points = vec![
-        Point::new("doc-1", vec![0.1; 384], serde_json::json!({"text": "Primeiro documento"}))?,
-        Point::new("doc-2", vec![0.2; 384], serde_json::json!({"text": "Segundo documento"}))?,
+        Point::new("doc-1", vec![0.1; 384], serde_json::json!({"text": "First document"}))?,
+        Point::new("doc-2", vec![0.2; 384], serde_json::json!({"text": "Second document"}))?,
     ];
     db.upsert_points("embeddings", points)?;
 
@@ -128,143 +128,143 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Mais exemplos e SDK (Rust, Python, TypeScript): [docs/sdk.md](docs/sdk.md).
+More examples and SDK (Rust, Python, TypeScript): [docs/sdk.md](docs/sdk.md).
 
-## Autenticação
+## Authentication
 
-O FerresDB usa API Keys para proteger endpoints de collections e points.
+FerresDB uses API Keys to protect collection and point endpoints.
 
-### Configurar API Keys
+### Configure API Keys
 
 ```bash
 export FERRESDB_API_KEYS="sk-dev-abc123,sk-prod-xyz789"
 ```
 
-Ou via `config.toml`:
+Or via `config.toml`:
 
 ```toml
 api_keys = "sk-dev-abc123,sk-prod-xyz789"
 ```
 
-### Gerar nova API Key
+### Generate a new API Key
 
 ```bash
 echo "sk-$(openssl rand -hex 32)"
 ```
 
-### Usar API Key
+### Use an API Key
 
 ```bash
 curl -H "Authorization: Bearer sk-dev-abc123" \
   http://localhost:3000/api/v1/collections
 ```
 
-### Endpoints públicos (sem autenticação)
+### Public endpoints (no authentication)
 
 - `GET /health`
 - `GET /metrics`
 - `GET /dashboard`
 - `GET /api/v1/stats/global`
 
-### Endpoints protegidos (requerem API key)
+### Protected endpoints (require API key)
 
-- Todos de `/api/v1/collections/*`
-- Todos de `/api/v1/points/*`
+- All `/api/v1/collections/*`
+- All `/api/v1/points/*`
 - `POST /api/v1/save`
 
-## 📊 Benchmarks
+## Benchmarks
 
-O FerresDB inclui benchmarks completos usando [Criterion.rs](https://github.com/bheisler/criterion.rs).
+FerresDB includes comprehensive benchmarks using [Criterion.rs](https://github.com/bheisler/criterion.rs).
 
-### Executando Benchmarks
+### Running Benchmarks
 
 ```bash
-# Gere os corpus de teste primeiro
+# Generate test corpus first
 python tests/fixtures/generate_corpus.py
 
-# Execute os benchmarks
+# Run benchmarks
 cd crates/core
 cargo bench
 ```
 
-### Resultados Esperados
+### Expected Results
 
-**Hardware de referência**: CPU moderna (Intel i7/AMD Ryzen), 16GB RAM
+**Reference hardware**: Modern CPU (Intel i7/AMD Ryzen), 16GB RAM
 
-#### Indexação (Throughput)
+#### Indexing (Throughput)
 
-| Tamanho | Pontos/segundo | Tempo total |
-| ------- | -------------- | ----------- |
-| 1K      | ~50K-100K      | ~10-20ms    |
-| 10K     | ~30K-60K       | ~150-300ms  |
-| 100K    | ~20K-40K       | ~2.5-5s     |
+| Size | Points/second | Total time |
+| ---- | ------------- | ---------- |
+| 1K   | ~50K–100K     | ~10–20ms   |
+| 10K  | ~30K–60K      | ~150–300ms |
+| 100K | ~20K–40K      | ~2.5–5s    |
 
-#### Busca (Latência)
+#### Search (Latency)
 
-| Métrica  | P50        | P95         | P99         |
-| -------- | ---------- | ----------- | ----------- |
-| Latência | ~100-500μs | ~200-1000μs | ~500-2000μs |
+| Metric  | P50        | P95         | P99         |
+| ------- | ---------- | ----------- | ----------- |
+| Latency | ~100–500μs | ~200–1000μs | ~500–2000μs |
 
-_Nota: Resultados variam com hardware, configuração HNSW e dimensão dos vetores._
+_Note: Results vary with hardware, HNSW configuration and vector dimension._
 
-### Visualizando Resultados
+### Viewing Results
 
-Os benchmarks geram relatórios HTML em `target/criterion/`. Abra `target/criterion/index.html` no navegador para gráficos detalhados.
+Benchmarks generate HTML reports in `target/criterion/`. Open `target/criterion/index.html` in the browser for detailed charts.
 
-## 🗺️ Roadmap
+## Roadmap
 
-### Versão 0.1.0 (Atual) ✅
+### Version 0.1.0 (Current) ✅
 
-- [x] Motor de busca HNSW com múltiplas métricas
-- [x] Persistência em disco (JSON-lines)
-- [x] API de alto nível (`VectorDB`)
-- [x] Validação de dados e tratamento de erros
-- [x] Paralelização para batches grandes
-- [x] Cache LRU opcional
+- [x] HNSW search engine with multiple metrics
+- [x] Disk persistence (JSON-lines)
+- [x] High-level API (`VectorDB`)
+- [x] Data validation and error handling
+- [x] Parallelization for large batches
+- [x] Optional LRU cache
 
-### Versão 0.2.0 (Planejado)
+### Version 0.2.0 (Planned)
 
-- [x] Write-ahead log (WAL) para melhor durabilidade ✅
-- [ ] Compressão de vetores (quantização)
-- [ ] Índices secundários para busca por metadados
-- [ ] Suporte a transações
-- [ ] Backup e restore incrementais
+- [x] Write-ahead log (WAL) for better durability ✅
+- [ ] Vector compression (quantization)
+- [ ] Secondary indexes for metadata search
+- [ ] Transaction support
+- [ ] Incremental backup and restore
 
-### Versão 0.3.0 (Futuro)
+### Version 0.3.0 (Future)
 
-- [ ] Sharding automático de coleções grandes
-- [ ] Replicação e alta disponibilidade
-- [ ] Suporte a múltiplos backends ANN (IVF, FAISS)
-- [ ] API gRPC nativa
-- [ ] Dashboard de métricas
+- [ ] Automatic sharding of large collections
+- [ ] Replication and high availability
+- [ ] Support for multiple ANN backends (IVF, FAISS)
+- [ ] Native gRPC API
+- [ ] Metrics dashboard
 
-## Documentação
+## Documentation
 
-- [docs/api.md](docs/api.md) — Referência da API HTTP (endpoints, curl, schemas JSON)
-- [docs/sdk.md](docs/sdk.md) — SDK Rust e uso da API em Python/TypeScript
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Visão geral e diagrama de componentes
-- [docs/architecture.md](docs/architecture.md) — Arquitetura interna e fluxos de dados
-- [docs/ADR/](docs/ADR/) — Architecture Decision Records (decisões em arquivos numerados)
-- [examples/simple_rag/README.md](examples/simple_rag/README.md) — Tutorial RAG passo a passo
-- [tests/e2e/README.md](tests/e2e/README.md) — Testes end-to-end
+- [docs/api.md](docs/api.md) — HTTP API reference (endpoints, curl, JSON schemas)
+- [docs/sdk.md](docs/sdk.md) — Rust SDK and API usage in Python/TypeScript
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Overview and component diagram
+- [docs/architecture.md](docs/architecture.md) — Internal architecture and data flows
+- [docs/ADR/](docs/ADR/) — Architecture Decision Records (decisions in numbered files)
+- [examples/simple_rag/README.md](examples/simple_rag/README.md) — Step-by-step RAG tutorial
+- [tests/e2e/README.md](tests/e2e/README.md) — End-to-end tests
 
-Documentação Rust (crates): `cargo doc --open`
+Rust documentation (crates): `cargo doc --open`
 
-## Arquitetura (high-level)
+## Architecture (high-level)
 
 ```mermaid
 flowchart LR
-  subgraph clients [Clientes]
+  subgraph clients [Clients]
     CLI[CLI]
-    RAG[simple_rag / Ingestão]
-    Custom[Apps custom]
+    RAG[simple_rag / Ingestion]
+    Custom[Custom apps]
   end
-  subgraph server [Servidor HTTP]
+  subgraph server [HTTP Server]
     API[REST API]
   end
   subgraph core [FerresDB Core]
     VectorDB[VectorDB]
-    Coll[Coleções]
+    Coll[Collections]
     HNSW[HNSW / Storage]
   end
   CLI --> API
@@ -275,143 +275,145 @@ flowchart LR
   Coll --> HNSW
 ```
 
-Estrutura do repositório:
+Repository structure:
 
 ```
 ferres-db-core/
 ├── crates/
-│   ├── core/          # Motor vetorial: pontos, coleções, HNSW, storage, WAL
-│   ├── server/        # Servidor HTTP (REST)
-│   └── sdk-rust/      # SDK Rust (cliente HTTP, busca híbrida)
+│   ├── core/          # Vector engine: points, collections, HNSW, storage, WAL
+│   ├── server/        # HTTP server (REST)
+│   └── sdk-rust/      # Rust SDK (HTTP client, hybrid search)
 ├── docs/
-│   ├── api.md         # Referência da API
-│   ├── sdk.md         # Guia SDK e clientes
+│   ├── api.md         # API reference
+│   ├── sdk.md         # SDK and clients guide
 │   ├── architecture.md
 │   └── decisions.md
-├── examples/          # Ingestão, simple_rag
+├── examples/          # Ingestion, simple_rag
 └── tests/
 ```
 
-### Módulos do Core
+### Core Modules
 
-| Módulo          | Responsabilidade                                   |
-| --------------- | -------------------------------------------------- |
-| `point.rs`      | Estrutura `Point` — vetor f32 + ID + metadata JSON |
-| `collection.rs` | `Collection` — gerencia pontos e índice ANN        |
-| `search.rs`     | Trait `ANNIndex` + implementação HNSW              |
-| `storage.rs`    | Persistência em disco via JSON-lines               |
-| `error.rs`      | Tipos de erro com `thiserror`                      |
-| `lib.rs`        | API principal `VectorDB` + re-exports              |
+| Module          | Responsibility                                   |
+| --------------- | ------------------------------------------------ |
+| `point.rs`      | `Point` struct — f32 vector + ID + JSON metadata |
+| `collection.rs` | `Collection` — manages points and ANN index      |
+| `search.rs`     | `ANNIndex` trait + HNSW implementation           |
+| `storage.rs`    | Disk persistence via JSON-lines                  |
+| `error.rs`      | Error types with `thiserror`                     |
+| `lib.rs`        | Main `VectorDB` API + re-exports                 |
 
-## 🐳 Docker
+## Docker
 
-### Build e Execução com Docker
+### Build and Run with Docker
 
-O projeto inclui um Dockerfile multi-stage otimizado e docker-compose.yml para facilitar o deploy.
+The project includes an optimized multi-stage Dockerfile and docker-compose.yml for easy deployment.
 
-#### Usando Makefile (recomendado)
+#### Using Makefile (recommended)
 
 ```bash
-# Construir imagem Docker
+# Build Docker image
 make docker-build
 
-# Executar container
+# Run container
 make docker-run
 
-# Ver logs
+# View logs
 make docker-logs
 
-# Parar container
+# Stop container
 make docker-stop
 
-# Limpar imagens e volumes
+# Clean images and volumes
 make docker-clean
 ```
 
-#### Usando Docker Compose diretamente
+#### Using Docker Compose directly
 
 ```bash
-# Build e start
+# Build and start
 docker-compose up -d
 
-# Ver logs
+# View logs
 docker-compose logs -f
 
-# Parar
+# Stop
 docker-compose down
 
-# Parar e remover volumes
+# Stop and remove volumes
 docker-compose down -v
 ```
 
-#### Variáveis de Ambiente
+#### Environment Variables
 
-O servidor pode ser configurado via variáveis de ambiente:
+The server can be configured via environment variables:
 
-- `HOST`: Host para bind (padrão: `0.0.0.0`)
-- `PORT`: Porta do servidor (padrão: `8080`)
-- `STORAGE_PATH`: Caminho para dados persistentes (padrão: `/data`)
-- `LOG_LEVEL`: Nível de log (padrão: `info`)
+- `HOST`: Bind host (default: `0.0.0.0`)
+- `PORT`: Server port (default: `8080`)
+- `STORAGE_PATH`: Path for persistent data (default: `/data`)
+- `LOG_LEVEL`: Log level (default: `info`)
 
 #### Health Check
 
-O container inclui health check automático no endpoint `/health`:
+The container includes an automatic health check on the `/health` endpoint:
 
 ```bash
-# Verificar saúde do container
+# Check container health
 curl http://localhost:8080/health
 ```
 
 #### Volumes
 
-Os dados são persistidos no volume `ferres-data`. Para backup:
+Data is persisted in the `ferres-data` volume. For backup:
 
 ```bash
-# Backup do volume
+# Backup the volume
 docker run --rm -v ferres-db-core_ferres-data:/data -v $(pwd):/backup \
   debian:bookworm-slim tar czf /backup/ferres-backup.tar.gz /data
 ```
 
-## 📡 Observability (Distributed Tracing)
+For the full Docker setup guide (development, production, Docker Hub publishing, troubleshooting), see [DOCKER.md](DOCKER.md).
 
-O FerresDB suporta tracing distribuído via **OpenTelemetry** (OTLP) para monitorar buscas vetoriais end-to-end. Quando habilitado, cada requisição HTTP gera spans hierárquicos com atributos ricos (collection, dimensão, latência por fase, etc.), exportados para backends como Jaeger, Grafana Tempo ou qualquer collector OTLP.
+## Observability (Distributed Tracing)
 
-### Habilitando OpenTelemetry
+FerresDB supports distributed tracing via **OpenTelemetry** (OTLP) to monitor vector searches end-to-end. When enabled, each HTTP request generates hierarchical spans with rich attributes (collection, dimension, latency per phase, etc.), exported to backends like Jaeger, Grafana Tempo or any OTLP collector.
 
-Compile com a feature `otel`:
+### Enabling OpenTelemetry
+
+Build with the `otel` feature:
 
 ```bash
 cargo build --release --features otel
 ```
 
-### Variáveis de Ambiente
+### Environment Variables
 
-| Variável                      | Padrão                  | Descrição                       |
-| ----------------------------- | ----------------------- | ------------------------------- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | Endpoint gRPC do collector OTLP |
+| Variable                      | Default                 | Description                         |
+| ----------------------------- | ----------------------- | ----------------------------------- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | gRPC endpoint of the OTLP collector |
 
-### Exemplo com Jaeger
+### Example with Jaeger
 
 ```bash
-# 1. Inicie o Jaeger (UI em http://localhost:16686)
+# 1. Start Jaeger (UI at http://localhost:16686)
 docker run -d --name jaeger \
   -p 16686:16686 \
   -p 4317:4317 \
   jaegertracing/all-in-one:latest
 
-# 2. Inicie o FerresDB com tracing
+# 2. Start FerresDB with tracing
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
   cargo run --release --features otel
 
-# 3. Execute uma busca e visualize o trace no Jaeger
+# 3. Run a search and visualize the trace in Jaeger
 curl -X POST http://localhost:8080/api/v1/collections/docs/search \
   -H "Content-Type: application/json" \
   -d '{"vector":[0.1,0.2,-0.1],"limit":5}'
 ```
 
-### Hierarquia de Spans
+### Span Hierarchy
 
-Cada busca vetorial gera a seguinte árvore de spans:
+Each vector search generates the following span tree:
 
 ```
 http_request
@@ -422,66 +424,77 @@ http_request
         └── hydrate_results
 ```
 
-### Atributos OTel nos Spans
+### OTel Span Attributes
 
-| Atributo                 | Span          | Descrição                                |
+| Attribute                | Span          | Description                              |
 | ------------------------ | ------------- | ---------------------------------------- |
-| `db.collection`          | search_points | Nome da coleção                          |
-| `db.operation`           | search_points | Tipo: `vector_search` ou `hybrid_search` |
-| `db.vector.dimension`    | search_points | Dimensão dos vetores                     |
-| `db.results.count`       | search_points | Número de resultados retornados          |
-| `db.duration.search_ms`  | search_points | Tempo da busca HNSW (ms)                 |
-| `db.duration.hydrate_ms` | search_points | Tempo de hidratação (ms)                 |
-| `db.index.type`          | search_points | Tipo de índice (`hnsw`)                  |
-| `db.index.ef_search`     | search_points | Parâmetro ef_search usado                |
+| `db.collection`          | search_points | Collection name                          |
+| `db.operation`           | search_points | Type: `vector_search` or `hybrid_search` |
+| `db.vector.dimension`    | search_points | Vector dimension                         |
+| `db.results.count`       | search_points | Number of results returned               |
+| `db.duration.search_ms`  | search_points | HNSW search time (ms)                    |
+| `db.duration.hydrate_ms` | search_points | Hydration time (ms)                      |
+| `db.index.type`          | search_points | Index type (`hnsw`)                      |
+| `db.index.ef_search`     | search_points | ef_search parameter used                 |
 
-### Propagação de Contexto (W3C Trace Context)
+### Context Propagation (W3C Trace Context)
 
-O FerresDB propaga automaticamente trace context via headers W3C `traceparent` e `tracestate`. Ao receber uma requisição com esses headers, o span HTTP é linkado ao trace do caller. O header `x-trace-id` é incluído na resposta para facilitar debugging.
+FerresDB automatically propagates trace context via W3C `traceparent` and `tracestate` headers. When receiving a request with these headers, the HTTP span is linked to the caller's trace. The `x-trace-id` header is included in the response for easier debugging.
 
-### Sem OTel (padrão)
+### Without OTel (default)
 
-Sem a feature `otel`, o FerresDB funciona normalmente com logging estruturado (JSON para arquivo, texto para console) sem overhead de tracing distribuído.
+Without the `otel` feature, FerresDB works normally with structured logging (JSON to file, text to console) with no distributed tracing overhead.
 
-## 🔧 Build e Desenvolvimento
+## Build and Development
 
 ### Build
 
 ```bash
-# Build de desenvolvimento
+# Development build
 cargo build
 
-# Build otimizado (release)
+# Optimized build (release)
 cargo build --release
 
-# Build usando Makefile
+# Build using Makefile
 make build
 
-# Executar localmente
+# Run locally
 make run
 
-# Testes
+# Tests
 make test
-# ou
+# or
 cargo test
 
-# Documentação
+# Documentation
 cargo doc --open
 ```
 
-### CLI
+## Contributing
 
-O FerresDB inclui uma CLI completa. Veja [README.md](README.md#cli-interface-de-linha-de-comando) para detalhes.
+Contributions are welcome! See **[CONTRIBUTING.md](CONTRIBUTING.md)** for development environment, testing, code standards and PR process.
 
-## 🤝 Contribuindo
+## License
 
-Contribuições são bem-vindas! Consulte o **[CONTRIBUTING.md](CONTRIBUTING.md)** para ambiente de desenvolvimento, testes, padrões de código e processo de PR.
+Licensed under either of
 
-## 📄 Licença
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
-MIT
+at your option.
 
-## 🙏 Agradecimentos
+### Contribution
 
-- [hnsw_rs](https://github.com/guillaume-be/hnsw_rs) - Biblioteca HNSW em Rust
-- [Criterion.rs](https://github.com/bheisler/criterion.rs) - Framework de benchmarks
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+All contributions must be signed off (DCO). See [CONTRIBUTING.md](CONTRIBUTING.md#developer-certificate-of-origin-dco)
+for details.
+
+## Acknowledgements
+
+- [hnsw_rs](https://github.com/guillaume-be/hnsw_rs) — HNSW library in Rust
+- [Criterion.rs](https://github.com/bheisler/criterion.rs) — Benchmarking framework
+

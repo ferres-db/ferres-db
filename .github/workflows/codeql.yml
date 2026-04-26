@@ -1,0 +1,36 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: "23 4 * * 1" # segunda-feira 4h23 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: 🔍 Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read # required by codeql-action
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript]
+        # Rust não é suportado oficialmente pelo CodeQL ainda;
+        # use cargo-audit no CI separadamente se quiser.
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: github/codeql-action/init@4f3212b61783c3c68e8309a0f18a699764811cda # v3.27.1
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/analyze@4f3212b61783c3c68e8309a0f18a699764811cda # v3.27.1
+        with:
+          category: "/language:${{ matrix.language }}"

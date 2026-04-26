@@ -89,6 +89,8 @@ mod tests {
                 id: format!("id-{i}"),
                 vector: vec![0.0; 4],
                 metadata: serde_json::Value::Null,
+                namespace: None,
+                ttl: None,
             });
         }
         let body = UpsertPointsRequest { points };
@@ -102,6 +104,8 @@ mod tests {
                 id: "x".to_string(),
                 vector: vec![0.0; MAX_VECTOR_DIM + 1],
                 metadata: serde_json::Value::Null,
+                namespace: None,
+                ttl: None,
             }],
         };
         assert!(validate_upsert_request(&body).is_err());
@@ -114,6 +118,8 @@ mod tests {
                 id: "x".to_string(),
                 vector: vec![0.0; 128],
                 metadata: serde_json::Value::Null,
+                namespace: None,
+                ttl: None,
             }],
         };
         assert!(validate_upsert_request(&body).is_ok());

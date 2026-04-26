@@ -167,7 +167,7 @@ impl Default for StorageCircuitBreaker {
 ///
 /// Permite ativar compressão Zstd no WAL, snapshots em formato binário (bincode)
 /// e isolamento físico por namespace (multitenancy).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StorageOptions {
     /// Comprimir entradas do WAL com Zstd (menor uso de disco no `wal.log`).
     #[serde(default)]
@@ -180,16 +180,6 @@ pub struct StorageOptions {
     /// snapshot e limpeza por tenant sem afetar outros.
     #[serde(default)]
     pub namespace_physical_isolation: bool,
-}
-
-impl Default for StorageOptions {
-    fn default() -> Self {
-        Self {
-            wal_compression: false,
-            binary_snapshot: false,
-            namespace_physical_isolation: false,
-        }
-    }
 }
 
 /// Metadados persistidos de uma coleção.

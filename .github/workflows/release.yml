@@ -1,0 +1,74 @@
+# Cria tag git e GitHub Release quando há nova versão semântica em main.
+# Roda DEPOIS de docker-publish ter sucesso.
+
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["Docker Publish"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: 🔖 Tag + Release
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: semver
+        uses: PaulHatch/semantic-version@de157b15a0825b9ce4e2bce0664de4f23dbcca9f # v5.4.0
+        with:
+          tag_prefix: "v"
+          major_pattern: "/(BREAKING CHANGE)|!:/"
+          minor_pattern: "/^feat(\\(.+\\))?:/"
+          search_commit_body: true
+          bump_each_commit: false
+
+      - name: Skip if no version change
+        if: steps.semver.outputs.changed != 'true' || steps.semver.outputs.is_tagged == 'true'
+        run: |
+          echo "No new version to release"
+          exit 0
+
+      - name: Create tag
+        if: steps.semver.outputs.changed == 'true' && steps.semver.outputs.is_tagged != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.semver.outputs.version_tag }}" -m "Release ${{ steps.semver.outputs.version_tag }}"
+          git push origin "${{ steps.semver.outputs.version_tag }}"
+
+      - name: Create Release
+        if: steps.semver.outputs.changed == 'true' && steps.semver.outputs.is_tagged != 'true'
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          tag_name: ${{ steps.semver.outputs.version_tag }}
+          name: ${{ steps.semver.outputs.version_tag }}
+          generate_release_notes: true
+          body: |
+            ## 🐳 Docker Images
+
+            ```bash
+                        docker pull ${{ secrets.DOCKERHUB_USERNAME }}/ferres-db-core:${{ steps.semver.outputs.version_tag }}
+                        docker pull ${{ secrets.DOCKERHUB_USERNAME }}/ferres-db-frontend:${{ steps.semver.outputs.version_tag }}
+            ```
+
+              ## 🔐 Verificar assinatura
+
+            ```bash
+                        cosign verify ${{ secrets.DOCKERHUB_USERNAME }}/ferres-db-core:${{ steps.semver.outputs.version_tag }} \
+                          --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.+" \
+                          --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

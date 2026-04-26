@@ -46,6 +46,7 @@ fn wal_entry_to_proto(entry: WalEntry) -> WalEntryMessage {
             })
         }
         WalOperation::Delete { id } => Operation::Delete(WalDelete { id }),
+        WalOperation::Link { from, to } => Operation::Link(WalLink { from, to }),
     };
     WalEntryMessage {
         timestamp: entry.timestamp,
@@ -146,6 +147,7 @@ impl FerresDb for FerresGrpcService {
             bm25_text_field,
             quantization: Default::default(),
             tiered_storage: Default::default(),
+            retention_days: None,
         };
 
         let created_at = std::time::SystemTime::now()
@@ -1073,7 +1075,7 @@ mod tests {
             port: 0,
             storage_path: temp_dir.path().to_path_buf(),
             log_level: "error".to_string(),
-            api_keys: None,
+            ..Default::default()
         };
         let state = AppState::new(config, None, None, None, None).unwrap();
         let service = FerresGrpcService::new(state);
@@ -1123,16 +1125,19 @@ mod tests {
                 id: "p1".to_string(),
                 vector: vec![1.0, 0.0, 0.0],
                 metadata_json: json!({"category": "tech", "price": 50}).to_string(),
+                ..Default::default()
             },
             PointInput {
                 id: "p2".to_string(),
                 vector: vec![0.0, 1.0, 0.0],
                 metadata_json: json!({"category": "science", "price": 200}).to_string(),
+                ..Default::default()
             },
             PointInput {
                 id: "p3".to_string(),
                 vector: vec![0.9, 0.1, 0.0],
                 metadata_json: json!({"category": "tech", "price": 30}).to_string(),
+                ..Default::default()
             },
         ];
         upsert_test_points(&service, coll_name, points).await;
@@ -1148,6 +1153,7 @@ mod tests {
                 vector: vec![1.0, 0.0, 0.0],
                 limit: 10,
                 filter_json: filter.to_string(),
+                ..Default::default()
             }))
             .await
             .unwrap();
@@ -1253,6 +1259,7 @@ mod tests {
             id: "p1".to_string(),
             vector: vec![1.0, 0.0, 0.0],
             metadata_json: json!({"category": "tech"}).to_string(),
+            ..Default::default()
         }];
         upsert_test_points(&service, coll_name, points).await;
 
@@ -1263,6 +1270,7 @@ mod tests {
                 vector: vec![1.0, 0.0, 0.0],
                 limit: 10,
                 filter_json: String::new(),
+                ..Default::default()
             }))
             .await
             .unwrap();

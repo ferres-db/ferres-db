@@ -774,8 +774,8 @@ impl QjlParams {
     /// A matriz R tem valores Rademacher: cada entrada é +1 ou -1 com igual probabilidade,
     /// gerada com `StdRng::seed_from_u64(seed)` para reproducibilidade.
     pub fn new(dim: usize, m: usize, seed: u64) -> Self {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
         let mut rng = StdRng::seed_from_u64(seed);
         let projection_matrix: Vec<Vec<i8>> = (0..m)
@@ -803,7 +803,7 @@ impl QjlParams {
     /// Retorna `ceil(m / 64)` palavras u64 com os bits compactados.
     pub fn encode_residual(&self, residual: &[f32]) -> Vec<u64> {
         debug_assert_eq!(residual.len(), self.dim);
-        let num_words = (self.m + 63) / 64;
+        let num_words = self.m.div_ceil(64);
         let mut bits = vec![0u64; num_words];
 
         for (i, row) in self.projection_matrix.iter().enumerate() {
@@ -883,7 +883,7 @@ impl QjlParams {
 /// O(n log n) tempo, O(n) memória. Para dim = 128: 127 ângulos, 1 raio final.
 pub fn polar_encode(vector: &[f32], bits_per_angle: u8) -> PolarQuantized {
     debug_assert!(
-        bits_per_angle >= 1 && bits_per_angle <= 8,
+        (1..=8).contains(&bits_per_angle),
         "bits_per_angle must be in [1, 8]"
     );
 
@@ -960,7 +960,7 @@ pub fn polar_decode(quantized: &PolarQuantized) -> Vec<f32> {
     let mut level_sizes: Vec<usize> = Vec::new();
     let mut sz = dim;
     while sz > 1 {
-        let pairs = (sz + 1) / 2;
+        let pairs = sz.div_ceil(2);
         level_sizes.push(pairs);
         sz = pairs;
     }
@@ -976,9 +976,7 @@ pub fn polar_decode(quantized: &PolarQuantized) -> Vec<f32> {
     // input_sizes[k] = level_sizes[k-1] for k > 0 (the radii produced by the previous level).
     let mut input_sizes: Vec<usize> = vec![0; level_sizes.len()];
     input_sizes[0] = dim;
-    for k in 1..level_sizes.len() {
-        input_sizes[k] = level_sizes[k - 1];
-    }
+    input_sizes[1..level_sizes.len()].copy_from_slice(&level_sizes[..(level_sizes.len() - 1)]);
 
     // Start from the final (deepest) radius and expand level by level in reverse.
     let mut radii = vec![quantized.final_radius];
@@ -990,8 +988,7 @@ pub fn polar_decode(quantized: &PolarQuantized) -> Vec<f32> {
 
         let mut expanded = Vec::with_capacity(2 * n_pairs);
 
-        for i in 0..n_pairs {
-            let r = radii[i];
+        for (i, &r) in radii.iter().enumerate().take(n_pairs) {
             let q = quantized.angles[offset + i] as f32;
             // Dequantize: [0, max_angle_val] → [0, 2π] → [-π, π]
             let theta = q / max_angle_val * two_pi - std::f32::consts::PI;
@@ -1371,7 +1368,11 @@ mod tests {
         let q3 = polar_encode(&v3, 8);
         assert_eq!(q3.dim, 3);
         let d3 = polar_decode(&q3);
-        assert_eq!(d3.len(), 3, "decoded must have exactly 3 elements for odd dim");
+        assert_eq!(
+            d3.len(),
+            3,
+            "decoded must have exactly 3 elements for odd dim"
+        );
     }
 
     /// Testa que a memória de PolarQuantized para dim=128 é menor que Vec<f32>.
@@ -1476,7 +1477,10 @@ mod tests {
         let bits_a = qjl_a.encode_residual(&residual);
         let bits_b = qjl_b.encode_residual(&residual);
 
-        assert_ne!(bits_a, bits_b, "Different seeds should produce different sign bits");
+        assert_ne!(
+            bits_a, bits_b,
+            "Different seeds should produce different sign bits"
+        );
     }
 
     /// Testa que QjlParams serializa apenas (m, dim, seed) e regenera a matriz no load.
@@ -1487,7 +1491,10 @@ mod tests {
 
         let json = serde_json::to_string(&qjl).expect("serialize");
         // JSON deve conter apenas m, dim, seed — não a matriz
-        assert!(!json.contains("projection_matrix"), "matrix should not be serialized");
+        assert!(
+            !json.contains("projection_matrix"),
+            "matrix should not be serialized"
+        );
         assert!(json.contains("\"m\":48"), "m should be in JSON");
         assert!(json.contains("\"seed\":99"), "seed should be in JSON");
 
