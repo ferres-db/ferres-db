@@ -90,7 +90,7 @@ openraft = { version = "0.9", optional = true }
 num_cpus = "1.17.0"
 
 [build-dependencies]
-tonic-build = { version = "0.12", optional = true }
+tonic-build = { version = "0.14", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
