@@ -26,7 +26,7 @@ jobs:
 
       - name: Calculate version
         id: semver
-        uses: PaulHatch/semantic-version@de157b15a0825b9ce4e2bce0664de4f23dbcca9f # v5.4.0
+        uses: PaulHatch/semantic-version@a8f8f59fd7f0625188492e945240f12d7ad2dca3 # v5.4.0
         with:
           tag_prefix: "v"
           major_pattern: "/(BREAKING CHANGE)|!:/"
