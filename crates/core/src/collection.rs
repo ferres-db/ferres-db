@@ -625,6 +625,29 @@ impl Collection {
     ) -> Result<Vec<(String, f32)>, FerresError> {
         self.validate_dimension(query)?;
 
+        // For very small collections HNSW may not traverse every node (approximate
+        // algorithm; greedy entry-point traversal can miss isolated nodes in tiny graphs).
+        // Fall back to an exact brute-force scan when n_points is small enough that the
+        // overhead is negligible and correctness matters more than ANN speed.
+        const BRUTE_FORCE_THRESHOLD: usize = 50;
+        if self.points.len() <= BRUTE_FORCE_THRESHOLD
+            && predicate.is_none()
+            && vector_field.is_none()
+        {
+            let metric = self.config.distance;
+            let mut scored: Vec<(String, f32)> = self
+                .points
+                .values()
+                .map(|p| {
+                    let dist = distance_between(query, &p.vector, metric);
+                    (p.storage_id(), dist)
+                })
+                .collect();
+            scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(k);
+            return Ok(scored);
+        }
+
         let index_to_use = match vector_field {
             None | Some("default") => None,
             Some(f) => {
