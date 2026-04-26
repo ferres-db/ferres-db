@@ -290,30 +290,6 @@ fn default_rate_limit_burst() -> u32 {
     10_000
 }
 
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            host: default_host(),
-            port: default_port(),
-            storage_path: default_storage_path(),
-            log_level: default_log_level(),
-            api_keys: None,
-            wal_compression: false,
-            binary_snapshot: false,
-            namespace_physical_isolation: false,
-            replica_of: None,
-            s3_region: None,
-            s3_bucket: None,
-            s3_access_key_id: None,
-            s3_secret_access_key: None,
-            rerank_model_path: None,
-            rerank_dimension: None,
-            rate_limit_per_second: default_rate_limit_per_second(),
-            rate_limit_burst: default_rate_limit_burst(),
-        }
-    }
-}
-
 impl ServerConfig {
     /// Carrega configuração de variáveis de ambiente ou arquivo TOML.
     ///
