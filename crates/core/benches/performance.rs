@@ -461,7 +461,7 @@ fn benchmark_sq8(c: &mut Criterion) {
 
         // Print memory comparison
         let f32_mem = n * dim * 4;
-        let u8_mem = n * dim * 1;
+        let u8_mem = n * dim;
         println!(
             "   Memory: f32={:.1}MB, SQ8={:.1}MB ({:.1}x compression)",
             f32_mem as f64 / 1024.0 / 1024.0,
@@ -652,23 +652,23 @@ fn benchmark_quantization_comparison(c: &mut Criterion) {
             let mut pq_overlap = 0usize;
             let mut total = 0usize;
             for q in &queries {
-                let truth: std::collections::HashSet<&str> = normal_index
+                let truth: std::collections::HashSet<String> = normal_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
-                let sq_ids: std::collections::HashSet<&str> = sq_index
+                let sq_ids: std::collections::HashSet<String> = sq_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
-                let pq_ids: std::collections::HashSet<&str> = polar_index
+                let pq_ids: std::collections::HashSet<String> = polar_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
                 sq_overlap += truth.intersection(&sq_ids).count();
                 pq_overlap += truth.intersection(&pq_ids).count();
@@ -802,23 +802,23 @@ fn benchmark_qjl_latency(c: &mut Criterion) {
             let mut qjl_overlap = 0usize;
             let mut total = 0usize;
             for q in &queries {
-                let truth: std::collections::HashSet<&str> = ref_index
+                let truth: std::collections::HashSet<String> = ref_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
-                let sq_ids: std::collections::HashSet<&str> = sq_index
+                let sq_ids: std::collections::HashSet<String> = sq_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
-                let qjl_ids: std::collections::HashSet<&str> = qjl_index
+                let qjl_ids: std::collections::HashSet<String> = qjl_index
                     .search(q, k, None)
                     .unwrap()
-                    .iter()
-                    .map(|r| r.0.as_str())
+                    .into_iter()
+                    .map(|r| r.0)
                     .collect();
                 sq_overlap += truth.intersection(&sq_ids).count();
                 qjl_overlap += truth.intersection(&qjl_ids).count();
@@ -839,7 +839,7 @@ fn benchmark_qjl_latency(c: &mut Criterion) {
             "  Recall@{k}: SQ8={sq_recall:.3}  SQ8+QJL={qjl_recall:.3}  (delta={qjl_overhead_pct:+.1}%)"
         );
 
-        let qjl_overhead_bytes = n * ((64 + 63) / 64) * 8; // ceil(m/64) u64 words × 8 bytes
+        let qjl_overhead_bytes = n * 64_usize.div_ceil(64) * 8; // ceil(m/64) u64 words × 8 bytes
         println!(
             "  QJL memory overhead: ~{:.1} KB (m=64, {} u64 words per vector)",
             qjl_overhead_bytes as f64 / 1024.0,

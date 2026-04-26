@@ -132,6 +132,18 @@ pub trait ANNIndex: Send + Sync {
         0
     }
 
+    /// Number of data rows in the ANN index (e.g. HNSW `id_map` length), including entries
+    /// that are only logically removed via [`Self::tombstone_count`] until the next rebuild.
+    ///
+    /// When [`Collection`]'s in-memory `points` map is smaller (e.g. tiered storage keeps only
+    /// *hot* vectors in RAM while the index still covers warm/cold), this is greater than
+    /// `points.len()`; a full linear scan over `points` would miss demoted points.
+    ///
+    /// Default: `usize::MAX` (disables heuristics that require knowing the index size).
+    fn index_id_count(&self) -> usize {
+        usize::MAX
+    }
+
     /// Returns estimated memory waste (bytes) from tombstoned points not yet reclaimed.
     ///
     /// Non-zero only for quantized index; reclaimed on next `build()`.
@@ -547,6 +559,10 @@ impl ANNIndex for HnswIndex {
         self.tombstones.len()
     }
 
+    fn index_id_count(&self) -> usize {
+        self.id_map.len()
+    }
+
     fn current_ef_search(&self) -> usize {
         self.ef_search_runtime.load(Ordering::Relaxed)
     }
@@ -940,6 +956,10 @@ impl ANNIndex for QuantizedHnswIndex {
         self.inner.tombstone_count()
     }
 
+    fn index_id_count(&self) -> usize {
+        self.inner.id_map.len()
+    }
+
     fn current_ef_search(&self) -> usize {
         self.inner.current_ef_search()
     }
@@ -1226,6 +1246,10 @@ impl PolarQuantHnswIndex {
 impl ANNIndex for PolarQuantHnswIndex {
     fn tombstone_count(&self) -> usize {
         self.inner.tombstone_count()
+    }
+
+    fn index_id_count(&self) -> usize {
+        self.inner.id_map.len()
     }
 
     fn current_ef_search(&self) -> usize {
