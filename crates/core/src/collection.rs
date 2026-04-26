@@ -629,8 +629,17 @@ impl Collection {
         // algorithm; greedy entry-point traversal can miss isolated nodes in tiny graphs).
         // Fall back to an exact brute-force scan when n_points is small enough that the
         // overhead is negligible and correctness matters more than ANN speed.
+        //
+        // Only when every indexed point is present in `self.points` (same count as
+        // non-tombstoned HNSW rows). Tiered storage holds only *hot* vectors in RAM
+        // while the index still references warm/cold — `points.len() < index` then.
         const BRUTE_FORCE_THRESHOLD: usize = 50;
+        let active_in_index = self
+            .index
+            .index_id_count()
+            .saturating_sub(self.index.tombstone_count());
         if self.points.len() <= BRUTE_FORCE_THRESHOLD
+            && self.points.len() == active_in_index
             && predicate.is_none()
             && vector_field.is_none()
         {

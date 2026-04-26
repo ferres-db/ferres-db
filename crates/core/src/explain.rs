@@ -650,6 +650,8 @@ mod tests {
         let (mut db, _temp) = create_test_db();
         create_test_collection(&mut db, "test", 3);
 
+        // 5+ points give a more connected HNSW graph so filtered ANN search reliably
+        // reaches both points that match the filter (p1, p3); 3 points alone is flaky.
         let points = vec![
             Point::new(
                 "p1",
@@ -667,6 +669,18 @@ mod tests {
                 "p3",
                 vec![0.9, 0.1, 0.0],
                 json!({"category": "tech", "price": 30}),
+            )
+            .unwrap(),
+            Point::new(
+                "p4",
+                vec![0.0, 0.0, 1.0],
+                json!({"category": "science", "price": 10}),
+            )
+            .unwrap(),
+            Point::new(
+                "p5",
+                vec![0.3, 0.3, 0.3],
+                json!({"category": "sports", "price": 999}),
             )
             .unwrap(),
         ];
