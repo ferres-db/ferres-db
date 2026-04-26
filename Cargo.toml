@@ -23,7 +23,7 @@ md5 = "0.7"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 rayon = "1.8"
-lru = "0.13"
+lru = "0.16"
 quickcheck = "1"
 quickcheck_macros = "1"
 memmap2 = "0.9"
