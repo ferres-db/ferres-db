@@ -199,6 +199,34 @@ async fn upsert_test_points(client: &reqwest::Client, base_url: &str, collection
     assert!(res.status().is_success(), "failed to upsert points");
 }
 
+/// Same logical points as [`upsert_test_points`], plus extra engineering rows so the
+/// HNSW graph is dense enough for filtered ANN search to reliably return both `sales` hits.
+async fn upsert_test_points_for_metadata_filter(
+    client: &reqwest::Client,
+    base_url: &str,
+    collection: &str,
+) {
+    let res = client
+        .post(format!("{base_url}/api/v1/collections/{collection}/points"))
+        .header("Authorization", format!("Bearer {TEST_API_KEY}"))
+        .json(&serde_json::json!({
+            "points": [
+                {"id": "p1", "vector": [0.1, 0.2, 0.3], "metadata": {"department": "sales", "category": "A"}},
+                {"id": "p2", "vector": [0.4, 0.5, 0.6], "metadata": {"department": "engineering", "category": "B"}},
+                {"id": "p3", "vector": [0.7, 0.8, 0.9], "metadata": {"department": "sales", "category": "C"}},
+                {"id": "p4", "vector": [0.0, 1.0, 0.0], "metadata": {"department": "engineering", "category": "D"}},
+                {"id": "p5", "vector": [0.0, 0.0, 1.0], "metadata": {"department": "engineering", "category": "E"}}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        res.status().is_success(),
+        "failed to upsert points (metadata filter fixture)"
+    );
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -289,7 +317,7 @@ async fn test_metadata_restriction_filters_results() {
     let client = reqwest::Client::new();
 
     create_test_collection(&client, &server.base_url, "filtered-test").await;
-    upsert_test_points(&client, &server.base_url, "filtered-test").await;
+    upsert_test_points_for_metadata_filter(&client, &server.base_url, "filtered-test").await;
 
     // Login as filtered_viewer (has metadata restriction: department=sales)
     let token = login(
