@@ -370,7 +370,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if app_state.config.replica_of.is_some() {
         let state_for_replication = app_state.clone();
         tokio::spawn(async move {
-            ferres_db_server::replication::run_replication_worker(state_for_replication.into()).await;
+            ferres_db_server::replication::run_replication_worker(state_for_replication.into())
+                .await;
         });
         info!("replication worker started (replica-of)");
     }
