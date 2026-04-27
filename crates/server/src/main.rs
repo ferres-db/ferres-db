@@ -240,7 +240,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_signal = async {
         tokio::signal::ctrl_c()
             .await
-            .expect("failed to listen for Ctrl+C");
+            .unwrap_or_else(|e| unreachable!("failed to listen for Ctrl+C: {e}"));
     };
 
     // Serve with graceful shutdown: wait for the signal, then drain in-flight requests.

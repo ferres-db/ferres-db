@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # WebSocket Integration Tests
 //!
 //! Testes E2E para ingestão em tempo real via WebSocket.

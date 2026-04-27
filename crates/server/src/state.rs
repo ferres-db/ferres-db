@@ -124,10 +124,7 @@ impl GlobalQueryStats {
     fn events_last_24h(&self) -> Vec<GlobalQueryEvent> {
         let now_secs = unix_now();
         let cutoff = now_secs.saturating_sub(24 * 3600);
-        let events = self
-            .events
-            .read()
-            .expect("events RwLock poisoned — a thread panicked while holding a write guard");
+        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
         events
             .iter()
             .filter(|e| e.timestamp_secs >= cutoff)
@@ -524,10 +521,7 @@ impl QueryStats {
 
     /// Calcula percentis das latências.
     pub fn calculate_percentiles(&self) -> (f64, f64, f64, f64) {
-        let latencies = self
-            .latencies_ms
-            .read()
-            .expect("latencies_ms RwLock poisoned — a thread panicked while holding a write guard");
+        let latencies = self.latencies_ms.read().unwrap_or_else(|e| e.into_inner());
         let mut sorted: Vec<u64> = latencies.iter().copied().collect();
         sorted.sort();
 

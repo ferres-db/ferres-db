@@ -1,4 +1,4 @@
-//! # Point — unidade fundamental de dado vetorial
+﻿//! # Point — unidade fundamental de dado vetorial
 //!
 //! Cada `Point` representa um vetor n-dimensional associado a um ID
 //! (String livre — pode ser UUID, slug, hash, etc.), metadados JSON
@@ -169,6 +169,7 @@ impl Point {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

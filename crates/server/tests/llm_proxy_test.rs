@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # LLM Proxy Integration Tests
 //!
 //! Mock cada provedor (OpenAI, Anthropic, Gemini) com `wiremock` e valida o

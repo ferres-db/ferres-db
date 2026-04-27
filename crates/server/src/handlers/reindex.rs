@@ -1,4 +1,4 @@
-//! # Reindex Handlers — background index rebuild endpoints
+﻿//! # Reindex Handlers — background index rebuild endpoints
 //!
 //! Provides handlers to start, monitor and list background reindex jobs
 //! for a collection. At most one reindex job may run per collection.
@@ -737,6 +737,7 @@ pub fn run_retention_cycle(app_state: &AppState) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Helper: create a completed job with a specific `completed_at` timestamp.

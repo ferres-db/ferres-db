@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # Collection Integration Tests
 //!
 //! Testes de integração para os endpoints de gerenciamento de coleções.

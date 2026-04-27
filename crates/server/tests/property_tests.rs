@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # Property Tests & Concurrency Tests for HTTP Handlers
 //!
 //! Testes de propriedade usando quickcheck para validar invariantes

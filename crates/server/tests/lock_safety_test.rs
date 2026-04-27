@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # Lock Safety — stress tests
 //!
 //! Verifica que N writers + M readers concorrentes completam sem deadlock.

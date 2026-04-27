@@ -1,4 +1,4 @@
-//! # Graph — travessia de grafos sobre relações entre pontos
+﻿//! # Graph — travessia de grafos sobre relações entre pontos
 //!
 //! Implementa BFS usando o campo `relations` de cada ponto para navegar
 //! o grafo e obter subconjuntos conectados (ex.: para busca híbrida graph + vetor).
@@ -78,6 +78,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::point::Point;
 

@@ -1,4 +1,4 @@
-//! # Search — motor de busca aproximada por vizinhos mais próximos (ANN)
+﻿//! # Search — motor de busca aproximada por vizinhos mais próximos (ANN)
 //!
 //! Define o trait [`ANNIndex`] que abstrai qualquer backend de busca
 //! vetorial, e fornece [`HnswIndex`] como implementação concreta
@@ -1405,6 +1405,7 @@ pub fn create_ann_index(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::error::FerresError;
 

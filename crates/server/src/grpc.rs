@@ -1,4 +1,4 @@
-//! # gRPC service — FerresDB native gRPC API
+﻿//! # gRPC service — FerresDB native gRPC API
 //!
 //! Implementação do serviço gRPC definido em `proto/ferresdb.proto`.
 //! Reutiliza toda a lógica do core (`Collection`, `Point`, `MetadataFilter`)
@@ -1041,6 +1041,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::state::ServerConfig;
     use serde_json::json;

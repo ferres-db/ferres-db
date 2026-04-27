@@ -1,4 +1,4 @@
-//! # Tiered Storage — movimentação automática de vetores entre camadas de armazenamento
+﻿//! # Tiered Storage — movimentação automática de vetores entre camadas de armazenamento
 //!
 //! Implementa armazenamento em três camadas (Hot, Warm, Cold) com promoção/demoção
 //! automática baseada na frequência de acesso:
@@ -1484,6 +1484,7 @@ impl TierMetadata {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::collection::CollectionConfig;
     use crate::quantization::QuantizationConfig;

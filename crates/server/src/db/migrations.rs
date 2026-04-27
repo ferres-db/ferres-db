@@ -1,4 +1,4 @@
-use crate::time::unix_now;
+﻿use crate::time::unix_now;
 use rusqlite::Connection;
 use thiserror::Error;
 
@@ -155,6 +155,7 @@ pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use rusqlite::Connection;
     use tempfile::TempDir;

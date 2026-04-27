@@ -1,4 +1,4 @@
-//! # Storage — camada de persistência em disco
+﻿//! # Storage — camada de persistência em disco
 //!
 //! ## Decisões arquiteturais
 //!
@@ -808,6 +808,7 @@ impl FileStorage {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

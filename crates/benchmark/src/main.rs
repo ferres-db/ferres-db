@@ -1,6 +1,8 @@
 //! FerresDB — Ferramenta oficial de Benchmark e Stress Test
 //!
 //! Modos: ingest (write stress), search (read stress), chaos (mixed).
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Suporta API key do FerresDB (docs/api.md) e embeddings OpenAI para ingest/busca realistas.
 
 use clap::{Parser, Subcommand};

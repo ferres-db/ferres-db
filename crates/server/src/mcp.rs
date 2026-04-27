@@ -212,7 +212,7 @@ async fn do_search_points(
         let predicate = |id: &str| {
             collection
                 .get(id)
-                .map(|p| filter.matches_point(&p))
+                .map(|p| filter.matches_point(p))
                 .unwrap_or(false)
         };
         collection

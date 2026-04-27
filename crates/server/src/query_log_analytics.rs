@@ -66,9 +66,7 @@ impl QueryLogCache {
 
     /// Carrega todas as entradas do log (re-lê do disco se cache expirado).
     fn get_entries(&self) -> Vec<ParsedQueryEntry> {
-        let mut guard = self.cache.write().expect(
-            "analytics cache RwLock poisoned — a thread panicked while holding a write guard",
-        );
+        let mut guard = self.cache.write().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let refresh = match guard.as_ref() {
             None => true,
@@ -81,7 +79,7 @@ impl QueryLogCache {
         } else {
             guard
                 .as_ref()
-                .expect("cache is Some — refresh=false branch only reached when cache was previously populated")
+                .unwrap_or_else(|| unreachable!("cache is Some — refresh=false branch only reached when cache was previously populated"))
                 .0
                 .clone()
         }

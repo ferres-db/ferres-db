@@ -1,4 +1,4 @@
-//! # FerresDB Core
+﻿//! # FerresDB Core
 //!
 //! Motor de busca vetorial escrito em Rust. Este crate contém a lógica
 //! central do FerresDB:
@@ -1454,6 +1454,7 @@ impl VectorDB {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;

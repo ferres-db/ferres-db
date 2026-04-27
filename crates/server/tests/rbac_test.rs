@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # RBAC Integration Tests
 //!
 //! Testes de integração para controle de acesso granular (RBAC) e audit trail.

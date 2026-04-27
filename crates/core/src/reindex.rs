@@ -1,4 +1,4 @@
-//! # Reindex — background index rebuild without downtime
+﻿//! # Reindex — background index rebuild without downtime
 //!
 //! Provides types and logic for rebuilding a collection's ANN index
 //! in the background without blocking searches or mutations.
@@ -245,6 +245,7 @@ fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::collection::{Collection, CollectionConfig};
     use crate::quantization::QuantizationConfig;

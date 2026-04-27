@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ferres_db_core::{
     fusion::reciprocal_rank_fusion, ANNIndex, CollectionConfig, DistanceMetric, Point, VectorDB,

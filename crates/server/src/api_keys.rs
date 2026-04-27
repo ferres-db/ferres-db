@@ -62,7 +62,7 @@ fn hash_key(key: &str) -> String {
 
 fn generate_raw_key() -> String {
     let mut bytes = [0u8; KEY_RANDOM_BYTES];
-    getrandom::getrandom(&mut bytes).expect("getrandom");
+    getrandom::getrandom(&mut bytes).unwrap_or_else(|e| unreachable!("OS PRNG unavailable: {e}"));
     let hex_part: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     format!("{KEY_PREFIX}{hex_part}")
 }

@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # Authentication Integration Tests
 //!
 //! Testes de integração para autenticação via API Key.

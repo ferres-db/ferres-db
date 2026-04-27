@@ -293,7 +293,7 @@ pub fn create_collection_rate_limit_layer(
     let config = builder
         .key_extractor(CollectionKeyExtractor)
         .finish()
-        .unwrap();
+        .unwrap_or_else(|| unreachable!("GovernorConfigBuilder with valid params must succeed"));
 
     GovernorLayer {
         config: Arc::new(config),

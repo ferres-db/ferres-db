@@ -1,4 +1,4 @@
-//! # Write-Ahead Log (WAL) — durabilidade de operações
+﻿//! # Write-Ahead Log (WAL) — durabilidade de operações
 //!
 //! Antes de modificar uma coleção em memória, a operação é registrada
 //! no WAL (`wal.log`). Em caso de crash, as operações pendentes são
@@ -910,6 +910,7 @@ fn current_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::collection::CollectionConfig;
     use crate::search::DistanceMetric;

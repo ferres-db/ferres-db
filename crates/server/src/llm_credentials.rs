@@ -1,4 +1,4 @@
-//! # LLM Credentials — provider API keys stored in SQLite
+﻿//! # LLM Credentials — provider API keys stored in SQLite
 //!
 //! Tabela `llm_credentials(provider TEXT PRIMARY KEY, api_key TEXT)`.
 //! As API keys nunca são retornadas em GET — somente um booleano `configured`.
@@ -198,6 +198,7 @@ impl LlmCredentialsStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn temp_db() -> (tempfile::TempDir, std::path::PathBuf) {

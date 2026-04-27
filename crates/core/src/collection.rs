@@ -1,4 +1,4 @@
-//! # Collection — container lógico de pontos vetoriais
+﻿//! # Collection — container lógico de pontos vetoriais
 //!
 //! Uma `Collection` é a unidade principal de organização no FerresDB.
 //! Ela combina:
@@ -1241,6 +1241,7 @@ impl Drop for Collection {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn test_config() -> CollectionConfig {
@@ -1593,6 +1594,7 @@ mod tests {
 
     #[cfg(test)]
     mod prop_tests {
+        #![allow(clippy::unwrap_used, clippy::expect_used)]
         use super::*;
         use quickcheck::TestResult;
         use quickcheck_macros::quickcheck;

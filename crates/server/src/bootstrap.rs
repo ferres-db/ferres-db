@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+﻿use std::sync::{Arc, OnceLock};
 
 use axum::http::request::Parts as RequestParts;
 use axum::http::{HeaderValue, Method};
@@ -233,7 +233,7 @@ pub fn bootstrap_state(config: &ServerConfig) -> Result<AppState, BootstrapError
     if config
         .api_keys
         .as_deref()
-        .map_or(true, |s| s.trim().is_empty())
+        .is_none_or(|s| s.trim().is_empty())
     {
         tracing::warn!(
             "No API keys configured. Set api_keys in config.toml or FERRESDB_API_KEYS env; \
@@ -348,6 +348,7 @@ pub fn spawn_hnsw_autotune_worker(state: AppState) -> tokio::task::JoinHandle<()
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::state::ServerConfig;
     use serial_test::serial;

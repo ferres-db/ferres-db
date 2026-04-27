@@ -2,6 +2,11 @@
 //!
 //! Expõe métricas Prometheus para monitoramento do servidor.
 
+// All `.expect()` in this file are on infallible operations:
+// - `register_*!` macros only fail on duplicate names (impossible here — unique literals)
+// - `encode_to_string` writes to String (infallible)
+#![allow(clippy::expect_used)]
+
 use lazy_static::lazy_static;
 use prometheus::{
     register_counter_vec, register_gauge, register_gauge_vec, register_histogram_vec, CounterVec,
