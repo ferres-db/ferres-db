@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long)]
     api_key: Option<String>,
 
+    /// Enable WAL fsync per write (durable but slower).
+    #[arg(long, default_value_t = false)]
+    fsync_per_write: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -136,13 +140,15 @@ fn format_duration(d: Duration) -> String {
 }
 
 /// Relatório final em Markdown (copiável para GitHub/LinkedIn)
-fn print_markdown_report(mode: &str, metrics: &[(String, String)]) {
+fn print_markdown_report(mode: &str, metrics: &[(String, String)], fsync_per_write: bool) {
     println!("\n---\n## FerresDB Benchmark Report — {mode}\n");
     println!("| Metric | Value |");
     println!("|--------|-------|");
     for (k, v) in metrics {
         println!("| {k} | {v} |");
     }
+    let fsync_mode = if fsync_per_write { "per-write" } else { "off" };
+    println!("| WAL fsync | {fsync_mode} |");
     println!("\n---\n");
 }
 
@@ -286,6 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 collection,
                 openai_key.as_deref(),
                 embedding_model,
+                cli.fsync_per_write,
             )
             .await?;
         }
@@ -320,6 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 *num_queries,
                 *limit,
                 *warmup,
+                cli.fsync_per_write,
             )
             .await?;
         }
@@ -329,7 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             readers,
             dim,
         } => {
-            run_chaos(client, *duration, *writers, *readers, *dim).await?;
+            run_chaos(client, *duration, *writers, *readers, *dim, cli.fsync_per_write).await?;
         }
     }
 
@@ -346,6 +354,7 @@ async fn run_ingest(
     collection: &str,
     openai_api_key: Option<&str>,
     embedding_model: &str,
+    fsync_per_write: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("FerresDB Ingest Benchmark");
     println!(
@@ -528,7 +537,7 @@ async fn run_ingest(
             format_num(throughput as u64),
         ),
     ];
-    print_markdown_report("Ingest", &metrics);
+    print_markdown_report("Ingest", &metrics, fsync_per_write);
 
     Ok(())
 }
@@ -547,6 +556,7 @@ async fn run_search(
     num_queries: usize,
     limit: usize,
     warmup: usize,
+    fsync_per_write: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("FerresDB Search Benchmark");
     println!("  target: {}", url);
@@ -736,7 +746,7 @@ async fn run_search(
         ("Latency P99".to_string(), format!("{:.2}ms", lat_p99)),
         ("Latency Max".to_string(), format!("{:.2}ms", lat_max)),
     ];
-    print_markdown_report("Search", &metrics);
+    print_markdown_report("Search", &metrics, fsync_per_write);
 
     Ok(())
 }
@@ -747,6 +757,7 @@ async fn run_chaos(
     writers: usize,
     readers: usize,
     dim: u32,
+    fsync_per_write: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("FerresDB Chaos Benchmark");
     println!(
@@ -882,7 +893,7 @@ async fn run_chaos(
         ("Total Reads".to_string(), format_num(r)),
         ("Collections Created".to_string(), c.to_string()),
     ];
-    print_markdown_report("Chaos", &metrics);
+    print_markdown_report("Chaos", &metrics, fsync_per_write);
 
     Ok(())
 }
