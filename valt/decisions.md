@@ -355,6 +355,29 @@ helper do core (server depende de core; core não pode depender de server).
 
 ---
 
+## ADR-023 — Async Lock Safety: block scoping + Clippy enforcement
+
+**Date:** 2026-04-27
+**Status:** Accepted
+
+### Context
+`std::sync::RwLock` and `Mutex` guards held across `.await` points cause deadlocks on Tokio's cooperative scheduler. The codebase had one structurally fragile case in `streaming.rs` (`process_upsert_batch`) where `drop(guard)` was called explicitly before synchronous post-processing calls — safe today but fragile to future async refactors.
+
+### Decision
+1. Enforce `clippy::await_holding_lock` and `clippy::await_holding_refcell_ref` as errors in a dedicated CI job (`rust-clippy`).
+2. All lock guards must be released by block scoping (`{ let guard = ...; work; } // dropped`), not by explicit `drop()`.
+3. `streaming.rs` `process_upsert_batch` refactored: DashMap Ref cloned to Arc immediately; all sync work in one scoped block returning a plain tuple; post-lock calls outside.
+4. `clippy::unwrap_used` added as `-W` (warning) to prepare for a future cleanup pass.
+
+### Consequences
+- Deadlock class eliminated structurally, not just by convention.
+- CI catches regressions immediately.
+- Five pre-existing `clippy -D warnings` errors in `crates/core` were fixed.
+- `unwrap_used` warnings serve as a living inventory for future hardening.
+- Concurrency stress tests added: N writers + M readers, 10s deadlock/starvation timeout.
+
+---
+
 ## Relacionado
 - [[overview]] — stack e arquitetura geral
 - [[conventions]] — como as decisões se traduzem em código
