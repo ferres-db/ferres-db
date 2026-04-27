@@ -367,7 +367,7 @@ impl WarmStorage {
             .map(|chunk| {
                 let arr: [u8; 4] = chunk
                     .try_into()
-                    .expect("chunks_exact(4) guarantees a 4-byte slice");
+                    .unwrap_or_else(|_| unreachable!("chunks_exact(4) guarantees a 4-byte slice"));
                 f32::from_le_bytes(arr)
             })
             .collect();
@@ -645,8 +645,7 @@ impl ColdStorage {
                 // percent-encode: '/' -> "%2F", ':' -> "%3A", etc.
                 for byte in c.to_string().as_bytes() {
                     use std::fmt::Write;
-                    write!(&mut safe, "%{byte:02X}")
-                        .expect("writing percent-encoding to String is infallible");
+                    let _ = write!(&mut safe, "%{byte:02X}");
                 }
             }
         }
@@ -1310,7 +1309,7 @@ impl TieredCollection {
         let tiers = self
             .point_tiers
             .read()
-            .expect("point_tiers RwLock poisoned — a thread panicked while holding a write guard");
+            .unwrap_or_else(|e| e.into_inner());
 
         let mut hot = 0usize;
         let mut warm = 0usize;
@@ -1465,7 +1464,7 @@ impl TierMetadata {
         let tracker = tc
             .access_tracker
             .lock()
-            .expect("access_tracker Mutex poisoned — a thread panicked while holding the guard");
+            .unwrap_or_else(|e| e.into_inner());
         let mut last_access = HashMap::new();
         let mut access_count = HashMap::new();
 

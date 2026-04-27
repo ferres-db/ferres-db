@@ -96,7 +96,7 @@ pub fn init_tracing(config: &ServerConfig) {
 
         #[cfg(feature = "otel")]
         {
-            match ferres_db_server::tracing_otel::init_otel_tracing() {
+            match crate::tracing_otel::init_otel_tracing() {
                 Ok((otel_layer, otel_provider)) => {
                     Box::leak(Box::new(otel_provider));
                     if use_stderr_console {

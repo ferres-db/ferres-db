@@ -195,7 +195,7 @@ impl Collection {
         let search_cache = if config.search_cache_size > 0 {
             Some(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(config.search_cache_size)
-                    .expect("search_cache_size > 0 was checked in the enclosing if-guard"),
+                    .unwrap_or_else(|| unreachable!("search_cache_size > 0 was checked in the enclosing if-guard")),
             )))
         } else {
             None
@@ -233,7 +233,7 @@ impl Collection {
         let search_cache = if config.search_cache_size > 0 {
             Some(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(config.search_cache_size)
-                    .expect("search_cache_size > 0 was checked in the enclosing if-guard"),
+                    .unwrap_or_else(|| unreachable!("search_cache_size > 0 was checked in the enclosing if-guard")),
             )))
         } else {
             None
@@ -357,7 +357,7 @@ impl Collection {
         Ok(self
             .vector_indices
             .get_mut(field)
-            .expect("field was just inserted into vector_indices on the line above"))
+            .unwrap_or_else(|| unreachable!("field was just inserted into vector_indices on the line above")))
     }
 
     /// Invalida o cache de busca após mutação (insert/remove).
@@ -479,7 +479,7 @@ impl Collection {
                 return Err(validation_errors
                     .into_iter()
                     .next()
-                    .expect("validation_errors is non-empty — checked by the if-guard above"));
+                    .unwrap_or_else(|| unreachable!("validation_errors is non-empty — checked by the if-guard above")));
             }
             for point in &points {
                 self.validate_point_named_vectors(point)?;
@@ -711,7 +711,7 @@ impl Collection {
                     Some(f) => self
                         .vector_indices
                         .get(f)
-                        .expect("vector field validated by contains_key above")
+                        .unwrap_or_else(|| unreachable!("vector field validated by contains_key above"))
                         .search(query, k, None)?,
                 }
             };
@@ -735,7 +735,7 @@ impl Collection {
             Some(f) => self
                 .vector_indices
                 .get(f)
-                .expect("vector field validated by contains_key above")
+                .unwrap_or_else(|| unreachable!("vector field validated by contains_key above"))
                 .search(query, k, predicate),
         }
     }
@@ -783,7 +783,7 @@ impl Collection {
             Some(f) => self
                 .vector_indices
                 .get(f)
-                .expect("vector field validated by contains_key above")
+                .unwrap_or_else(|| unreachable!("vector field validated by contains_key above"))
                 .search(query, k_candidates, predicate)?,
         };
         if candidates.is_empty() {
@@ -841,7 +841,7 @@ impl Collection {
             Some(f) => self
                 .vector_indices
                 .get(f)
-                .expect("vector field validated by contains_key above")
+                .unwrap_or_else(|| unreachable!("vector field validated by contains_key above"))
                 .search_explain(query, k, predicate),
         }
     }

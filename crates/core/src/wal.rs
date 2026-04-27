@@ -477,7 +477,7 @@ impl Wal {
             let sync_start = Instant::now();
             self.writer
                 .as_ref()
-                .expect("WAL writer is Some when needs_fsync=true (append initialises it)")
+                .unwrap_or_else(|| unreachable!("WAL writer is Some when needs_fsync=true (append initialises it)"))
                 .get_ref()
                 .sync_data()
                 .map_err(|e| FerresError::Storage(format!("WAL fsync failed: {e}")))?;

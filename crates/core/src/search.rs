@@ -1128,8 +1128,8 @@ impl ANNIndex for QuantizedHnswIndex {
             return self.inner.add_point(point);
         }
 
-        let params = self.params.as_ref().expect(
-            "params is Some — the is_none() early-return on the lines above would have exited",
+        let params = self.params.as_ref().unwrap_or_else(
+            || unreachable!("params is Some — the is_none() early-return on the lines above would have exited"),
         );
 
         // Quantiza o vetor

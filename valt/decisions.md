@@ -6,7 +6,7 @@ type: project
 
 # FerresDB — Architectural Decisions
 
-_All decisions below were originally documented in `docs/decisions.md`. This vault copy is the canonical reference. When adding new decisions, use the template in `valt/templates/decision.md` and also update `docs/decisions.md`. Last ADR: 025._
+_All decisions below were originally documented in `docs/decisions.md`. This vault copy is the canonical reference. When adding new decisions, use the template in `valt/templates/decision.md` and also update `docs/decisions.md`. Last ADR: 026._
 
 ---
 
@@ -471,3 +471,29 @@ Production `unwrap()` calls produce panics with "called Option::unwrap() on a No
 - Panics in production now carry actionable context (which invariant, why it should hold).
 - The living `-W clippy::expect_used` inventory makes future `?`-propagation refactors easy to identify.
 - No behaviour changes — all modifications are purely diagnostic.
+
+---
+
+## ADR-026 — Harden core crate: eliminate all `expect_used` violations for CI `-D warnings` compliance
+
+**Date:** 2026-04-27
+**Status:** Accepted
+
+### Context
+CI runs `cargo clippy` with `-W clippy::expect_used -D warnings`, turning every `.expect()` call in production code into a hard compile error. ADR-025 hardened `.unwrap()` → `.expect()` across core and server. The follow-up: all remaining `.expect()` calls in `crates/core/src/` also needed removal per the lint rule.
+
+### Decision
+Apply the following substitution rules uniformly across `crates/core/src/`:
+
+1. `Option::expect("structural invariant")` → `.unwrap_or_else(|| unreachable!("reason"))` — satisfies both `unwrap_used` and `expect_used` lints; the `unreachable!` documents the invariant and panics with context if ever violated.
+2. `Result::expect` on `write!()` to `String` (infallible) → `let _ = write!(...)`.
+3. `Result::expect` on `RwLock::read()` / `Mutex::lock()` poison → `.unwrap_or_else(|e| e.into_inner())` — recovers from poisoned lock by extracting the inner guard.
+4. `Result::expect` on `[u8]::try_into::<[u8; N]>()` from `chunks_exact(N)` → `.unwrap_or_else(|_| unreachable!("reason"))`.
+
+Files changed: `collection.rs` (8 sites), `search.rs` (1 site), `tiered.rs` (4 sites), `wal.rs` (1 site), `lib.rs` (1 site). All `.expect()` remaining are inside `#[cfg(test)]` blocks, which are exempt from the lint.
+
+### Consequences
+- `cargo clippy -p ferres-db-core --all-features -- -W clippy::expect_used -D warnings` produces zero errors.
+- 242 unit tests still pass.
+- Lock-poison sites now recover gracefully via `into_inner()` instead of panicking, which is strictly more robust.
+- No semantic behaviour change for the normal (non-poisoned) code paths.

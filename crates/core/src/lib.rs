@@ -712,7 +712,7 @@ impl VectorDB {
                     return Err(validation_errors
                         .into_iter()
                         .next()
-                        .expect("validation_errors is non-empty — checked by the if-guard above"));
+                        .unwrap_or_else(|| unreachable!("validation_errors is non-empty — checked by the if-guard above")));
                 }
 
                 // Para métrica Cosine, normaliza vetores em paralelo
