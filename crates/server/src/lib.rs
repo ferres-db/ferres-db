@@ -8,6 +8,7 @@ pub mod auth;
 pub mod cloud_settings;
 pub mod error;
 pub mod handlers;
+pub mod llm_credentials;
 pub mod metrics;
 pub mod middleware;
 pub mod permissions;
@@ -16,6 +17,7 @@ pub mod query_logger;
 pub mod request_validation;
 pub mod routes;
 pub mod state;
+pub mod time;
 pub mod users;
 pub mod warmup;
 

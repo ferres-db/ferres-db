@@ -10,6 +10,7 @@ mod collections;
 mod debug;
 mod health;
 mod keys;
+mod llm;
 mod metrics;
 mod points;
 mod reindex;
@@ -51,6 +52,7 @@ pub fn create_router(config: &crate::state::ServerConfig) -> Router<AppState> {
         .merge(keys::create_keys_routes())
         .merge(users::create_users_routes())
         .merge(audit::create_audit_routes())
+        .merge(llm::create_llm_routes())
         .merge(collection_scoped)
         .layer(axum::middleware::from_fn(require_api_key));
 

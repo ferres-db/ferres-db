@@ -39,7 +39,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
@@ -58,6 +57,7 @@ pub mod rerank;
 pub mod search;
 pub mod storage;
 pub mod tiered;
+pub mod time;
 pub mod wal;
 
 // Re-exporta os tipos mais usados na raiz do crate para ergonomia.
@@ -92,6 +92,7 @@ pub use tiered::{
     AccessTracker, ColdStorage, CompactionResult, StorageTier, TierDistribution, TierMetadata,
     TieredCollection, TieredStorageConfig, WarmStorage,
 };
+pub use time::{unix_duration, unix_now, unix_now_millis};
 pub use wal::{
     compact_wal_entries_older_than, list_restore_points, read_last_snapshot_timestamp,
     recover_collection, recover_collection_to_timestamp, RestorePoints, Wal, WalEntry,
@@ -1267,12 +1268,7 @@ impl VectorDB {
             .iter()
             .map(|p| p.created_at)
             .max()
-            .unwrap_or_else(|| {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            });
+            .unwrap_or_else(time::unix_now);
 
         Ok(CollectionStats {
             num_points,

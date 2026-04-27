@@ -86,8 +86,68 @@ Configure via `dashboard/.env` or as build-time args in the Dockerfile:
 
 | Variable            | Default                  | Description             |
 | ------------------- | ------------------------ | ----------------------- |
-| `VITE_API_BASE_URL` | `http://localhost:8080`  | API URL                 |
+| `VITE_API_BASE_URL` | `http://localhost:8080`  | API URL (build-time)    |
 | `VITE_API_KEY`      | —                        | API key (optional)      |
+
+The following variables are read at **container start-up** by `docker-entrypoint.sh`
+(no image rebuild needed):
+
+| Variable             | Default | Description                                                |
+| -------------------- | ------- | ---------------------------------------------------------- |
+| `VITE_API_BASE_URL`  | `http://localhost:8080` | Runtime API base URL written to `config.js`. Overrides the build-time value. |
+| `VITE_API_KEY`       | —       | Runtime API key written to `config.js`.                   |
+| `FERRESDB_API_URL`   | —       | API origin added to the CSP `connect-src` directive (e.g. `https://api.example.com`). When unset, only `'self'`, `ws:`, and `wss:` are allowed. |
+
+---
+
+## Security Headers
+
+The production Nginx server sends the following HTTP security headers on every response.
+They are generated at container start-up by `docker-entrypoint.sh` into
+`/etc/nginx/snippets/security_headers.conf`.
+
+| Header                    | Value                                        | Purpose                                      |
+| ------------------------- | -------------------------------------------- | -------------------------------------------- |
+| `X-Frame-Options`         | `DENY`                                       | Blocks iframe embedding (clickjacking)       |
+| `X-Content-Type-Options`  | `nosniff`                                    | Prevents MIME-type sniffing                  |
+| `Referrer-Policy`         | `same-origin`                                | Hides URL from cross-origin requests         |
+| `Permissions-Policy`      | `geolocation=(), microphone=(), camera=()`   | Disables unused browser APIs                 |
+| `Content-Security-Policy` | See below                                    | Restricts script, style, and connection origins |
+
+### Default CSP
+
+```
+default-src 'self';
+script-src 'self';
+style-src 'self' 'unsafe-inline';
+img-src 'self' data: blob:;
+font-src 'self' data:;
+connect-src 'self' ws: wss:;
+frame-ancestors 'none';
+base-uri 'self';
+form-action 'self'
+```
+
+`style-src` includes `'unsafe-inline'` because Tailwind CSS injects utility classes
+at runtime. `script-src` intentionally does **not** include `'unsafe-inline'`.
+
+### Customising connect-src
+
+Set `FERRESDB_API_URL` to add your API origin to `connect-src`:
+
+```yaml
+# docker-compose.yml
+services:
+  frontend:
+    environment:
+      - FERRESDB_API_URL=https://api.example.com
+```
+
+This produces:
+
+```
+connect-src 'self' https://api.example.com ws: wss:;
+```
 
 ---
 

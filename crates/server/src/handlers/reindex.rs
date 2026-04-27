@@ -29,6 +29,7 @@ use crate::audit::{self, AuditResult};
 use crate::auth::AuthenticatedUser;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+use crate::time::unix_now;
 
 /// Maximum number of completed/failed reindex jobs to keep in memory.
 /// When this limit is exceeded, the oldest completed/failed jobs are evicted.
@@ -687,10 +688,7 @@ pub fn run_auto_vacuum_cycle(app_state: &AppState) {
 /// Called from the background task in main (e.g. every hour).
 pub fn run_retention_cycle(app_state: &AppState) {
     let collections_dir = app_state.config.storage_path.join("collections");
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now_secs = unix_now();
     let wal_compress = app_state.config.wal_compression;
     let mut total_removed = 0usize;
 

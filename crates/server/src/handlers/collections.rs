@@ -22,6 +22,7 @@ use crate::auth::{check_user_permission, AuthenticatedUser};
 use crate::error::{ApiError, ApiResult};
 use crate::permissions::Action;
 use crate::state::AppState;
+use crate::time::unix_now;
 
 // ─── Request/Response Types ──────────────────────────────────────────────
 
@@ -209,10 +210,7 @@ pub async fn create_collection(
     };
 
     // Cria a coleção
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let created_at = unix_now();
 
     // Verifica se a coleção já existe
     if app_state.collections.contains_key(&payload.name) {
@@ -327,12 +325,7 @@ pub async fn list_collections(
             .iter()
             .map(|p| p.created_at)
             .min()
-            .unwrap_or_else(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            });
+            .unwrap_or_else(unix_now);
 
         collections.push(CollectionListItem {
             name: name.clone(),
@@ -370,12 +363,7 @@ pub async fn get_collection(
         .iter()
         .map(|p| p.created_at)
         .max()
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        });
+        .unwrap_or_else(unix_now);
 
     // Estima tamanho do índice (aproximação)
     let index_size_bytes = num_points * config.dimension * 4; // 4 bytes por f32

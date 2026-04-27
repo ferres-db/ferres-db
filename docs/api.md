@@ -2488,3 +2488,92 @@ Returns global or per-collection statistics.
 **Response (per collection):** `num_points`, `num_queries`, `avg_latency_ms`, `p50_latency_ms`, `p95_latency_ms`, `p99_latency_ms`, `tombstone_count`, `tombstone_memory_waste_bytes`.
 
 Errors (collection not found, invalid dimension, etc.) are returned as error content in the tool result (`error` / `message` structure in JSON).
+
+## LLM Proxy
+
+Server-side proxy for OpenAI, Anthropic, and Google Gemini chat-completion APIs. Lets the dashboard run RAG / "ask the AI" flows without ever sending provider API keys from the browser.
+
+### Why server-side
+
+Browser-side `fetch` to `api.openai.com` etc. exposes the API key in DevTools, browser extensions, and HAR captures, and breaks the providers' own recommendations. The server proxies the call using a key configured by an Admin (env var or DB).
+
+### Configuration
+
+API keys are resolved in this order (env wins over DB):
+
+| Provider  | Environment variable             | DB column (`llm_credentials`) |
+| --------- | -------------------------------- | ----------------------------- |
+| OpenAI    | `FERRESDB_OPENAI_API_KEY`        | `provider='openai'`           |
+| Anthropic | `FERRESDB_ANTHROPIC_API_KEY`     | `provider='anthropic'`        |
+| Gemini    | `FERRESDB_GEMINI_API_KEY`        | `provider='gemini'`           |
+
+Admins manage DB-stored keys through the dashboard (Settings → LLM Credentials) or the admin endpoints below. GET endpoints never return key values — only a `configured` boolean and the `source` (`env` or `db`).
+
+### POST /api/v1/llm/complete
+
+Chat completion via the configured provider. Requires role **Admin or Editor**.
+
+**Request body:**
+
+| Field         | Type    | Required | Default  | Description                                          |
+| ------------- | ------- | -------- | -------- | ---------------------------------------------------- |
+| `provider`    | string  | yes      | —        | One of `openai`, `anthropic`, `gemini`.              |
+| `model`       | string  | yes      | —        | Provider model (e.g. `gpt-4o-mini`).                 |
+| `prompt`      | string  | yes      | —        | Free text prompt sent as a single user message.      |
+| `max_tokens`  | u32     | no       | `1024`   | Forwarded as `max_tokens` / `maxOutputTokens`.       |
+| `temperature` | f32     | no       | `0.7`    | Forwarded to the provider.                           |
+
+**Response:**
+
+```json
+{
+  "text": "…",
+  "usage": { "input_tokens": 42, "output_tokens": 17 }
+}
+```
+
+`usage` is omitted when the provider does not report it.
+
+**Error responses:**
+
+- `400 invalid_payload` — empty prompt, missing model, prompt > 200 KB, or unknown `provider`.
+- `403 forbidden` — Viewer attempting to use the proxy.
+- `502 llm_upstream_error` — provider returned a non-2xx status (the upstream message is included).
+- `503 llm_provider_not_configured` — no API key for the provider in env or DB.
+- `504 llm_timeout` — provider did not respond within 60 s.
+
+**Audit:** every call is logged with `action="llm_complete"`, `resource="provider:<name>"`, and metadata containing `model`, `prompt_bytes`, `max_tokens`, `temperature`, and `key_source`. **The prompt content is never written to the audit log.**
+
+**Metric:** `ferresdb_llm_proxy_requests_total{provider, status}` — `status` is one of `ok`, `error`, `auth_error`, `upstream_error`, `timeout`.
+
+### GET /api/v1/admin/llm-credentials (Admin)
+
+Returns the configuration status of each provider — never the key value.
+
+```json
+{
+  "providers": [
+    { "provider": "openai",    "configured": true,  "source": "env" },
+    { "provider": "anthropic", "configured": true,  "source": "db", "updated_at": 1714233600 },
+    { "provider": "gemini",    "configured": false }
+  ]
+}
+```
+
+### PUT /api/v1/admin/llm-credentials/{provider} (Admin)
+
+Stores or updates the key for a provider in the SQLite DB. **Body:** `{ "api_key": "<key>" }`. Audit-logged with `action="llm_credentials_set"` and `resource="provider:<name>"` (key value never recorded).
+
+### DELETE /api/v1/admin/llm-credentials/{provider} (Admin)
+
+Removes the DB-stored key. Does **not** unset the environment variable. Returns `{ "ok": true, "removed": <bool> }`. Audit-logged with `action="llm_credentials_delete"`.
+
+### Testing locally with a mock provider
+
+Set `FERRESDB_LLM_PROXY_BASE_URL` to redirect provider requests at runtime:
+
+```bash
+FERRESDB_LLM_PROXY_BASE_URL=http://localhost:9999 cargo run --bin ferres-db-server
+```
+
+The server will rewrite to `<base>/openai/v1/chat/completions`, `<base>/anthropic/v1/messages`, `<base>/gemini/v1beta/models/{model}:generateContent`. The integration test `crates/server/tests/llm_proxy_test.rs` uses this to drive `wiremock`.

@@ -20,6 +20,7 @@ use ferres_db_core::{
 };
 
 use crate::state::AppState;
+use crate::time::unix_now;
 
 /// Módulo gerado pelo tonic-build a partir de `proto/ferresdb.proto`.
 pub mod pb {
@@ -150,10 +151,7 @@ impl FerresDb for FerresGrpcService {
             retention_days: None,
         };
 
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let created_at = unix_now();
 
         let collection = Collection::new(config.clone());
         let collection_arc = Arc::new(std::sync::RwLock::new(collection));
@@ -218,12 +216,7 @@ impl FerresDb for FerresGrpcService {
             .iter()
             .map(|p| p.created_at)
             .max()
-            .unwrap_or_else(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            });
+            .unwrap_or_else(unix_now);
 
         let index_size_bytes = num_points * config.dimension * 4;
 
@@ -258,12 +251,7 @@ impl FerresDb for FerresGrpcService {
                 .iter()
                 .map(|p| p.created_at)
                 .min()
-                .unwrap_or_else(|| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                });
+                .unwrap_or_else(unix_now);
 
             collections.push(CollectionInfo {
                 name,
@@ -400,10 +388,7 @@ impl FerresDb for FerresGrpcService {
         };
 
         if upserted > 0 {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let now_secs = unix_now();
             self.state.record_ingest(now_secs, upserted as u64);
         }
 
@@ -941,10 +926,7 @@ fn do_upsert_sync(
         match Point::new(input.id.clone(), input.vector.clone(), metadata) {
             Ok(mut point) => {
                 if let Some(ttl_seconds) = input.ttl_seconds {
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("system clock before UNIX epoch")
-                        .as_secs();
+                    let now_secs = unix_now();
                     point.expires_at = Some(now_secs.saturating_add(ttl_seconds));
                 }
                 points.push(point);
@@ -976,10 +958,7 @@ fn do_upsert_sync(
     coll.mark_dirty();
 
     if upserted > 0 {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now_secs = unix_now();
         state.record_ingest(now_secs, upserted as u64);
     }
 
@@ -1077,7 +1056,7 @@ mod tests {
             log_level: "error".to_string(),
             ..Default::default()
         };
-        let state = AppState::new(config, None, None, None, None).unwrap();
+        let state = AppState::new(config, None, None, None, None, None).unwrap();
         let service = FerresGrpcService::new(state);
         (service, temp_dir)
     }

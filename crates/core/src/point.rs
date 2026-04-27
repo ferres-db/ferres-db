@@ -19,9 +19,10 @@
 //!   de datetime.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::time::unix_now;
 
 use crate::error::FerresError;
 
@@ -103,10 +104,7 @@ impl Point {
             });
         }
 
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_secs();
+        let created_at = unix_now();
 
         Ok(Self {
             id,

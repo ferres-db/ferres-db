@@ -9,6 +9,7 @@ use crate::audit::{self, AuditResult};
 use crate::auth::{get_jwt_secret, JwtClaims};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+use crate::time::unix_now;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -61,10 +62,7 @@ pub async fn login(
         .unwrap_or(crate::users::Role::Viewer);
 
     let secret = get_jwt_secret().ok_or_else(|| ApiError::internal_error("JWT not configured"))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = unix_now() as i64;
     let exp = now + 24 * 3600; // 24h
     let claims = JwtClaims {
         sub: username.to_string(),

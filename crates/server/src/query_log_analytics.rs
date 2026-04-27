@@ -10,6 +10,8 @@ use std::path::Path;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use crate::time::unix_now;
+
 const CACHE_TTL_SECS: u64 = 3600; // 1h
 
 /// Uma linha do log (formato atual: com query_id; ignora campos extras como vector_preview).
@@ -97,12 +99,7 @@ impl QueryLogCache {
             };
             let timestamp_secs = DateTime::parse_from_rfc3339(&log.timestamp)
                 .map(|dt| dt.with_timezone(&Utc).timestamp() as u64)
-                .unwrap_or_else(|_| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                });
+                .unwrap_or_else(|_| unix_now());
             out.push(ParsedQueryEntry {
                 timestamp: log.timestamp,
                 timestamp_secs,
@@ -122,10 +119,7 @@ impl QueryLogCache {
 
     /// Entradas das últimas 24 horas.
     pub fn entries_24h(&self) -> Vec<ParsedQueryEntry> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now_secs = unix_now();
         let cutoff = now_secs.saturating_sub(24 * 3600);
         self.get_entries()
             .into_iter()
@@ -136,10 +130,7 @@ impl QueryLogCache {
     /// Entradas das últimas 10 minutos (para séries temporais de monitoramento).
     /// Usa o cache com TTL de 1h; para dados sempre frescos no analytics use `entries_10m_fresh`.
     pub fn entries_10m(&self) -> Vec<ParsedQueryEntry> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now_secs = unix_now();
         let cutoff = now_secs.saturating_sub(10 * 60);
         self.get_entries()
             .into_iter()
@@ -150,10 +141,7 @@ impl QueryLogCache {
     /// Entradas das últimas 10 minutos lendo o arquivo diretamente (sem cache).
     /// Garante que o endpoint de analytics veja as queries recém-logadas mesmo antes do cache atualizar.
     pub fn entries_10m_fresh(&self) -> Vec<ParsedQueryEntry> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now_secs = unix_now();
         let cutoff = now_secs.saturating_sub(10 * 60);
         Self::load_log(&self.log_path)
             .into_iter()

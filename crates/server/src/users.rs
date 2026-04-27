@@ -13,6 +13,8 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use thiserror::Error;
 
+use crate::time::unix_now;
+
 const DEFAULT_USERNAME: &str = "root";
 const DEFAULT_PASSWORD: &str = "ferresdb";
 
@@ -147,10 +149,7 @@ impl UserStore {
 
         if count == 0 {
             let hash = hash_password(DEFAULT_PASSWORD)?;
-            let created_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
+            let created_at = unix_now() as i64;
             let conn = self.conn.lock().map_err(|_| UserError::LockPoisoned)?;
             conn.execute(
                 "INSERT INTO users (username, password_hash, role, created_at) VALUES (?1, ?2, 'admin', ?3)",
@@ -253,10 +252,7 @@ impl UserStore {
         }
         let role = role.unwrap_or(Role::Viewer);
         let hash = hash_password(password)?;
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let created_at = unix_now() as i64;
 
         let permissions_json = permissions
             .as_ref()
