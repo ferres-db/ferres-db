@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getStoredRole, pointsApi } from '@/api/ferresdb';
+import { getStoredRole, llmApi, pointsApi } from '@/api/ferresdb';
 import { useCollections } from '@/hooks/useCollections';
 import { useEmbedding } from '@/hooks/useEmbedding';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
@@ -56,55 +56,15 @@ const DEFAULT_LLM_MODELS: Record<LlmProvider, string> = {
   gemini: 'gemini-1.5-flash',
 };
 
-// ─── LLM call helpers ─────────────────────────────────────────────────
-
-async function callOpenAI(prompt: string, apiKey: string, model: string): Promise<string> {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.7 }),
-  });
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || 'Failed to get response from OpenAI');
-  }
-  const data = await response.json();
-  return data.choices[0].message.content || '';
-}
-
-async function callAnthropic(prompt: string, apiKey: string, model: string): Promise<string> {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({ model, max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
-  });
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || 'Failed to get response from Anthropic');
-  }
-  const data = await response.json();
-  return data.content[0].text || '';
-}
-
-async function callGemini(prompt: string, apiKey: string, model: string): Promise<string> {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-    },
-  );
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || 'Failed to get response from Gemini');
-  }
-  const data = await response.json();
-  return data.candidates[0].content.parts[0].text || '';
+// ─── LLM call helper ──────────────────────────────────────────────────
+//
+// O servidor faz proxy para OpenAI/Anthropic/Gemini usando chaves
+// configuradas pelo Admin (Settings → LLM Credentials) ou por variáveis
+// de ambiente (FERRESDB_*_API_KEY). O navegador nunca envia API keys de
+// provedor LLM.
+async function callLlm(prompt: string, provider: LlmProvider, model: string): Promise<string> {
+  const result = await llmApi.complete({ provider, model, prompt });
+  return result.text;
 }
 
 function buildRAGPrompt(question: string, contextChunks: SearchResult[]): string {
@@ -194,7 +154,9 @@ function QueryTesterContent() {
   // ─── RAG Test ─────────────────────────────────────────────────
   const handleRAGTest = async () => {
     if (!selectedCollection || !query || !apiKey) {
-      setError('Please fill in all fields');
+      setError(
+        'Please fill in collection, query, and embedding API key (LLM keys are server-side now).',
+      );
       return;
     }
     setIsLoading(true);
@@ -228,18 +190,7 @@ function QueryTesterContent() {
       const ragPrompt = buildRAGPrompt(query, searchResponse.results);
 
       const llmStart = performance.now();
-      let response: string;
-      switch (llmProvider) {
-        case 'openai':
-          response = await callOpenAI(ragPrompt, apiKey, llmModel);
-          break;
-        case 'anthropic':
-          response = await callAnthropic(ragPrompt, apiKey, llmModel);
-          break;
-        case 'gemini':
-          response = await callGemini(ragPrompt, apiKey, llmModel);
-          break;
-      }
+      const response = await callLlm(ragPrompt, llmProvider, llmModel);
       const llmMs = Math.round(performance.now() - llmStart);
       const totalMs = Math.round(performance.now() - totalStart);
 
@@ -442,22 +393,23 @@ function QueryTesterContent() {
               </select>
             </div>
 
-            {/* API Key */}
+            {/* Embedding API Key (LLM keys are server-side via /api/v1/llm/complete) */}
             <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">API Key</label>
+              <label className="block text-sm font-medium text-gray-400 mb-2">
+                Embedding API Key
+              </label>
               <Input
                 type="password"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="API key (shared for embedding + LLM)"
+                placeholder={`API key for the embedding provider (${embeddingProvider})`}
                 className="bg-bg-secondary border-bg-tertiary text-gray-50"
               />
-              {llmProvider === 'anthropic' && (
-                <p className="text-xs text-yellow-400 mt-1">
-                  Note: Anthropic does not provide embedding API. Use a separate embedding provider
-                  above.
-                </p>
-              )}
+              <p className="text-xs text-gray-500 mt-1">
+                LLM keys (OpenAI / Anthropic / Gemini) are configured on the server by Admins in{' '}
+                <span className="font-mono">Settings → LLM Credentials</span> and never leave the
+                browser.
+              </p>
             </div>
 
             {/* Collection */}

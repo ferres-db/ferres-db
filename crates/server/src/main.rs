@@ -247,6 +247,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cloud_settings_store = Some(Arc::new(cloud_settings_store));
     info!("Cloud settings store initialized");
 
+    // LLM provider credentials (SQLite). Used by the server-side LLM proxy.
+    let llm_credentials_path = config.storage_path.join("llm_credentials.db");
+    let llm_credentials_store =
+        ferres_db_server::llm_credentials::LlmCredentialsStore::new(&llm_credentials_path)
+            .map_err(|e| {
+                eprintln!(
+                    "Failed to open LLM credentials store at {}: {}",
+                    llm_credentials_path.display(),
+                    e
+                );
+                e
+            })?;
+    let llm_credentials_store = Some(Arc::new(llm_credentials_store));
+    info!("LLM credentials store initialized");
+
     // JWT para sessão do dashboard (FERRESDB_JWT_SECRET ou valor padrão em dev)
     let jwt_secret = std::env::var("FERRESDB_JWT_SECRET")
         .unwrap_or_else(|_| "ferresdb-dashboard-secret-change-in-production".to_string());
@@ -277,12 +292,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(feature = "rerank"))]
     let reranker = None;
 
-    // Inicializa AppState (com store de API keys, usuários e cloud settings)
+    // Inicializa AppState (com store de API keys, usuários, cloud settings e LLM credentials)
     let app_state = AppState::new(
         config.clone(),
         api_key_store,
         user_store,
         cloud_settings_store,
+        llm_credentials_store,
         reranker,
     )
     .map_err(|e| {

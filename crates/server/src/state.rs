@@ -23,6 +23,7 @@ use ferres_db_core::{
 use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
 use crate::cloud_settings::CloudSettingsStore;
+use crate::llm_credentials::LlmCredentialsStore;
 use crate::time::unix_now;
 use crate::query_log_analytics::{avg_points_per_second_10m, QueryLogCache};
 use crate::query_logger::QueryLogger;
@@ -560,6 +561,8 @@ pub struct AppState {
     pub user_store: Option<Arc<UserStore>>,
     /// Cloud (S3) backup settings from dashboard (SQLite). Overrides config when set.
     pub cloud_settings_store: Option<Arc<CloudSettingsStore>>,
+    /// LLM provider API keys (SQLite). Used by the server-side LLM proxy.
+    pub llm_credentials_store: Option<Arc<LlmCredentialsStore>>,
     /// Logger de auditoria (append-only JSONL, rotação diária).
     pub audit_logger: Arc<AuditLogger>,
     /// Broadcast channels para eventos de collection (streaming subscribers).
@@ -595,6 +598,7 @@ impl AppState {
         api_key_store: Option<Arc<ApiKeyStore>>,
         user_store: Option<Arc<UserStore>>,
         cloud_settings_store: Option<Arc<CloudSettingsStore>>,
+        llm_credentials_store: Option<Arc<LlmCredentialsStore>>,
         reranker: Option<Arc<dyn ferres_db_core::Reranker>>,
     ) -> Result<Self, ferres_db_core::FerresError> {
         info!(
@@ -707,6 +711,7 @@ impl AppState {
             api_key_store,
             user_store,
             cloud_settings_store,
+            llm_credentials_store,
             audit_logger,
             event_channels,
             ws_connections_active: Arc::new(AtomicU64::new(0)),

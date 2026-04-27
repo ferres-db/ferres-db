@@ -1056,7 +1056,7 @@ mod tests {
             log_level: "error".to_string(),
             ..Default::default()
         };
-        let state = AppState::new(config, None, None, None, None).unwrap();
+        let state = AppState::new(config, None, None, None, None, None).unwrap();
         let service = FerresGrpcService::new(state);
         (service, temp_dir)
     }

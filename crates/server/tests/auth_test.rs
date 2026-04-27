@@ -45,7 +45,7 @@ async fn setup_server() -> TestServer {
         ..Default::default()
     };
 
-    let app_state = AppState::new(config.clone(), None, None, None, None).unwrap();
+    let app_state = AppState::new(config.clone(), None, None, None, None, None).unwrap();
 
     let app = routes::create_router(&config)
         .layer(axum::middleware::from_fn(middleware::request_logger))

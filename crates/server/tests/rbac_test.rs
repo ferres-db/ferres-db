@@ -113,7 +113,7 @@ async fn setup_server() -> TestServer {
     let user_store = Arc::new(user_store);
 
     let app_state =
-        AppState::new(config.clone(), None, Some(user_store.clone()), None, None).unwrap();
+        AppState::new(config.clone(), None, Some(user_store.clone()), None, None, None).unwrap();
 
     let app = routes::create_router(&config)
         .layer(axum::middleware::from_fn(middleware::request_logger))

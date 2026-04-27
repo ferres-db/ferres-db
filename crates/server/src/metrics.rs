@@ -66,6 +66,16 @@ lazy_static! {
         "Total WebSocket messages sent",
         &["message_type"]
     ).unwrap();
+
+    // ─── LLM Proxy Metrics ─────────────────────────────────────────────
+
+    /// Total de requisições enviadas ao proxy LLM, por provider e status.
+    /// `status` valores: "ok", "error", "auth_error", "upstream_error", "timeout".
+    pub static ref LLM_PROXY_REQUESTS_TOTAL: CounterVec = register_counter_vec!(
+        "ferresdb_llm_proxy_requests_total",
+        "Total LLM proxy requests by provider and status",
+        &["provider", "status"]
+    ).unwrap();
 }
 
 /// Retorna as métricas em formato Prometheus.
