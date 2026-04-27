@@ -397,7 +397,10 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 pub fn simd_enabled() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        std::arch::is_x86_feature_detected!("avx2") || std::arch::is_x86_feature_detected!("sse4.1")
+        #[allow(clippy::nonminimal_bool)]
+        let supported = std::arch::is_x86_feature_detected!("avx2")
+            || std::arch::is_x86_feature_detected!("sse4.1");
+        supported
     }
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {

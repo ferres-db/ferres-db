@@ -1072,7 +1072,7 @@ mod tests {
         let dir = tmp.path().join("compat_col");
 
         // Open with old API
-        let mut wal1 = Wal::open(&dir, 500, true).unwrap();
+        let wal1 = Wal::open(&dir, 500, true).unwrap();
         assert_eq!(wal1.ops_since_snapshot(), 0);
 
         // Verify config matches

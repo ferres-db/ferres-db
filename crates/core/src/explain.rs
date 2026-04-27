@@ -617,7 +617,10 @@ mod tests {
                 sim,
                 result.score,
             );
-            assert!(sim >= 0.0 && sim <= 1.0, "similarity deve estar em [0, 1]");
+            assert!(
+                (0.0..=1.0).contains(&sim),
+                "similarity deve estar em [0, 1]"
+            );
 
             // score_breakdown deve conter cosine_similarity
             assert!(

@@ -1345,6 +1345,7 @@ mod tests {
 
     /// Testa polar_encode com dimensões pequenas e ímpares.
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_polar_encode_small_dims() {
         // dim=1
         let v1 = vec![3.14f32];
