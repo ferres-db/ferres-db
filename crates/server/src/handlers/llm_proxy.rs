@@ -141,7 +141,11 @@ pub async fn complete(
 
     let (response, audit_result, status_label) = match result {
         Ok(ok) => (
-            (StatusCode::OK, Json(serde_json::to_value(&ok).unwrap_or(json!({})))).into_response(),
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(&ok).unwrap_or(json!({}))),
+            )
+                .into_response(),
             AuditResult::Success,
             "ok",
         ),
@@ -358,10 +362,7 @@ async fn call_openai(
         .unwrap_or("")
         .to_string();
     let usage = v.get("usage").map(|u| Usage {
-        input_tokens: u
-            .get("prompt_tokens")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32,
+        input_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
         output_tokens: u
             .get("completion_tokens")
             .and_then(|x| x.as_u64())
@@ -422,14 +423,8 @@ async fn call_anthropic(
         .unwrap_or("")
         .to_string();
     let usage = v.get("usage").map(|u| Usage {
-        input_tokens: u
-            .get("input_tokens")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32,
-        output_tokens: u
-            .get("output_tokens")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32,
+        input_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        output_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
     });
     Ok(CompleteResponse { text, usage })
 }

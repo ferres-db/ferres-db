@@ -19,11 +19,11 @@
 //! - **`DistanceMetric` na config**: define a métrica no nível da
 //!   coleção. Todos os pontos da mesma coleção usam a mesma métrica.
 
+use crate::time::unix_now;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use crate::time::unix_now;
 
 use lru::LruCache;
 use serde::{Deserialize, Serialize};

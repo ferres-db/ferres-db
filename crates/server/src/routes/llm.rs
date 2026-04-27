@@ -15,10 +15,7 @@ use crate::state::AppState;
 pub fn create_llm_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/llm/complete", post(complete))
-        .route(
-            "/api/v1/admin/llm-credentials",
-            get(list_llm_credentials),
-        )
+        .route("/api/v1/admin/llm-credentials", get(list_llm_credentials))
         .route(
             "/api/v1/admin/llm-credentials/{provider}",
             put(put_llm_credential).delete(delete_llm_credential),

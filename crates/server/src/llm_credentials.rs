@@ -163,16 +163,18 @@ impl LlmCredentialsStore {
             .map_err(|_| LlmCredentialsError::LockPoisoned)?;
         let mut stmt = conn.prepare("SELECT provider, updated_at FROM llm_credentials")?;
         let mut db_entries = std::collections::HashMap::<String, i64>::new();
-        for row in stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })? {
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
             let (p, ts) = row?;
             db_entries.insert(p, ts);
         }
         drop(stmt);
         drop(conn);
 
-        let providers = [LlmProvider::Openai, LlmProvider::Anthropic, LlmProvider::Gemini];
+        let providers = [
+            LlmProvider::Openai,
+            LlmProvider::Anthropic,
+            LlmProvider::Gemini,
+        ];
         let mut out = Vec::with_capacity(providers.len());
         for p in providers {
             let env_set = std::env::var(p.env_var())
@@ -210,7 +212,11 @@ mod tests {
 
     #[test]
     fn provider_parse_roundtrip() {
-        for p in [LlmProvider::Openai, LlmProvider::Anthropic, LlmProvider::Gemini] {
+        for p in [
+            LlmProvider::Openai,
+            LlmProvider::Anthropic,
+            LlmProvider::Gemini,
+        ] {
             assert_eq!(LlmProvider::parse(p.as_str()).unwrap(), p);
         }
         assert!(LlmProvider::parse("nope").is_err());

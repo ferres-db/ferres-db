@@ -24,9 +24,9 @@ use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
 use crate::cloud_settings::CloudSettingsStore;
 use crate::llm_credentials::LlmCredentialsStore;
-use crate::time::unix_now;
 use crate::query_log_analytics::{avg_points_per_second_10m, QueryLogCache};
 use crate::query_logger::QueryLogger;
+use crate::time::unix_now;
 use crate::users::UserStore;
 
 // ─── GlobalQueryStats (dashboard: queries/min, top slow, histogram) ────────

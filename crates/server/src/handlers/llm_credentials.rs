@@ -43,8 +43,9 @@ pub async fn list_llm_credentials(
     };
     match store.list_status() {
         Ok(list) => (StatusCode::OK, Json(json!({ "providers": list }))).into_response(),
-        Err(e) => ApiError::internal_error(format!("failed to list LLM credentials: {e}"))
-            .into_response(),
+        Err(e) => {
+            ApiError::internal_error(format!("failed to list LLM credentials: {e}")).into_response()
+        }
     }
 }
 
@@ -97,7 +98,11 @@ pub async fn put_llm_credential(
     );
     app_state.audit_logger.log(&entry);
 
-    (StatusCode::OK, Json(json!({ "ok": true, "provider": provider.as_str() }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "provider": provider.as_str() })),
+    )
+        .into_response()
 }
 
 /// DELETE /api/v1/admin/llm-credentials/{provider}
@@ -142,11 +147,19 @@ pub async fn delete_llm_credential(
         "llm_credentials_delete",
         &format!("provider:{}", provider.as_str()),
         json!({ "provider": provider.as_str(), "removed": removed }),
-        if removed { AuditResult::Success } else { AuditResult::Partial },
+        if removed {
+            AuditResult::Success
+        } else {
+            AuditResult::Partial
+        },
         None,
         None,
     );
     app_state.audit_logger.log(&entry);
 
-    (StatusCode::OK, Json(json!({ "ok": true, "removed": removed }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "removed": removed })),
+    )
+        .into_response()
 }

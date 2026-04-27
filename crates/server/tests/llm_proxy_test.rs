@@ -59,11 +59,15 @@ async fn setup_server() -> (TestServer, MockServer) {
 
     // LLM credentials store: salva uma chave por provider (em DB).
     let llm_store = LlmCredentialsStore::new(&storage_path.join("llm_credentials.db")).unwrap();
-    llm_store.set(LlmProvider::Openai, "sk-mock-openai").unwrap();
+    llm_store
+        .set(LlmProvider::Openai, "sk-mock-openai")
+        .unwrap();
     llm_store
         .set(LlmProvider::Anthropic, "sk-mock-anthropic")
         .unwrap();
-    llm_store.set(LlmProvider::Gemini, "AIza-mock-gemini").unwrap();
+    llm_store
+        .set(LlmProvider::Gemini, "AIza-mock-gemini")
+        .unwrap();
     let llm_store = Some(Arc::new(llm_store));
 
     // User store: cria um Editor e um Viewer; usaremos o JWT só para o Viewer.
@@ -212,7 +216,9 @@ async fn gemini_success_passes_api_key_in_query_string() {
     let (server, mock) = setup_server().await;
 
     Mock::given(method("POST"))
-        .and(path("/gemini/v1beta/models/gemini-1.5-flash:generateContent"))
+        .and(path(
+            "/gemini/v1beta/models/gemini-1.5-flash:generateContent",
+        ))
         .and(query_param("key", "AIza-mock-gemini"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "candidates": [{
@@ -249,8 +255,8 @@ async fn missing_credential_returns_503_when_provider_not_configured() {
     let (server, _mock) = setup_server().await;
 
     // Remove a chave do gemini para forçar 503.
-    let store = LlmCredentialsStore::new(&server._temp_dir.path().join("llm_credentials.db"))
-        .unwrap();
+    let store =
+        LlmCredentialsStore::new(&server._temp_dir.path().join("llm_credentials.db")).unwrap();
     store.delete(LlmProvider::Gemini).unwrap();
 
     let res = client()
@@ -299,7 +305,10 @@ async fn upstream_4xx_returns_502_with_provider_message() {
     assert_eq!(res.status(), 502);
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["error"], "llm_upstream_error");
-    assert!(body["message"].as_str().unwrap().contains("invalid api key"));
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid api key"));
 }
 
 #[tokio::test]

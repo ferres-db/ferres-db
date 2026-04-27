@@ -627,4 +627,3 @@ async fn forward_events(
         }
     }
 }
-
