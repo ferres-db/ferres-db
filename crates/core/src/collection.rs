@@ -780,12 +780,11 @@ impl Collection {
         let k_candidates = (k * 5).min(self.points.len().max(1));
         let candidates = match index_to_use {
             None => self.index.search(query, k_candidates, predicate)?,
-            Some(f) => {
-                self.vector_indices
-                    .get(f)
-                    .expect("vector field validated by contains_key above")
-                    .search(query, k_candidates, predicate)?
-            }
+            Some(f) => self
+                .vector_indices
+                .get(f)
+                .expect("vector field validated by contains_key above")
+                .search(query, k_candidates, predicate)?,
         };
         if candidates.is_empty() {
             return Ok(candidates);

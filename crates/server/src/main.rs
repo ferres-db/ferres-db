@@ -1,25 +1,14 @@
 use std::net::SocketAddr;
 use tokio::time::{interval, Duration};
-use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
-use tracing_appender::{non_blocking, rolling};
-use tracing_subscriber::{
-    fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer, Registry,
-};
 
-use ferres_db_server::api_keys::ApiKeyStore;
-use ferres_db_server::auth;
-use ferres_db_server::cloud_settings::CloudSettingsStore;
+use ferres_db_server::bootstrap::{
+    bootstrap_state, build_app, init_tracing, spawn_hnsw_autotune_worker,
+};
 use ferres_db_server::handlers::reindex::{
     run_auto_reindex_cycle, run_auto_vacuum_cycle, run_retention_cycle,
 };
-use ferres_db_server::handlers::stats::run_hnsw_auto_tune_cycle;
-use ferres_db_server::metrics;
-use ferres_db_server::middleware;
-use ferres_db_server::routes;
-use ferres_db_server::state::{AppState, ServerConfig};
-use ferres_db_server::users::UserStore;
-use std::sync::Arc;
+use ferres_db_server::state::ServerConfig;
 
 fn enable_mcp() -> bool {
     std::env::args().any(|a| a == "--mcp")
@@ -50,293 +39,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Carrega .env do diretório atual ou do workspace (para FERRESDB_API_KEYS, etc.)
+    // Load .env from current directory or workspace (for FERRESDB_API_KEYS, etc.)
     dotenvy::dotenv().ok();
 
-    // MCP via STDIO: quando ativo, logs de console devem ir para stderr para não corromper o protocolo em stdout
-    let use_stderr_console = enable_mcp();
-
-    // Carrega configuração
     let config = ServerConfig::load().map_err(|e| {
         eprintln!("Failed to load configuration: {e}");
         e
     })?;
 
-    // Configura logging estruturado com JSON output e arquivo rotativo
-    let log_level = config.log_level.clone();
-    let log_dir = config.storage_path.join("logs");
-    std::fs::create_dir_all(&log_dir).map_err(|e| {
-        eprintln!("Failed to create log directory: {e}");
-        e
-    })?;
-
-    // Cria appender rotativo para arquivo (rota diariamente, mantém 7 dias)
-    let file_appender = rolling::daily(&log_dir, "server.log");
-    let (non_blocking_appender, file_guard) = non_blocking(file_appender);
-
-    // Configura subscriber com JSON format para arquivo e texto para console
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level));
-
-    // Layer para arquivo (JSON); clone para poder usar também no branch OTel
-    let file_layer = fmt::layer()
-        .with_writer(non_blocking_appender.clone())
-        .json()
-        .with_filter(env_filter.clone());
-
-    // Configura writers non-blocking para stdout/stderr
-    let (stdout_non_blocking, stdout_guard) = non_blocking(std::io::stdout());
-    let (stderr_non_blocking, stderr_guard) = non_blocking(std::io::stderr());
-
-    // Inicializa o subscriber (com layer OTel quando feature "otel" e init ok).
-    // Com MCP ativo, console usa stderr para não corromper o protocolo MCP em stdout.
-    #[cfg(not(feature = "otel"))]
-    {
-        if use_stderr_console {
-            Registry::default()
-                .with(file_layer)
-                .with(
-                    fmt::layer()
-                        .with_writer(stderr_non_blocking)
-                        .with_filter(EnvFilter::new("info")),
-                )
-                .init();
-        } else {
-            Registry::default()
-                .with(file_layer)
-                .with(
-                    fmt::layer()
-                        .with_writer(stdout_non_blocking)
-                        .with_filter(EnvFilter::new("info")),
-                )
-                .init();
-        }
-    }
-
-    #[cfg(feature = "otel")]
-    {
-        match ferres_db_server::tracing_otel::init_otel_tracing() {
-            Ok((otel_layer, otel_provider)) => {
-                let _otel_provider = otel_provider; // mantém vivo para exportar spans
-                if use_stderr_console {
-                    Registry::default()
-                        .with(otel_layer)
-                        .with(
-                            fmt::layer()
-                                .with_writer(non_blocking_appender)
-                                .json()
-                                .with_filter(env_filter.clone()),
-                        )
-                        .with(
-                            fmt::layer()
-                                .with_writer(stderr_non_blocking)
-                                .with_filter(EnvFilter::new("info")),
-                        )
-                        .init();
-                } else {
-                    Registry::default()
-                        .with(otel_layer)
-                        .with(
-                            fmt::layer()
-                                .with_writer(non_blocking_appender)
-                                .json()
-                                .with_filter(env_filter.clone()),
-                        )
-                        .with(
-                            fmt::layer()
-                                .with_writer(stdout_non_blocking)
-                                .with_filter(EnvFilter::new("info")),
-                        )
-                        .init();
-                }
-                info!("OpenTelemetry tracing enabled (OTLP)");
-            }
-            Err(e) => {
-                warn!(error = %e, "OpenTelemetry init failed, continuing without OTLP export");
-                if use_stderr_console {
-                    Registry::default()
-                        .with(file_layer)
-                        .with(
-                            fmt::layer()
-                                .with_writer(stderr_non_blocking)
-                                .with_filter(EnvFilter::new("info")),
-                        )
-                        .init();
-                } else {
-                    Registry::default()
-                        .with(file_layer)
-                        .with(
-                            fmt::layer()
-                                .with_writer(stdout_non_blocking)
-                                .with_filter(EnvFilter::new("info")),
-                        )
-                        .init();
-                }
-            }
-        }
-    }
-
-    // Mantém guards vivos para garantir que logs sejam escritos
-    let _file_guard = file_guard;
-    let _stdout_guard = stdout_guard;
-    let _stderr_guard = stderr_guard;
-
+    init_tracing(&config);
     info!("FerresDB server starting...");
 
-    if config.api_keys.as_ref().is_none_or(|s| s.trim().is_empty()) {
-        warn!(
-            "No API keys configured. Set api_keys in config.toml or FERRESDB_API_KEYS env; \
-             all protected routes will return 403 Invalid API key."
-        );
-    }
+    // MCP via STDIO: when active, console logs must go to stderr to avoid corrupting the
+    // protocol on stdout. The flag is also read inside init_tracing, but we need it here
+    // for the feature-gated MCP spawn block.
+    let use_stderr_console = enable_mcp();
 
-    // Inicializa store de API keys (SQLite) e opcionalmente chaves bootstrap do config/env
-    let api_keys_path = config.storage_path.join("api_keys.db");
-    let api_key_store = ApiKeyStore::new(&api_keys_path).map_err(|e| {
-        eprintln!(
-            "Failed to open API key store at {}: {}",
-            api_keys_path.display(),
-            e
-        );
-        e
-    })?;
-    api_key_store
-        .init(config.api_keys.as_deref())
-        .map_err(|e| {
-            eprintln!("Failed to initialize API key store: {e}");
-            e
-        })?;
-    let api_key_store = Some(Arc::new(api_key_store));
-    info!("API key store initialized (multi-key support enabled)");
-    ferres_db_server::api_keys::set_global_store(api_key_store.clone());
-
-    // Chaves do config/env continuam válidas como "super" (legacy) além das do SQLite
-    auth::init_api_keys_from(config.api_keys.as_deref());
-
-    // Store de usuários do dashboard (SQLite) e usuário padrão root/ferresdb
-    let users_path = config.storage_path.join("users.db");
-    let user_store = UserStore::new(&users_path).map_err(|e| {
-        eprintln!(
-            "Failed to open user store at {}: {}",
-            users_path.display(),
-            e
-        );
-        e
-    })?;
-    user_store.ensure_default_user().map_err(|e| {
-        eprintln!("Failed to ensure default user: {e}");
-        e
-    })?;
-    let user_store = Some(Arc::new(user_store));
-    info!("User store initialized (default user root)");
-
-    // Cloud (S3) settings from dashboard (SQLite)
-    let cloud_settings_path = config.storage_path.join("cloud_settings.db");
-    let cloud_settings_store = CloudSettingsStore::new(&cloud_settings_path).map_err(|e| {
-        eprintln!(
-            "Failed to open cloud settings store at {}: {}",
-            cloud_settings_path.display(),
-            e
-        );
-        e
-    })?;
-    let cloud_settings_store = Some(Arc::new(cloud_settings_store));
-    info!("Cloud settings store initialized");
-
-    // LLM provider credentials (SQLite). Used by the server-side LLM proxy.
-    let llm_credentials_path = config.storage_path.join("llm_credentials.db");
-    let llm_credentials_store =
-        ferres_db_server::llm_credentials::LlmCredentialsStore::new(&llm_credentials_path)
-            .map_err(|e| {
-                eprintln!(
-                    "Failed to open LLM credentials store at {}: {}",
-                    llm_credentials_path.display(),
-                    e
-                );
-                e
-            })?;
-    let llm_credentials_store = Some(Arc::new(llm_credentials_store));
-    info!("LLM credentials store initialized");
-
-    // JWT para sessão do dashboard (FERRESDB_JWT_SECRET ou valor padrão em dev)
-    let jwt_secret = std::env::var("FERRESDB_JWT_SECRET")
-        .unwrap_or_else(|_| "ferresdb-dashboard-secret-change-in-production".to_string());
-    auth::set_jwt_secret(jwt_secret.into_bytes());
-
-    // Inicializa métricas Prometheus
-    // As métricas são registradas automaticamente via lazy_static no módulo metrics
-    info!("Prometheus metrics initialized");
-
-    // Re-ranker opcional (Cross-Encoder ONNX). Requer feature "rerank" e FERRESDB_RERANK_MODEL (ou config).
-    #[cfg(feature = "rerank")]
-    let reranker = match &config.rerank_model_path {
-        Some(path) => {
-            let dim = config.rerank_dimension.unwrap_or(384);
-            match ferres_db_core::CrossEncoderOrt::load(path, dim, None, None) {
-                Ok(r) => {
-                    info!(path = %path.display(), dimension = dim, "cross-encoder reranker loaded");
-                    Some(std::sync::Arc::new(r) as std::sync::Arc<dyn ferres_db_core::Reranker>)
-                }
-                Err(e) => {
-                    warn!(path = %path.display(), error = %e, "failed to load reranker, continuing without");
-                    None
-                }
-            }
-        }
-        None => None,
-    };
-    #[cfg(not(feature = "rerank"))]
-    let reranker = None;
-
-    // Inicializa AppState (com store de API keys, usuários, cloud settings e LLM credentials)
-    let app_state = AppState::new(
-        config.clone(),
-        api_key_store,
-        user_store,
-        cloud_settings_store,
-        llm_credentials_store,
-        reranker,
-    )
-    .map_err(|e| {
-        error!(error = %e, "failed to initialize collections");
+    let app_state = bootstrap_state(&config).map_err(|e| {
+        error!(error = %e, "failed to bootstrap server state");
         e
     })?;
 
-    // Atualiza gauge de coleções ativas
-    metrics::COLLECTIONS_ACTIVE.set(app_state.collections.len() as f64);
-
-    // Start background drain for global query stats (non-blocking record path)
-    app_state.global_query_stats.start_background_drain();
-
-    // Warmup: reexecuta últimas 50 queries do log em background para carregar HNSW e search_cache
-    // ferres_db_server::warmup::spawn_warmup_task(app_state.clone());
-
-    // Log do status de aceleração SIMD no startup
-    let simd = ferres_db_core::simd_enabled();
-    if simd {
-        info!("SIMD acceleration: active (AVX2 or SSE4.1)");
-    } else {
-        info!("SIMD acceleration: scalar fallback (no AVX2/SSE4.1 detected)");
-    }
-
-    // Inicia servidor MCP via STDIO quando --mcp ou FERRESDB_ENABLE_MCP=true (requer build com --features mcp)
+    // MCP via STDIO (feature-gated, must be started before REST server)
     #[cfg(feature = "mcp")]
     if use_stderr_console {
-        ferres_db_server::mcp::spawn_mcp_server(Arc::new(app_state.clone()));
+        ferres_db_server::mcp::spawn_mcp_server(std::sync::Arc::new(app_state.clone()));
         info!("MCP server started (STDIO)");
     }
 
-    // Inicia background task para auto-save a cada 30 segundos
-    let app_state_for_save = app_state.clone();
+    // Suppress unused-variable warning when mcp feature is not enabled.
+    #[cfg(not(feature = "mcp"))]
+    let _ = use_stderr_console;
+
+    // Background workers — retain JoinHandles for the graceful shutdown sequence.
     let shutdown_notify = app_state.shutdown_notify();
+
+    // Auto-save: persist dirty collections every 30 seconds.
+    let app_state_for_save = app_state.clone();
     let shutdown_notify_for_task = shutdown_notify.clone();
     let is_shutting_down = app_state.is_shutting_down.clone();
-
     let save_task_handle = tokio::spawn(async move {
-        let mut interval = interval(Duration::from_secs(30));
+        let mut save_interval = interval(Duration::from_secs(30));
         loop {
             tokio::select! {
-                _ = interval.tick() => {
+                _ = save_interval.tick() => {
                     if !is_shutting_down.load(std::sync::atomic::Ordering::Acquire) {
                         let state = app_state_for_save.clone();
                         let _ = tokio::task::spawn_blocking(move || {
@@ -355,7 +101,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Inicia background task para auto-reindex a cada 30 minutos (fragmentação por tombstones)
+    // Auto-reindex: compact tombstones every 30 minutes.
     const AUTO_REINDEX_INTERVAL_SECS: u64 = 30 * 60;
     let app_state_for_reindex = app_state.clone();
     let shutdown_notify_reindex = app_state.shutdown_notify();
@@ -377,18 +123,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Inicia worker de replicação quando --replica-of <ADDR> (requer feature grpc)
-    #[cfg(feature = "grpc")]
-    if app_state.config.replica_of.is_some() {
-        let state_for_replication = app_state.clone();
-        tokio::spawn(async move {
-            ferres_db_server::replication::run_replication_worker(state_for_replication.into())
-                .await;
-        });
-        info!("replication worker started (replica-of)");
-    }
-
-    // Inicia background task para vacuum de pontos expirados (TTL) a cada 60 segundos
+    // Auto-vacuum: expire TTL points every 60 seconds.
     const AUTO_VACUUM_INTERVAL_SECS: u64 = 60;
     let app_state_for_vacuum = app_state.clone();
     let shutdown_notify_vacuum = app_state.shutdown_notify();
@@ -414,7 +149,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Inicia background task para retenção (compactação WAL por retention_days) a cada hora
+    // Retention: WAL compaction by retention_days, every hour.
     const RETENTION_INTERVAL_SECS: u64 = 3600;
     let app_state_retention = app_state.clone();
     let shutdown_notify_retention = app_state.shutdown_notify();
@@ -428,7 +163,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let state = app_state_retention.clone();
                         let _ = tokio::task::spawn_blocking(move || {
                             run_retention_cycle(&state);
-                        }).await;
+                        })
+                        .await;
                     }
                 }
                 _ = shutdown_notify_retention.notified() => {
@@ -439,106 +175,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // HNSW auto-tune: ajusta ef_search dinamicamente com base na latência P95 (FerresEngine).
-    const HNSW_AUTO_TUNE_INTERVAL_SECS: u64 = 60;
-    let app_state_auto_tune = app_state.clone();
-    let shutdown_notify_auto_tune = app_state.shutdown_notify();
-    let is_shutting_down_auto_tune = app_state.is_shutting_down.clone();
-    tokio::spawn(async move {
-        let mut auto_tune_interval = interval(Duration::from_secs(HNSW_AUTO_TUNE_INTERVAL_SECS));
-        loop {
-            tokio::select! {
-                _ = auto_tune_interval.tick() => {
-                    if !is_shutting_down_auto_tune.load(std::sync::atomic::Ordering::Acquire) {
-                        let state = app_state_auto_tune.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            run_hnsw_auto_tune_cycle(&state);
-                        }).await;
-                    }
-                }
-                _ = shutdown_notify_auto_tune.notified() => {
-                    info!("hnsw auto-tune worker task shutting down");
-                    break;
-                }
-            }
-        }
-    });
+    // HNSW auto-tune: shutdown handled internally via notify; no JoinHandle needed.
+    let _autotune = spawn_hnsw_autotune_worker(app_state.clone());
 
-    // Limite de body: default do Axum é 2MB; upserts com muitos pontos (vetores + metadata) podem exceder.
-    const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024; // 32 MB
-
-    // Configura CORS: CORS_ORIGINS (vírgula) em runtime; senão aceita qualquer localhost/127.0.0.1 (qualquer porta)
-    use axum::http::request::Parts as RequestParts;
-    use axum::http::{HeaderValue, Method};
-    let cors_origin = match std::env::var("CORS_ORIGINS") {
-        Ok(s) => {
-            let origins: Vec<HeaderValue> = s
-                .split(',')
-                .filter_map(|o| o.trim().parse::<HeaderValue>().ok())
-                .collect();
-            if origins.is_empty() {
-                tower_http::cors::AllowOrigin::predicate(
-                    |origin: &HeaderValue, _: &RequestParts| {
-                        origin.to_str().is_ok_and(|s| {
-                            s.starts_with("http://localhost:") || s.starts_with("http://127.0.0.1:")
-                        })
-                    },
-                )
-            } else {
-                tower_http::cors::AllowOrigin::list(origins)
-            }
-        }
-        Err(_) => {
-            tower_http::cors::AllowOrigin::predicate(|origin: &HeaderValue, _: &RequestParts| {
-                origin.to_str().is_ok_and(|s| {
-                    s.starts_with("http://localhost:") || s.starts_with("http://127.0.0.1:")
-                })
-            })
-        }
-    };
-    let cors = CorsLayer::new()
-        .allow_origin(cors_origin)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-            Method::PATCH,
-        ])
-        .allow_headers([
-            axum::http::header::CONTENT_TYPE,
-            axum::http::header::AUTHORIZATION,
-            axum::http::header::ACCEPT,
-            axum::http::header::HeaderName::from_static("x-requested-with"),
-        ])
-        .allow_credentials(true);
-
-    // Cria o router com todas as rotas da API
-    let app = routes::create_router(&config)
-        .layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            middleware::replica_write_guard,
-        ))
-        .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT_BYTES))
-        .layer(axum::middleware::from_fn(middleware::request_logger))
-        .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(app_state.clone());
-
-    // Bind do servidor REST
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
-        .parse()
-        .map_err(|e| format!("invalid address {}:{} - {}", config.host, config.port, e))?;
-    info!(address = %addr, "REST server listening");
-
-    // Cria o listener REST
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    // Inicia o servidor REST com graceful shutdown
-    let server = axum::serve(listener, app);
-
-    // ── gRPC server (feature "grpc") ──────────────────────────────────
+    // gRPC server (feature-gated).
     #[cfg(feature = "grpc")]
     let grpc_handle = {
         let grpc_port: u16 = std::env::var("GRPC_PORT")
@@ -564,11 +204,30 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    // Aguarda sinal de shutdown: SIGTERM (docker stop) ou SIGINT (Ctrl+C em TTY).
-    // Em Docker sem TTY, ctrl_c() pode completar logo e encerrar o processo; por isso
-    // escutamos os sinais Unix explicitamente.
+    // Replication worker (feature-gated, only when replica_of is set).
+    #[cfg(feature = "grpc")]
+    if app_state.config.replica_of.is_some() {
+        let state_for_replication = app_state.clone();
+        tokio::spawn(async move {
+            ferres_db_server::replication::run_replication_worker(state_for_replication.into())
+                .await;
+        });
+        info!("replication worker started (replica-of)");
+    }
+
+    let app = build_app(&config, app_state.clone());
+
+    // Bind REST server.
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .map_err(|e| format!("invalid address {}:{} - {}", config.host, config.port, e))?;
+    info!(address = %addr, "REST server listening");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    // Signal handling: SIGTERM (docker stop) or SIGINT (Ctrl+C).
+    // On Docker without a TTY, ctrl_c() may complete immediately; listen to Unix signals explicitly.
     #[cfg(unix)]
-    let shutdown = async {
+    let shutdown_signal = async {
         use tokio::signal::unix::{signal, SignalKind};
         let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
         let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
@@ -578,29 +237,33 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     #[cfg(not(unix))]
-    let shutdown = async {
+    let shutdown_signal = async {
         tokio::signal::ctrl_c()
             .await
             .expect("failed to listen for Ctrl+C");
     };
 
-    tokio::select! {
-        result = server => {
-            if let Err(e) = result {
-                error!(error = %e, "server error");
-            }
-        }
-        _ = shutdown => {
-            info!("shutdown signal received, performing graceful shutdown...");
-        }
+    // Serve with graceful shutdown: wait for the signal, then drain in-flight requests.
+    // A 30-second outer timeout prevents hanging indefinitely if clients don't close.
+    const IN_FLIGHT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+    let graceful = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal);
+    match tokio::time::timeout(IN_FLIGHT_DRAIN_TIMEOUT, graceful).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!(error = %e, "server error during shutdown"),
+        Err(_) => warn!(
+            "server did not drain in-flight requests within {}s, proceeding",
+            IN_FLIGHT_DRAIN_TIMEOUT.as_secs()
+        ),
     }
+    info!("shutdown signal received, performing graceful shutdown...");
 
-    // Marca shutdown ANTES de notificar (tasks deixam de iniciar novos saves/reindex)
+    // Mark shutdown before notifying (tasks stop initiating new saves/reindexes).
     app_state.set_shutting_down();
 
-    // Notifica as tasks de background e aguarda terminarem
+    // Signal background workers and wait for them to exit.
     shutdown_notify.notify_waiters();
     const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_secs(10);
+
     match tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, save_task_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => error!(error = %e, "auto-save task panicked"),
@@ -634,16 +297,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
-    // Encerra gRPC server
+    // Abort gRPC server (it owns its own listener; abort is the cleanest shutdown).
     #[cfg(feature = "grpc")]
     grpc_handle.abort();
 
-    // Agora é seguro salvar (task já encerrou)
+    // Final save (background save task has already exited; this is safe).
     if let Err(e) = app_state.save_all_collections() {
         error!(error = %e, "failed to save collections during shutdown");
     }
 
-    // Flush final do audit logger (garante que nenhuma entry pendente é perdida)
+    // Flush audit log — ensures no pending entries are lost.
     app_state.audit_logger.shutdown().await;
 
     info!("server shutdown complete");

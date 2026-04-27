@@ -84,7 +84,10 @@ impl LlmCredentialsStore {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = Connection::open(path)?;
-        crate::db::migrations::run_migrations(&conn, crate::db::migrations::MIGRATIONS_LLM_CREDENTIALS)?;
+        crate::db::migrations::run_migrations(
+            &conn,
+            crate::db::migrations::MIGRATIONS_LLM_CREDENTIALS,
+        )?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

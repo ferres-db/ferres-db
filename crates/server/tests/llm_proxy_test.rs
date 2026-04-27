@@ -5,7 +5,6 @@
 //! Prometheus, e mapeamento da resposta do provedor.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use serde_json::json;
 use serial_test::serial;
@@ -14,13 +13,11 @@ use tokio::sync::oneshot;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use ferres_db_server::api_keys::{self, ApiKeyStore};
 use ferres_db_server::auth;
+use ferres_db_server::bootstrap::{bootstrap_state, build_app};
 use ferres_db_server::llm_credentials::{LlmCredentialsStore, LlmProvider};
-use ferres_db_server::middleware;
-use ferres_db_server::routes;
-use ferres_db_server::state::{AppState, ServerConfig};
-use ferres_db_server::users::{Role, UserStore};
+use ferres_db_server::state::ServerConfig;
+use ferres_db_server::users::Role;
 
 /// API key bootstrap usada para o cliente em testes.
 const TEST_API_KEY: &str = "test-llm-proxy-key";
@@ -49,35 +46,6 @@ async fn setup_server() -> (TestServer, MockServer) {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage_path = temp_dir.path().to_path_buf();
 
-    // ApiKeyStore com TEST_API_KEY (mais robusto que o OnceLock legacy entre testes).
-    let api_key_store = ApiKeyStore::new(&storage_path.join("api_keys.db")).unwrap();
-    api_key_store.init(Some(TEST_API_KEY)).unwrap();
-    let api_key_store = Arc::new(api_key_store);
-    api_keys::set_global_store(Some(api_key_store.clone()));
-    // Limpa o legacy só por garantia (idempotente).
-    auth::init_api_keys_from(Some(""));
-
-    // LLM credentials store: salva uma chave por provider (em DB).
-    let llm_store = LlmCredentialsStore::new(&storage_path.join("llm_credentials.db")).unwrap();
-    llm_store
-        .set(LlmProvider::Openai, "sk-mock-openai")
-        .unwrap();
-    llm_store
-        .set(LlmProvider::Anthropic, "sk-mock-anthropic")
-        .unwrap();
-    llm_store
-        .set(LlmProvider::Gemini, "AIza-mock-gemini")
-        .unwrap();
-    let llm_store = Some(Arc::new(llm_store));
-
-    // User store: cria um Editor e um Viewer; usaremos o JWT só para o Viewer.
-    let user_store = UserStore::new(&storage_path.join("users.db")).unwrap();
-    let _ = user_store.create("viewer1", "viewer-pass", Some(Role::Viewer));
-    let user_store = Some(Arc::new(user_store));
-
-    // JWT secret for any future JWT-based test
-    auth::set_jwt_secret(b"llm-proxy-test-secret".to_vec());
-
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let port = addr.port();
@@ -92,25 +60,30 @@ async fn setup_server() -> (TestServer, MockServer) {
         ..Default::default()
     };
 
-    let app_state = AppState::new(
-        config.clone(),
-        Some(api_key_store),
-        user_store,
-        None,
-        llm_store,
-        None,
-    )
-    .unwrap();
+    let app_state = bootstrap_state(&config).unwrap();
 
-    let app = routes::create_router(&config)
-        .layer(axum::middleware::from_fn(middleware::request_logger))
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        )
-        .with_state(app_state);
+    // Populate LLM credentials (accessible via public field)
+    if let Some(llm_store) = &app_state.llm_credentials_store {
+        llm_store
+            .set(LlmProvider::Openai, "sk-mock-openai")
+            .unwrap();
+        llm_store
+            .set(LlmProvider::Anthropic, "sk-mock-anthropic")
+            .unwrap();
+        llm_store
+            .set(LlmProvider::Gemini, "AIza-mock-gemini")
+            .unwrap();
+    }
+
+    // Create additional test user
+    if let Some(user_store) = &app_state.user_store {
+        let _ = user_store.create("viewer1", "viewer-pass", Some(Role::Viewer));
+    }
+
+    // Override JWT secret for this test suite
+    auth::set_jwt_secret(b"llm-proxy-test-secret".to_vec());
+
+    let app = build_app(&config, app_state);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

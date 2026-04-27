@@ -1,12 +1,14 @@
+use crate::time::unix_now;
 use rusqlite::Connection;
 use thiserror::Error;
-use crate::time::unix_now;
 
 #[derive(Debug, Error)]
 pub enum MigrationError {
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
-    #[error("downgrade detected: database at version {current}, highest known migration is {max_known}")]
+    #[error(
+        "downgrade detected: database at version {current}, highest known migration is {max_known}"
+    )]
     DowngradeDetected { current: i64, max_known: i64 },
 }
 
@@ -98,11 +100,10 @@ pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> Result<(),
         )",
     )?;
 
-    let schema_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM schema_migrations",
-        [],
-        |row| row.get(0),
-    )?;
+    let schema_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
 
     if schema_count == 0 {
         let other_tables: i64 = conn.query_row(
@@ -277,7 +278,10 @@ mod tests {
         let result = run_migrations(&conn, MIGRATIONS_API_KEYS);
         assert!(matches!(
             result,
-            Err(MigrationError::DowngradeDetected { current: 99, max_known: 2 })
+            Err(MigrationError::DowngradeDetected {
+                current: 99,
+                max_known: 2
+            })
         ));
     }
 }

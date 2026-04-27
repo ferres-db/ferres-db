@@ -419,6 +419,39 @@ Replace all inline schema setup with a lightweight artisanal migration system in
 
 ---
 
+## ADR-026 — Bootstrap module: extract server startup logic into reusable public functions
+
+**Date:** 2026-04-27
+**Status:** Accepted
+
+### Context
+`crates/server/src/main.rs` contained ~350 lines of interleaved bootstrap logic (tracing setup, store initialization, CORS construction, router assembly, HNSW auto-tune worker spawn). Integration tests duplicated a subset of this logic in each `setup_server()` function, diverging from production over time (different CORS policy, no global API key store, etc.), making it possible for tests to pass while production failed.
+
+### Decision
+Extract all reusable startup logic into `crates/server/src/bootstrap.rs`, exposed publicly from `lib.rs`:
+- `init_tracing(config)` — idempotent (OnceLock); no-op on 2nd call, safe in tests
+- `bootstrap_state(config) -> Result<AppState, BootstrapError>` — opens all 4 SQLite stores, initializes global API key store and legacy auth, sets JWT secret, creates AppState, seeds metrics, starts background stats drain
+- `build_app(config, state) -> Router` — assembles full Axum router with all production middleware
+- `build_cors_layer(config) -> CorsLayer` — reads CORS_ORIGINS env var, falls back to localhost predicate
+- `spawn_hnsw_autotune_worker(state) -> JoinHandle<()>` — tokio worker with biased select! and shutdown notify
+
+`main.rs` is reduced to: load config → init_tracing → bootstrap_state → spawn background workers (with JoinHandles for shutdown coordination) → build_app → serve with graceful shutdown (30s in-flight drain timeout).
+
+All 6 integration test suites updated to use `bootstrap_state` + `build_app`. Tests that need custom store state (rbac_test, llm_proxy_test) access the public AppState fields post-bootstrap.
+
+### Why not the alternatives
+- **Keep all logic in main.rs with test helpers calling it directly:** `main.rs` is a binary entry-point, not importable by tests — this doesn't work.
+- **Duplicate logic via a shared test module:** keeps divergence, harder to maintain than a single canonical path.
+
+### Consequences
+- Integration tests now exercise the same initialization code path as production (ADR rationale achieved).
+- `main.rs` reduced from ~650 to ~220 lines; much easier to audit.
+- Graceful shutdown improved: `with_graceful_shutdown` + 30s timeout for in-flight requests replaces a raw `tokio::select!` that dropped connections immediately.
+- `BootstrapError` is a typed enum usable by embedders or future test harnesses.
+- 107 tests pass.
+
+---
+
 ## ADR-025 — Unwrap Hardening: replace `.unwrap()` with `.expect("reason")` in production code
 
 **Date:** 2026-04-27

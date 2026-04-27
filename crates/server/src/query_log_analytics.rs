@@ -66,10 +66,9 @@ impl QueryLogCache {
 
     /// Carrega todas as entradas do log (re-lê do disco se cache expirado).
     fn get_entries(&self) -> Vec<ParsedQueryEntry> {
-        let mut guard = self
-            .cache
-            .write()
-            .expect("analytics cache RwLock poisoned — a thread panicked while holding a write guard");
+        let mut guard = self.cache.write().expect(
+            "analytics cache RwLock poisoned — a thread panicked while holding a write guard",
+        );
         let now = Instant::now();
         let refresh = match guard.as_ref() {
             None => true,

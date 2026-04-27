@@ -43,7 +43,10 @@ impl CloudSettingsStore {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = Connection::open(path)?;
-        crate::db::migrations::run_migrations(&conn, crate::db::migrations::MIGRATIONS_CLOUD_SETTINGS)?;
+        crate::db::migrations::run_migrations(
+            &conn,
+            crate::db::migrations::MIGRATIONS_CLOUD_SETTINGS,
+        )?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
