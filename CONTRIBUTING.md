@@ -64,6 +64,46 @@ Architecture and decisions: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/
 - Logging with `tracing` (avoid `println!` in production code).
 - Unit tests in the same file (`#[cfg(test)] mod tests`) or in `tests/` for integration tests.
 
+### Async & Locks — rule enforced by Clippy CI
+
+**`std::sync::RwLock` and `Mutex` guards must never be held across an `await` point.**
+
+Holding a synchronous lock guard across `.await` causes deadlocks on Tokio's cooperative scheduler because the executor cannot preempt a task that holds a lock while it is suspended.
+
+CI enforces this with `-D clippy::await_holding_lock` and `-D clippy::await_holding_refcell_ref`.
+
+**Three accepted patterns:**
+
+**A — extract a sync helper** (model from `crates/server/src/grpc.rs`):
+
+```rust
+async fn handler(state: AppState, ...) -> Result<...> {
+    let result = do_work_sync(&state, ...)?;   // acquires lock, returns data
+    emit_event_async(result).await;            // no lock held
+}
+```
+
+**B — scope the guard with a block** (standard for handlers):
+
+```rust
+let payload = {
+    let mut coll = collection_arc.write()?;    // guard lives only in this block
+    coll.insert_batch(points)?
+};                                              // guard dropped here automatically
+state.emit_event(...).await;                   // no lock held
+```
+
+**C — use `tokio::sync::RwLock`** (rare; only when the critical section itself contains `.await`):
+
+```rust
+let mut coll = tokio_rwlock.write().await;
+coll.async_operation().await;  // lock held intentionally — document why
+```
+
+Pattern B is the project standard. Pattern A is used in gRPC handlers. Pattern C is exceptional and requires a comment.
+
+> **Never use explicit `drop(guard)` before an async call as a substitute for block scoping.** Block scoping is compiler-enforced; a missing `drop()` call introduces a bug silently.
+
 ## Testing
 
 ### Unit and integration (Rust)
