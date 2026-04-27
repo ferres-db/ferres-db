@@ -508,27 +508,35 @@ async fn process_upsert_batch(
 
     let start = Instant::now();
 
-    let collection_arc =
-        app_state
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| ServerMessage::Error {
-                message: "collection not found".to_string(),
-                code: 404,
-            })?;
+    // Clone the Arc immediately to release the DashMap shard lock before
+    // acquiring the RwLock. Both locks must be dropped before any .await.
+    let collection_arc = {
+        let ref_guard =
+            app_state
+                .collections
+                .get(collection_name)
+                .ok_or_else(|| ServerMessage::Error {
+                    message: "collection not found".to_string(),
+                    code: 404,
+                })?;
+        std::sync::Arc::clone(ref_guard.value())
+        // DashMap shard lock released here
+    };
 
-    let mut valid_points = Vec::new();
-    let mut failed = 0usize;
-    let mut point_ids = Vec::new();
-
-    {
+    // All sync work lives inside this block.
+    // The RwLockWriteGuard is dropped automatically at the closing brace —
+    // no explicit drop() needed, making this safe against future async additions.
+    let (inserted, failed, took_ms, opt_event) = {
         let mut collection = collection_arc.write().map_err(|e| ServerMessage::Error {
             message: format!("failed to acquire write lock: {e}"),
             code: 500,
         })?;
 
+        let mut valid_points = Vec::new();
+        let mut failed = 0usize;
+        let mut point_ids = Vec::new();
+
         for input in points {
-            // Validate dimension
             if collection.validate_dimension(&input.vector).is_err() {
                 failed += 1;
                 continue;
@@ -556,25 +564,21 @@ async fn process_upsert_batch(
             }
         }
 
-        if !valid_points.is_empty() {
+        if valid_points.is_empty() {
+            let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            (0usize, failed, took_ms, None)
+        } else {
             match collection.insert_batch(valid_points) {
                 Ok(result) => {
                     collection.mark_dirty();
                     let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-
-                    // Emit event for subscribers
                     let event = CollectionEvent {
                         collection: collection_name.to_string(),
                         action: "upsert".to_string(),
                         point_ids,
                         timestamp: unix_now(),
                     };
-                    drop(collection); // Release lock before emit
-                    drop(collection_arc);
-                    app_state.record_ingest(unix_now(), result.inserted as u64);
-                    app_state.emit_event(event);
-
-                    return Ok((result.inserted, failed, took_ms));
+                    (result.inserted, failed, took_ms, Some(event))
                 }
                 Err(e) => {
                     return Err(ServerMessage::Error {
@@ -584,10 +588,16 @@ async fn process_upsert_batch(
                 }
             }
         }
+        // RwLockWriteGuard dropped here — no lock held past this point
+    };
+
+    // No locks held from here on — safe to call any async fn in the future.
+    if let Some(event) = opt_event {
+        app_state.record_ingest(unix_now(), inserted as u64);
+        app_state.emit_event(event);
     }
 
-    let took_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    Ok((0, failed, took_ms))
+    Ok((inserted, failed, took_ms))
 }
 
 /// Encaminha eventos de uma coleção para o WebSocket do cliente.
