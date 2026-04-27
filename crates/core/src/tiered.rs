@@ -1306,10 +1306,7 @@ impl TieredCollection {
     /// Retorna a distribuição de pontos por tier.
     pub fn tier_distribution(&self) -> TierDistribution {
         let dimension = self.collection.config().dimension;
-        let tiers = self
-            .point_tiers
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let tiers = self.point_tiers.read().unwrap_or_else(|e| e.into_inner());
 
         let mut hot = 0usize;
         let mut warm = 0usize;
@@ -1461,10 +1458,7 @@ impl TierMetadata {
     pub fn from_tiered_collection(tc: &TieredCollection) -> Self {
         let point_tiers = tc.point_tiers.read().map(|t| t.clone()).unwrap_or_default();
 
-        let tracker = tc
-            .access_tracker
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let tracker = tc.access_tracker.lock().unwrap_or_else(|e| e.into_inner());
         let mut last_access = HashMap::new();
         let mut access_count = HashMap::new();
 
