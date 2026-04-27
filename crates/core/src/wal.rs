@@ -4,6 +4,25 @@
 //! no WAL (`wal.log`). Em caso de crash, as operações pendentes são
 //! re-aplicadas sobre o último snapshot na recuperação.
 //!
+//! ## Durability semantics
+//!
+//! `Wal::append_*` retorna `Ok` somente após:
+//! - `write_all` ter sucedido (dados no buffer do OS);
+//! - `flush()` ter descarregado o BufWriter para o page cache do OS;
+//! - `sync_data()` ter persistido os dados em disco (quando configurado).
+//!
+//! Se `fsync_per_write = true` (padrão em produção), cada `append_*` chama
+//! `sync_data()` antes de retornar `Ok`. Dados são duráveis contra kernel
+//! panic e perda de energia.
+//!
+//! Se `fsync_per_write = false`, o `sync_data()` é chamado periodicamente
+//! (a cada `fsync_interval` ou `fsync_every_n_ops` operações). Dados podem
+//! ser perdidos em kernel panic ou perda de energia entre o `write` e o
+//! próximo fsync.
+//!
+//! O WAL usa `sync_data()` (não `sync_all()`) — flush de conteúdo sem
+//! metadados, mais rápido e suficiente para recuperação de crash.
+//!
 //! ## Formato
 //!
 //! O WAL usa JSON-lines — cada linha é um `WalEntry` serializado:

@@ -4,8 +4,8 @@
 
 use lazy_static::lazy_static;
 use prometheus::{
-    register_counter_vec, register_gauge, register_histogram_vec, CounterVec, Gauge, HistogramVec,
-    TextEncoder,
+    register_counter_vec, register_gauge, register_gauge_vec, register_histogram_vec,
+    CounterVec, Gauge, GaugeVec, HistogramVec, TextEncoder,
 };
 
 lazy_static! {
@@ -75,6 +75,30 @@ lazy_static! {
         "ferresdb_llm_proxy_requests_total",
         "Total LLM proxy requests by provider and status",
         &["provider", "status"]
+    ).unwrap();
+
+    // ─── WAL Durability Metrics ────────────────────────────────────────────
+
+    /// Total de chamadas sync_data() no WAL, por coleção.
+    pub static ref WAL_FSYNC_TOTAL: CounterVec = register_counter_vec!(
+        "ferresdb_wal_fsync_total",
+        "Total number of WAL fsync calls",
+        &["collection"]
+    ).unwrap();
+
+    /// Latência das chamadas sync_data() no WAL, em segundos.
+    pub static ref WAL_FSYNC_DURATION: HistogramVec = register_histogram_vec!(
+        "ferresdb_wal_fsync_duration_seconds",
+        "WAL fsync latency in seconds",
+        &["collection"],
+        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]
+    ).unwrap();
+
+    /// Número de operações WAL desde o último fsync.
+    pub static ref WAL_PENDING_FSYNC_OPS: GaugeVec = register_gauge_vec!(
+        "ferresdb_wal_pending_fsync_ops",
+        "Number of WAL ops since last fsync",
+        &["collection"]
     ).unwrap();
 }
 

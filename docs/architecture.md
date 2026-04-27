@@ -81,6 +81,27 @@ sequenceDiagram
   API-->>C: JSON results
 ```
 
+## Durability and fsync semantics
+
+The Write-Ahead Log (WAL) guarantees durability through `sync_data()` calls.
+Two modes are available:
+
+- **Per-write fsync** (`fsync_per_write=true`, production default): Every
+  `append_*` call returns `Ok` only after data is persisted to disk. Safe
+  against kernel panic and power loss. ~10x slower than no-fsync on HDD,
+  ~2-3x on SSD.
+
+- **Periodic fsync** (`fsync_per_write=false`): Data is flushed to OS page
+  cache on every write but only synced to disk every `fsync_interval` (1s
+  default) or `fsync_every_n_ops` (1000 default). Data survives process
+  crash but may be lost on kernel panic or power loss.
+
+The WAL uses `sync_data()` (not `sync_all()`) — this flushes file content
+without metadata, which is faster and sufficient for crash recovery.
+
+Configuration is done via `WalConfig` in `crates/core/src/wal.rs` or
+the `FERRESDB_WAL_FSYNC_PER_WRITE` environment variable.
+
 ## Detailed Documentation
 
 - **[architecture.md](architecture.md)** — Components (Point, Collection, ANNIndex, Storage), flows (Insert, Search, Delete, Load), design decisions, thread-safety, performance and extensibility.
