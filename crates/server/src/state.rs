@@ -227,6 +227,9 @@ pub struct ServerConfig {
     /// Comprimir WAL com Zstd (quando usar VectorDB com WAL). Default: false.
     #[serde(default)]
     pub wal_compression: bool,
+    /// Faz fsync após cada append do WAL. Default: true.
+    #[serde(default = "default_true")]
+    pub wal_fsync_per_write: bool,
     /// Gravar snapshots em formato binário (points.bin) em vez de JSONL. Reduz tamanho e tempo de carga. Default: false.
     #[serde(default)]
     pub binary_snapshot: bool,
@@ -280,6 +283,10 @@ fn default_log_level() -> String {
 
 fn default_rate_limit_per_second() -> u32 {
     2_000
+}
+
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 fn default_rate_limit_burst() -> u32 {
@@ -337,6 +344,9 @@ impl ServerConfig {
         }
         if let Ok(v) = std::env::var("FERRESDB_WAL_COMPRESSION") {
             config.wal_compression = v.eq_ignore_ascii_case("true") || v == "1";
+        }
+        if let Ok(v) = std::env::var("FERRESDB_WAL_FSYNC_PER_WRITE") {
+            config.wal_fsync_per_write = v.eq_ignore_ascii_case("true") || v == "1";
         }
         if let Ok(v) = std::env::var("FERRESDB_BINARY_SNAPSHOT") {
             config.binary_snapshot = v.eq_ignore_ascii_case("true") || v == "1";
@@ -425,6 +435,7 @@ impl Default for ServerConfig {
             log_level: default_log_level(),
             api_keys: None,
             wal_compression: false,
+            wal_fsync_per_write: true,
             binary_snapshot: false,
             namespace_physical_isolation: false,
             replica_of: None,
@@ -1035,11 +1046,13 @@ impl AppState {
         drop(collection);
         drop(guard);
 
-        let mut wal = Wal::open(
-            &collection_dir,
-            Wal::DEFAULT_SNAPSHOT_THRESHOLD,
-            self.config.wal_compression,
-        )?;
+        let wal_config = ferres_db_core::wal::WalConfig {
+            snapshot_threshold: Wal::DEFAULT_SNAPSHOT_THRESHOLD,
+            compress: self.config.wal_compression,
+            fsync_per_write: self.config.wal_fsync_per_write,
+            ..Default::default()
+        };
+        let mut wal = Wal::open_with_config(&collection_dir, wal_config)?;
         wal.truncate_after_snapshot()?;
 
         info!(

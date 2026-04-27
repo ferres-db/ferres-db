@@ -95,8 +95,8 @@ pub use tiered::{
 pub use time::{unix_duration, unix_now, unix_now_millis};
 pub use wal::{
     compact_wal_entries_older_than, list_restore_points, read_last_snapshot_timestamp,
-    recover_collection, recover_collection_to_timestamp, RestorePoints, Wal, WalEntry,
-    WalOperation,
+    recover_collection, recover_collection_to_timestamp, RestorePoints, Wal, WalConfig,
+    WalEntry, WalOperation,
 };
 
 #[cfg(feature = "rerank")]
@@ -612,11 +612,13 @@ impl VectorDB {
         self.collections.insert(name.clone(), any_col);
 
         // Abre WAL para a nova coleção
-        let wal_handle = wal::Wal::open(
-            &collection_dir,
-            wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD,
-            self.storage_options.wal_compression,
-        )?;
+        let wal_config = wal::WalConfig {
+            snapshot_threshold: wal::Wal::DEFAULT_SNAPSHOT_THRESHOLD,
+            compress: self.storage_options.wal_compression,
+            fsync_per_write: self.storage_options.wal_fsync_per_write,
+            ..Default::default()
+        };
+        let wal_handle = wal::Wal::open_with_config(&collection_dir, wal_config)?;
         self.wals.insert(name.clone(), wal_handle);
 
         // Auto-save após criação (snapshot inicial)
@@ -1421,6 +1423,26 @@ impl VectorDB {
         })?;
 
         Ok(())
+    }
+
+    /// Registra um hook de fsync para uma coleção específica.
+    /// O hook é chamado após cada sync_data() do WAL.
+    pub fn set_wal_fsync_hook(
+        &mut self,
+        collection: &str,
+        hook: Box<dyn Fn(std::time::Duration) + Send>,
+    ) -> Result<(), FerresError> {
+        let wal = self
+            .wals
+            .get_mut(collection)
+            .ok_or_else(|| FerresError::CollectionNotFound(collection.to_string()))?;
+        wal.set_fsync_hook(hook);
+        Ok(())
+    }
+
+    /// Retorna os nomes de todas as coleções.
+    pub fn collection_names(&self) -> Vec<String> {
+        self.collections.keys().cloned().collect()
     }
 }
 
