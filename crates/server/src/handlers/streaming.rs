@@ -23,6 +23,7 @@ use tokio::time::{self, interval};
 use tracing::{debug, info, warn};
 
 use crate::state::{AppState, CollectionEvent};
+use crate::time::unix_now;
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -627,10 +628,3 @@ async fn forward_events(
     }
 }
 
-/// Retorna o timestamp UNIX atual em segundos.
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::time::unix_now;
 
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
@@ -1024,10 +1024,7 @@ impl Collection {
     ///
     /// Retorna o número de pontos removidos. Pontos sem `expires_at` (None) nunca expiram.
     pub fn vacuum_expired_points(&mut self) -> usize {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_secs();
+        let now = unix_now();
         let expired: Vec<String> = self
             .points
             .iter()
@@ -1493,10 +1490,7 @@ mod tests {
     #[test]
     fn vacuum_expired_points_removes_only_expired() {
         let mut col = Collection::new(test_config());
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_secs();
+        let now = unix_now();
         let mut p_expired = make_point("exp1", vec![1.0, 0.0, 0.0]);
         p_expired.expires_at = Some(1); // past
         let mut p_future = make_point("exp2", vec![0.0, 1.0, 0.0]);

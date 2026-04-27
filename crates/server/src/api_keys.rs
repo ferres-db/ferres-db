@@ -13,6 +13,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 
+use crate::time::unix_now;
+
 lazy_static! {
     static ref KEY_HASHES: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
     /// In-memory cache of API key hash → meta. Avoids hitting SQLite on every
@@ -147,10 +149,7 @@ impl ApiKeyStore {
                 } else {
                     format!("{}...", &key.chars().take(8).collect::<String>())
                 };
-                let created_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
+                let created_at = unix_now() as i64;
                 let allowed_json = None::<Vec<String>>;
                 let _ = conn.execute(
                     "INSERT OR IGNORE INTO api_keys (name, key_hash, key_prefix, created_at, allowed_namespaces) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -250,10 +249,7 @@ impl ApiKeyStore {
         let raw_key = generate_raw_key();
         let key_hash = hash_key(&raw_key);
         let key_prefix: String = raw_key.chars().take(KEY_PREFIX.len() + 8).collect();
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let created_at = unix_now() as i64;
 
         let allowed_json = allowed_namespaces
             .as_ref()

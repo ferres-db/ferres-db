@@ -2,6 +2,12 @@
 
 Notable changes to the project, grouped by week. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **fix(time): centraliza unix_now() e remove panics em clock skew** — Substitui o padrão `SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()` por helpers centralizados (`unix_now`, `unix_now_millis`, `unix_duration`) em `crates/core/src/time.rs` (re-exportado em `ferres_db_core::time`) e `crates/server/src/time.rs` (re-exportado a partir do core). Em vez de panic quando o relógio retrocede antes de `UNIX_EPOCH` (clock skew em VMs/containers), os helpers degradam para `0`/`Duration::ZERO`. Substitui ~45 ocorrências em core (`collection`, `point`, `reindex`, `storage`, `tiered`, `wal`, `lib`) e server (`api_keys`, `users`, `state`, `mcp`, `grpc`, `query_log_analytics`, handlers `auth`/`collections`/`points`/`streaming`/`reindex`). Unifica o helper local `unix_now()` em `handlers/streaming.rs` com o helper público.
+
 ## [Released] - 31/06/2026
 
 ### Added

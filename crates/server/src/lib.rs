@@ -16,6 +16,7 @@ pub mod query_logger;
 pub mod request_validation;
 pub mod routes;
 pub mod state;
+pub mod time;
 pub mod users;
 pub mod warmup;
 
