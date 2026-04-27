@@ -95,8 +95,8 @@ pub use tiered::{
 pub use time::{unix_duration, unix_now, unix_now_millis};
 pub use wal::{
     compact_wal_entries_older_than, list_restore_points, read_last_snapshot_timestamp,
-    recover_collection, recover_collection_to_timestamp, RestorePoints, Wal, WalConfig,
-    WalEntry, WalOperation,
+    recover_collection, recover_collection_to_timestamp, RestorePoints, Wal, WalConfig, WalEntry,
+    WalOperation,
 };
 
 #[cfg(feature = "rerank")]

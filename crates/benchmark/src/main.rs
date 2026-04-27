@@ -337,7 +337,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             readers,
             dim,
         } => {
-            run_chaos(client, *duration, *writers, *readers, *dim, cli.fsync_per_write).await?;
+            run_chaos(
+                client,
+                *duration,
+                *writers,
+                *readers,
+                *dim,
+                cli.fsync_per_write,
+            )
+            .await?;
         }
     }
 

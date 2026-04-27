@@ -176,10 +176,7 @@ impl Wal {
     /// Abre (ou cria) o WAL com configuração completa.
     ///
     /// Não faz replay — use `recover_collection()` para recuperação.
-    pub fn open_with_config(
-        collection_dir: &Path,
-        config: WalConfig,
-    ) -> Result<Self, FerresError> {
+    pub fn open_with_config(collection_dir: &Path, config: WalConfig) -> Result<Self, FerresError> {
         fs::create_dir_all(collection_dir).map_err(|e| {
             FerresError::Storage(format!(
                 "failed to create collection directory {}: {e}",
@@ -1006,10 +1003,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(
-            sync_count.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(wal.ops_since_fsync(), 0); // reset after fsync
     }
 
@@ -1034,18 +1028,12 @@ mod tests {
         }));
 
         wal.append_upsert(&make_point("p1", vec![1.0])).unwrap();
-        assert_eq!(
-            sync_count.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::Relaxed), 0);
 
         std::thread::sleep(Duration::from_millis(5));
 
         wal.append_upsert(&make_point("p2", vec![2.0])).unwrap();
-        assert_eq!(
-            sync_count.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
