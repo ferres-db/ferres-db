@@ -194,7 +194,8 @@ impl Collection {
         let index = create_ann_index(config.distance, config.hnsw.clone(), &config.quantization);
         let search_cache = if config.search_cache_size > 0 {
             Some(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(config.search_cache_size).unwrap(),
+                std::num::NonZeroUsize::new(config.search_cache_size)
+                    .expect("search_cache_size > 0 was checked in the enclosing if-guard"),
             )))
         } else {
             None
@@ -231,7 +232,8 @@ impl Collection {
     pub fn with_index(config: CollectionConfig, index: Box<dyn ANNIndex>) -> Self {
         let search_cache = if config.search_cache_size > 0 {
             Some(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(config.search_cache_size).unwrap(),
+                std::num::NonZeroUsize::new(config.search_cache_size)
+                    .expect("search_cache_size > 0 was checked in the enclosing if-guard"),
             )))
         } else {
             None
@@ -352,7 +354,10 @@ impl Collection {
             );
             self.vector_indices.insert(field.to_string(), idx);
         }
-        Ok(self.vector_indices.get_mut(field).unwrap())
+        Ok(self
+            .vector_indices
+            .get_mut(field)
+            .expect("field was just inserted into vector_indices on the line above"))
     }
 
     /// Invalida o cache de busca após mutação (insert/remove).
@@ -471,7 +476,10 @@ impl Collection {
                 .collect();
 
             if !validation_errors.is_empty() {
-                return Err(validation_errors.into_iter().next().unwrap());
+                return Err(validation_errors
+                    .into_iter()
+                    .next()
+                    .expect("validation_errors is non-empty — checked by the if-guard above"));
             }
             for point in &points {
                 self.validate_point_named_vectors(point)?;
@@ -700,7 +708,11 @@ impl Collection {
                 .entered();
                 match index_to_use {
                     None => self.index.search(query, k, None)?,
-                    Some(f) => self.vector_indices.get(f).unwrap().search(query, k, None)?,
+                    Some(f) => self
+                        .vector_indices
+                        .get(f)
+                        .expect("vector field validated by contains_key above")
+                        .search(query, k, None)?,
                 }
             };
 
@@ -723,7 +735,7 @@ impl Collection {
             Some(f) => self
                 .vector_indices
                 .get(f)
-                .unwrap()
+                .expect("vector field validated by contains_key above")
                 .search(query, k, predicate),
         }
     }
@@ -771,7 +783,7 @@ impl Collection {
             Some(f) => {
                 self.vector_indices
                     .get(f)
-                    .unwrap()
+                    .expect("vector field validated by contains_key above")
                     .search(query, k_candidates, predicate)?
             }
         };
@@ -830,7 +842,7 @@ impl Collection {
             Some(f) => self
                 .vector_indices
                 .get(f)
-                .unwrap()
+                .expect("vector field validated by contains_key above")
                 .search_explain(query, k, predicate),
         }
     }
