@@ -20,6 +20,7 @@ pub mod state;
 pub mod time;
 pub mod users;
 pub mod warmup;
+pub mod db;
 
 #[cfg(feature = "otel")]
 pub mod tracing_otel;

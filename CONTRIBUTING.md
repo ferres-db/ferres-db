@@ -134,6 +134,32 @@ cd crates/core
 cargo bench
 ```
 
+## SQLite Schema Migrations
+
+Schema changes for SQLite stores (api_keys, users, cloud_settings, llm_credentials) are managed through versioned migration slices in `crates/server/src/db/migrations.rs`.
+
+**To add a column or table:**
+
+1. Open `crates/server/src/db/migrations.rs`.
+2. Find the relevant `MIGRATIONS_*` slice for your store (e.g., `MIGRATIONS_USERS`).
+3. Append a new entry with `version = last_version + 1`:
+
+```rust
+Migration {
+    version: 4,
+    name: "users_add_last_login",
+    up: "ALTER TABLE users ADD COLUMN last_login INTEGER DEFAULT NULL",
+},
+```
+
+4. **Never edit or remove an existing migration** that may have already been applied in production. Only append new ones.
+5. Add a test for the new migration if it changes table structure.
+
+The `run_migrations` function in `db::migrations` handles:
+- Applying only pending migrations (skips already-applied ones via `schema_migrations` table)
+- Downgrade detection (returns an error if the DB schema version is ahead of the known migrations)
+- Baseline detection (existing databases without `schema_migrations` are baselied automatically on first run)
+
 ## Contribution flow
 
 1. **Issue** (recommended): Open an issue describing the change or fix.

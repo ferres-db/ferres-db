@@ -6,7 +6,7 @@ type: project
 
 # FerresDB — Architectural Decisions
 
-_All decisions below were originally documented in `docs/decisions.md`. This vault copy is the canonical reference. When adding new decisions, use the template in `valt/templates/decision.md` and also update `docs/decisions.md`. Last ADR: 022._
+_All decisions below were originally documented in `docs/decisions.md`. This vault copy is the canonical reference. When adding new decisions, use the template in `valt/templates/decision.md` and also update `docs/decisions.md`. Last ADR: 024._
 
 ---
 
@@ -375,6 +375,38 @@ helper do core (server depende de core; core não pode depender de server).
 - Five pre-existing `clippy -D warnings` errors in `crates/core` were fixed.
 - `unwrap_used` warnings serve as a living inventory for future hardening.
 - Concurrency stress tests added: N writers + M readers, 10s deadlock/starvation timeout.
+
+---
+
+---
+
+## ADR-024 — Versioned SQLite migrations via `db::migrations`
+
+**Date:** 2026-04-27
+**Status:** Accepted
+
+### Context
+Four SQLite stores (`api_keys`, `users`, `cloud_settings`, `llm_credentials`) each managed their own schema inline in `Store::new()` using `CREATE TABLE IF NOT EXISTS` + ad-hoc `ALTER TABLE` calls. With 2–3 columns this worked; with 10+ it would become untrackable, and schema drift between environments was silent — no version tracking, no downgrade detection.
+
+### Decision
+Replace all inline schema setup with a lightweight artisanal migration system in `crates/server/src/db/migrations.rs`:
+
+- `Migration { version: i64, name: &'static str, up: &'static str }` — one entry per schema change
+- `schema_migrations(version, name, applied_at)` table records applied versions per database file
+- `run_migrations(&conn, migrations)` applies only pending entries in version order, each in its own transaction
+- Downgrade detection: if `MAX(version)` in the DB exceeds the highest known migration, returns `MigrationError::DowngradeDetected`
+- Baseline detection: if `schema_migrations` is empty but other tables exist (existing DB with no migration history), marks all known migrations as applied without re-running
+- Each store retains its own `.db` file and its own `MIGRATIONS_*` slice — no shared schema file
+
+### Why not the alternatives
+- **`rusqlite_migration` crate:** adds a dependency for a problem solvable in ~100 lines; adds external API surface to track
+- **Shared single `metadata.db`:** all stores currently open separate files; merging would require a larger migration and couples stores unnecessarily
+
+### Consequences
+- Schema changes are versioned, auditable, and safe to replay on fresh databases
+- Downgrade of the binary on an upgraded database is detected at startup, not silently corrupted
+- Existing databases are automatically baselined on first run (no data loss)
+- Adding a column now requires a single append to a static slice — documented in CONTRIBUTING.md
 
 ---
 

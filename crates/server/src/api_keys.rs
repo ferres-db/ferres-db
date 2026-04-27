@@ -75,6 +75,8 @@ pub enum ApiKeyError {
     LockPoisoned,
     #[error("duplicate key name")]
     DuplicateName,
+    #[error("migration error: {0}")]
+    Migration(#[from] crate::db::migrations::MigrationError),
 }
 
 /// Metadados de uma API key (para validação de namespace no middleware).
@@ -102,35 +104,11 @@ pub struct ApiKeyStore {
 }
 
 impl ApiKeyStore {
-    /// Abre ou cria o banco em `path` e cria a tabela se não existir.
-    /// Adiciona a coluna `allowed_namespaces` se não existir (migração).
+    /// Opens or creates the database at `path` and runs all pending migrations.
     pub fn new(path: &Path) -> Result<Self, ApiKeyError> {
         std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();
         let conn = Connection::open(path)?;
-        conn.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS api_keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                key_hash TEXT NOT NULL UNIQUE,
-                key_prefix TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            )
-            "#,
-            [],
-        )?;
-        // Migração: adicionar coluna allowed_namespaces se não existir
-        let has_col: bool = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name = 'allowed_namespaces'",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_col {
-            conn.execute(
-                "ALTER TABLE api_keys ADD COLUMN allowed_namespaces TEXT",
-                [],
-            )?;
-        }
+        crate::db::migrations::run_migrations(&conn, crate::db::migrations::MIGRATIONS_API_KEYS)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

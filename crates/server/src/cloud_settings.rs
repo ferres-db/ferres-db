@@ -14,6 +14,8 @@ pub enum CloudSettingsError {
     Db(#[from] rusqlite::Error),
     #[error("lock poisoned")]
     LockPoisoned,
+    #[error("migration error: {0}")]
+    Migration(#[from] crate::db::migrations::MigrationError),
 }
 
 /// S3/cloud backup settings (stored in SQLite).
@@ -35,29 +37,13 @@ pub struct CloudSettingsStore {
 }
 
 impl CloudSettingsStore {
-    /// Opens or creates the DB at `path` and creates the table if missing.
+    /// Opens or creates the DB at `path` and runs all pending migrations.
     pub fn new(path: &Path) -> Result<Self, CloudSettingsError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = Connection::open(path)?;
-        conn.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS cloud_settings (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                region TEXT,
-                bucket TEXT,
-                endpoint TEXT,
-                access_key_id TEXT,
-                secret_access_key TEXT
-            );
-            INSERT OR IGNORE INTO cloud_settings (id, region, bucket, endpoint, access_key_id, secret_access_key)
-            VALUES (1, NULL, NULL, NULL, NULL, NULL);
-            "#,
-            [],
-        )?;
-        // Migration: add endpoint column if missing (existing DBs)
-        let _ = conn.execute("ALTER TABLE cloud_settings ADD COLUMN endpoint TEXT", []);
+        crate::db::migrations::run_migrations(&conn, crate::db::migrations::MIGRATIONS_CLOUD_SETTINGS)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

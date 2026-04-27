@@ -66,6 +66,8 @@ pub enum UserError {
     DuplicateUsername,
     #[error("invalid username")]
     InvalidUsername,
+    #[error("migration error: {0}")]
+    Migration(#[from] crate::db::migrations::MigrationError),
 }
 
 /// Informação de um usuário (sem senha).
@@ -102,32 +104,11 @@ pub struct UserStore {
 }
 
 impl UserStore {
-    /// Abre ou cria o banco em `path` e cria a tabela se não existir.
+    /// Opens or creates the database at `path` and runs all pending migrations.
     pub fn new(path: &Path) -> Result<Self, UserError> {
         std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();
         let conn = Connection::open(path)?;
-        conn.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'viewer',
-                created_at INTEGER NOT NULL
-            )
-            "#,
-            [],
-        )?;
-        // Migração: adicionar coluna role se a tabela já existia sem ela
-        let _ = conn.execute(
-            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'",
-            [],
-        );
-        // Migração: adicionar coluna permissions (JSON) para RBAC granular
-        let _ = conn.execute(
-            "ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT NULL",
-            [],
-        );
+        crate::db::migrations::run_migrations(&conn, crate::db::migrations::MIGRATIONS_USERS)?;
         let _ = conn.execute(
             "UPDATE users SET role = 'admin' WHERE username = ?1",
             [DEFAULT_USERNAME],
