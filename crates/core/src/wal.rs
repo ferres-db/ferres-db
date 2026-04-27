@@ -448,6 +448,33 @@ impl Wal {
             .flush()
             .map_err(|e| FerresError::Storage(format!("failed to flush WAL: {e}")))?;
 
+        // Durabilidade: sync_data() para persistir em disco
+        let needs_fsync = if self.config.fsync_per_write {
+            true
+        } else {
+            self.ops_since_fsync += 1;
+            self.ops_since_fsync >= self.config.fsync_every_n_ops
+                || self.last_fsync.elapsed() >= self.config.fsync_interval
+        };
+
+        if needs_fsync {
+            let sync_start = Instant::now();
+            self.writer
+                .as_ref()
+                .unwrap()
+                .get_ref()
+                .sync_data()
+                .map_err(|e| FerresError::Storage(format!("WAL fsync failed: {e}")))?;
+            let sync_duration = sync_start.elapsed();
+
+            self.ops_since_fsync = 0;
+            self.last_fsync = Instant::now();
+
+            if let Some(ref hook) = self.fsync_hook {
+                hook(sync_duration);
+            }
+        }
+
         Ok(())
     }
 
@@ -899,6 +926,152 @@ mod tests {
         assert!(!cfg.fsync_per_write);
         assert_eq!(cfg.fsync_interval, Duration::from_secs(1));
         assert_eq!(cfg.fsync_every_n_ops, 1000);
+    }
+
+    // ─── WAL Fsync Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn wal_fsync_per_write_durability() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("fsync_col");
+
+        let config = WalConfig {
+            fsync_per_write: true,
+            ..Default::default()
+        };
+
+        // Write entries with fsync enabled
+        {
+            let mut wal = Wal::open_with_config(&dir, config).unwrap();
+            wal.append_upsert(&make_point("p1", vec![1.0, 2.0, 3.0]))
+                .unwrap();
+            wal.append_upsert(&make_point("p2", vec![4.0, 5.0, 6.0]))
+                .unwrap();
+            wal.append_upsert(&make_point("p3", vec![7.0, 8.0, 9.0]))
+                .unwrap();
+            // Wal is dropped here — entries should be on disk
+        }
+
+        // Reopen and verify all entries present
+        let entries = Wal::read_entries(&dir).unwrap();
+        assert_eq!(entries.len(), 3);
+        match &entries[2].operation {
+            WalOperation::Upsert { point } => assert_eq!(point.id, "p3"),
+            _ => panic!("expected upsert"),
+        }
+    }
+
+    #[test]
+    fn wal_periodic_fsync_after_n_ops() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("periodic_col");
+
+        let sync_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sync_count_clone = sync_count.clone();
+
+        let config = WalConfig {
+            fsync_per_write: false,
+            fsync_every_n_ops: 5,
+            fsync_interval: Duration::from_secs(3600), // high — won't trigger
+            ..Default::default()
+        };
+
+        let mut wal = Wal::open_with_config(&dir, config).unwrap();
+        wal.set_fsync_hook(Box::new(move |_dur| {
+            sync_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        // Write 5 entries — should trigger exactly 1 fsync
+        for i in 0..5 {
+            wal.append_upsert(&make_point(&format!("p{i}"), vec![i as f32]))
+                .unwrap();
+        }
+
+        assert_eq!(
+            sync_count.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(wal.ops_since_fsync(), 0); // reset after fsync
+    }
+
+    #[test]
+    fn wal_periodic_fsync_after_interval() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("interval_col");
+
+        let sync_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sync_count_clone = sync_count.clone();
+
+        let config = WalConfig {
+            fsync_per_write: false,
+            fsync_every_n_ops: 10000, // high — won't trigger by count
+            fsync_interval: Duration::from_millis(1),
+            ..Default::default()
+        };
+
+        let mut wal = Wal::open_with_config(&dir, config).unwrap();
+        wal.set_fsync_hook(Box::new(move |_dur| {
+            sync_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        wal.append_upsert(&make_point("p1", vec![1.0])).unwrap();
+        assert_eq!(
+            sync_count.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        std::thread::sleep(Duration::from_millis(5));
+
+        wal.append_upsert(&make_point("p2", vec![2.0])).unwrap();
+        assert_eq!(
+            sync_count.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn wal_no_fsync_still_flushes_to_os() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("nofsync_col");
+
+        let config = WalConfig {
+            fsync_per_write: false,
+            fsync_every_n_ops: 10000,
+            fsync_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+
+        {
+            let mut wal = Wal::open_with_config(&dir, config).unwrap();
+            wal.append_upsert(&make_point("p1", vec![1.0, 2.0, 3.0]))
+                .unwrap();
+            wal.append_upsert(&make_point("p2", vec![4.0, 5.0, 6.0]))
+                .unwrap();
+            // BufWriter::flush() is called by append_entry, so data is in OS page cache
+        }
+
+        // Data is readable (it's in the OS page cache, flushed by BufWriter)
+        let entries = Wal::read_entries(&dir).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // NOTE: This test documents the trade-off. In a real kernel panic,
+        // data in the OS page cache but not on disk would be lost.
+        // With fsync_per_write=false, we trade durability for write throughput.
+    }
+
+    #[test]
+    fn wal_open_with_config_backward_compat() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("compat_col");
+
+        // Open with old API
+        let mut wal1 = Wal::open(&dir, 500, true).unwrap();
+        assert_eq!(wal1.ops_since_snapshot(), 0);
+
+        // Verify config matches
+        assert_eq!(wal1.config.snapshot_threshold, 500);
+        assert!(wal1.config.compress);
+        assert!(!wal1.config.fsync_per_write); // default — backward compat
     }
 
     // ─── WAL Unit Tests ───────────────────────────────────────────────
