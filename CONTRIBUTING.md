@@ -104,6 +104,31 @@ Pattern B is the project standard. Pattern A is used in gRPC handlers. Pattern C
 
 > **Never use explicit `drop(guard)` before an async call as a substitute for block scoping.** Block scoping is compiler-enforced; a missing `drop()` call introduces a bug silently.
 
+### Error handling
+
+- Use `?` or return `Result` for recoverable errors.
+- Use `.expect("clear reason")` for invariants that **cannot** fail — the message must explain *why* it cannot fail, not just what the value is.
+- **Never** use bare `.unwrap()` in production code (`src/`, `lib.rs`). Tests and benchmarks are exempt.
+- For lock poison: if the function returns `Result`, convert with `.map_err(|_| MyError::LockPoisoned)?`. If the function cannot return `Result`, use `.expect("which_lock poisoned — describe what that means")`.
+
+Examples:
+
+```rust
+// ✅ OK — message explains the invariant
+std::num::NonZeroUsize::new(cache_size)
+    .expect("cache_size > 0 was checked in the enclosing if-guard")
+
+// ✅ OK — lock poison, function can't return Result
+self.events.read()
+    .expect("events RwLock poisoned — a thread panicked while holding a write guard")
+
+// ✅ OK — lock poison, function returns Result
+conn.lock().map_err(|_| MyError::LockPoisoned)?
+
+// ❌ BAD — no context when this panics in production
+self.events.read().unwrap()
+```
+
 ## Testing
 
 ### Unit and integration (Rust)

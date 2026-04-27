@@ -60,7 +60,8 @@ jobs:
             -D warnings \
             -D clippy::await_holding_lock \
             -D clippy::await_holding_refcell_ref \
-            -W clippy::unwrap_used
+            -W clippy::unwrap_used \
+            -W clippy::expect_used
 
   rust-test:
     name: 🦀 Rust Tests
