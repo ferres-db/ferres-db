@@ -547,7 +547,7 @@ pub async fn search_points(
         let reranker_dim_ok = app_state
             .reranker
             .as_ref()
-            .map_or(false, |r| r.dimension() == cfg.dimension);
+            .is_some_and(|r| r.dimension() == cfg.dimension);
 
         {
             let span = tracing::Span::current();
@@ -672,7 +672,7 @@ pub async fn search_points(
                 let predicate = |id: &str| {
                     collection
                         .get(id)
-                        .map(|p| filter.matches_point(&p))
+                        .map(|p| filter.matches_point(p))
                         .unwrap_or(false)
                 };
                 collection.search_with_rerank(
@@ -695,7 +695,7 @@ pub async fn search_points(
                 let predicate = |id: &str| {
                     collection
                         .get(id)
-                        .map(|p| filter.matches_point(&p))
+                        .map(|p| filter.matches_point(p))
                         .unwrap_or(false)
                 };
                 collection

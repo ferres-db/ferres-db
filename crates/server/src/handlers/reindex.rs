@@ -422,7 +422,7 @@ pub async fn list_reindex_jobs(
     }
 
     // Sort by started_at descending (newest first)
-    jobs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    jobs.sort_by_key(|b| std::cmp::Reverse(b.started_at));
 
     Ok(Json(ListReindexJobsResponse { jobs }))
 }

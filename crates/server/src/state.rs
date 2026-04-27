@@ -148,7 +148,7 @@ impl GlobalQueryStats {
     /// Top N queries mais lentas (collection, latency_ms, timestamp_secs).
     pub fn top_slowest(&self, n: usize) -> Vec<GlobalQueryEvent> {
         let mut events = self.events_last_24h();
-        events.sort_by(|a, b| b.latency_ms.cmp(&a.latency_ms));
+        events.sort_by_key(|b| std::cmp::Reverse(b.latency_ms));
         events.into_iter().take(n).collect()
     }
 
@@ -300,6 +300,7 @@ impl ServerConfig {
     /// 1. Variáveis de ambiente (HOST, PORT, STORAGE_PATH, LOG_LEVEL)
     /// 2. Arquivo config.toml (se existir)
     /// 3. Valores padrão
+    ///
     /// Procura config.toml no diretório atual e em diretórios pais (para quando
     /// o servidor é iniciado de subpastas como dashboard/ ou crates/server/).
     fn find_config_path() -> Option<PathBuf> {
@@ -974,14 +975,12 @@ impl AppState {
             })?;
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if collection_name.map(|n| n == name).unwrap_or(true) && path.is_dir() {
-                if path.join("config.json").exists() {
-                    match list_restore_points(&path) {
-                        Ok(rp) => {
-                            out.insert(name, rp);
-                        }
-                        Err(_) => {}
-                    }
+            if collection_name.map(|n| n == name).unwrap_or(true)
+                && path.is_dir()
+                && path.join("config.json").exists()
+            {
+                if let Ok(rp) = list_restore_points(&path) {
+                    out.insert(name, rp);
                 }
             }
         }

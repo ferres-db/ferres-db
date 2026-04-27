@@ -73,6 +73,7 @@ fn create_tar_gz(src_path: &Path) -> Result<Vec<u8>, std::io::Error> {
 
 /// Resolve S3 settings: cloud_settings_store (SQLite) first, then config (env/toml).
 /// Returns (region, bucket, endpoint, access_key_id, secret_access_key).
+#[allow(clippy::type_complexity)]
 pub fn resolve_s3_settings(
     app_state: &AppState,
 ) -> (

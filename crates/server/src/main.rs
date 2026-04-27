@@ -183,11 +183,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("FerresDB server starting...");
 
-    if config
-        .api_keys
-        .as_ref()
-        .map_or(true, |s| s.trim().is_empty())
-    {
+    if config.api_keys.as_ref().is_none_or(|s| s.trim().is_empty()) {
         warn!(
             "No API keys configured. Set api_keys in config.toml or FERRESDB_API_KEYS env; \
              all protected routes will return 403 Invalid API key."
@@ -483,7 +479,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if origins.is_empty() {
                 tower_http::cors::AllowOrigin::predicate(
                     |origin: &HeaderValue, _: &RequestParts| {
-                        origin.to_str().map_or(false, |s| {
+                        origin.to_str().is_ok_and(|s| {
                             s.starts_with("http://localhost:") || s.starts_with("http://127.0.0.1:")
                         })
                     },
@@ -494,7 +490,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(_) => {
             tower_http::cors::AllowOrigin::predicate(|origin: &HeaderValue, _: &RequestParts| {
-                origin.to_str().map_or(false, |s| {
+                origin.to_str().is_ok_and(|s| {
                     s.starts_with("http://localhost:") || s.starts_with("http://127.0.0.1:")
                 })
             })
