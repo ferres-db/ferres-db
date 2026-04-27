@@ -6,7 +6,7 @@ type: project
 
 # FerresDB — Architectural Decisions
 
-_All decisions below were originally documented in `docs/decisions.md`. This vault copy is the canonical reference. When adding new decisions, use the template in `valt/templates/decision.md` and also update `docs/decisions.md`. Last ADR: 024._
+_All decisions below were originally documented in `docs/decisions.md`. This vault copy is the canonical reference. When adding new decisions, use the template in `valt/templates/decision.md` and also update `docs/decisions.md`. Last ADR: 025._
 
 ---
 
@@ -416,3 +416,25 @@ Replace all inline schema setup with a lightweight artisanal migration system in
 - [[hnsw-is-approximate-by-design]] — learning: ADR-018 em detalhe
 - [[tiered-storage-breaks-points-len-assumption]] — learning: ADR-016 em detalhe
 - [[tokio-stack-size-for-hnsw]] — learning: ADR-017 em detalhe
+
+---
+
+## ADR-025 — Unwrap Hardening: replace `.unwrap()` with `.expect("reason")` in production code
+
+**Date:** 2026-04-27
+**Status:** Accepted
+
+### Context
+Production `unwrap()` calls produce panics with "called Option::unwrap() on a None value" — no context about which invariant was violated. 19 silent `unwrap()` calls existed across `crates/core` and `crates/server`. CI already warned on `clippy::unwrap_used` (added in ADR-023) but had not yet been actioned.
+
+### Decision
+1. Every production `unwrap()` replaced with `expect("reason")` explaining the invariant.
+2. Lock-poison sites use `expect("which lock, what that means")` when the function cannot return `Result`; use `.map_err(|_| E::LockPoisoned)?` when it can (already done in `api_keys`, `users`, `cloud_settings`, `llm_credentials`).
+3. Tests and benchmarks keep bare `unwrap()` — exempt by convention.
+4. CI gains `-W clippy::expect_used` alongside the existing `-W clippy::unwrap_used`.
+5. CONTRIBUTING.md documents the rule and lock-poison patterns.
+
+### Consequences
+- Panics in production now carry actionable context (which invariant, why it should hold).
+- The living `-W clippy::expect_used` inventory makes future `?`-propagation refactors easy to identify.
+- No behaviour changes — all modifications are purely diagnostic.
