@@ -10,6 +10,8 @@ pub mod debug;
 pub mod graph;
 pub mod health;
 pub mod keys;
+pub mod llm_credentials;
+pub mod llm_proxy;
 pub mod metrics;
 pub mod points;
 pub mod reindex;

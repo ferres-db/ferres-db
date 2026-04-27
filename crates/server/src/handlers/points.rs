@@ -19,6 +19,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::permissions::{merge_restriction_filter, Action, PermissionResult};
 use crate::request_validation;
 use crate::state::{AppState, QueryPhase, QueryProfile, QUERY_PROFILES_CAP};
+use crate::time::unix_now;
 
 // ─── Request/Response Types ──────────────────────────────────────────────
 
@@ -299,10 +300,7 @@ pub async fn upsert_points(
                 Ok(mut point) => {
                     point.namespace = input.namespace;
                     if let Some(ttl) = input.ttl {
-                        let now_secs = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .expect("system clock before UNIX epoch")
-                            .as_secs();
+                        let now_secs = unix_now();
                         point.expires_at = Some(now_secs.saturating_add(ttl));
                     }
                     points.push(point);
@@ -341,10 +339,7 @@ pub async fn upsert_points(
 
     // Emite evento no broadcast channel para subscribers WebSocket
     if upserted > 0 {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now_secs = unix_now();
         app_state.record_ingest(now_secs, upserted as u64);
         // Coleta IDs dos pontos inseridos com sucesso
         // (todos os que não estão em batch_failed)
@@ -448,10 +443,7 @@ pub async fn delete_points(
             collection: name.clone(),
             action: "delete".to_string(),
             point_ids: deleted_ids,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: unix_now(),
         };
         app_state.emit_event(event);
 

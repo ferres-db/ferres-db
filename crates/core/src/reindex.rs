@@ -28,10 +28,11 @@
 //! `collection.total_indexed_len()` if available).
 
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tracing::debug;
+
+use crate::time::unix_now;
 
 use crate::collection::CollectionConfig;
 use crate::error::FerresError;
@@ -104,10 +105,7 @@ pub struct ReindexJob {
 impl ReindexJob {
     /// Create a new reindex job in Queued status.
     pub fn new(id: String, collection: String) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         Self {
             id,
             collection,
@@ -240,10 +238,7 @@ pub fn estimate_index_size(num_points: usize, dimension: usize, m: usize) -> usi
 // ─── Helpers ────────────────────────────────────────────────────────
 
 fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    unix_now()
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────

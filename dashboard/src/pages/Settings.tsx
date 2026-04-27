@@ -1,12 +1,34 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getStoredRole } from '@/api/ferresdb';
-import { backupApi, collectionsApi, settingsApi, type CloudSettings } from '@/api/ferresdb';
+import {
+  backupApi,
+  collectionsApi,
+  llmCredentialsApi,
+  settingsApi,
+  type CloudSettings,
+  type LlmProvider,
+  type LlmProviderStatus,
+} from '@/api/ferresdb';
 import type { Collection } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { CloudUpload, Database, Settings as SettingsIcon } from 'lucide-react';
+import { CloudUpload, Database, KeyRound, Settings as SettingsIcon } from 'lucide-react';
+
+const LLM_PROVIDERS: LlmProvider[] = ['openai', 'anthropic', 'gemini'];
+
+const LLM_PROVIDER_LABELS: Record<LlmProvider, string> = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  gemini: 'Google Gemini',
+};
+
+const LLM_ENV_VARS: Record<LlmProvider, string> = {
+  openai: 'FERRESDB_OPENAI_API_KEY',
+  anthropic: 'FERRESDB_ANTHROPIC_API_KEY',
+  gemini: 'FERRESDB_GEMINI_API_KEY',
+};
 
 export const Settings = () => {
   const navigate = useNavigate();
@@ -32,6 +54,17 @@ export const Settings = () => {
   const [retentionSaving, setRetentionSaving] = useState<string | null>(null);
   const [retentionValues, setRetentionValues] = useState<Record<string, string>>({});
   const [retentionMessage, setRetentionMessage] = useState<string | null>(null);
+
+  // LLM credentials (Admin) — chaves nunca voltam do servidor; só status configured/source.
+  const [llmStatus, setLlmStatus] = useState<LlmProviderStatus[]>([]);
+  const [llmLoading, setLlmLoading] = useState(true);
+  const [llmInputs, setLlmInputs] = useState<Record<LlmProvider, string>>({
+    openai: '',
+    anthropic: '',
+    gemini: '',
+  });
+  const [llmSaving, setLlmSaving] = useState<LlmProvider | null>(null);
+  const [llmMessage, setLlmMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (role !== 'admin') navigate('/', { replace: true });
@@ -83,6 +116,86 @@ export const Settings = () => {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLlmLoading(true);
+      try {
+        const list = await llmCredentialsApi.list();
+        if (!cancelled) setLlmStatus(list);
+      } catch {
+        if (!cancelled) setLlmStatus([]);
+      } finally {
+        if (!cancelled) setLlmLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshLlmStatus = async () => {
+    try {
+      const list = await llmCredentialsApi.list();
+      setLlmStatus(list);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSaveLlmKey = async (provider: LlmProvider) => {
+    const apiKey = (llmInputs[provider] ?? '').trim();
+    if (!apiKey) {
+      setLlmMessage({ ok: false, text: `Enter an API key for ${LLM_PROVIDER_LABELS[provider]}.` });
+      return;
+    }
+    setLlmMessage(null);
+    setLlmSaving(provider);
+    try {
+      await llmCredentialsApi.put(provider, apiKey);
+      setLlmInputs((prev) => ({ ...prev, [provider]: '' }));
+      setLlmMessage({
+        ok: true,
+        text: `${LLM_PROVIDER_LABELS[provider]} API key saved on the server.`,
+      });
+      await refreshLlmStatus();
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === 'object' && 'response' in err
+          ? (err as { response?: { data?: { message?: string } } }).response?.data?.message
+          : err instanceof Error
+            ? err.message
+            : 'Failed to save key';
+      setLlmMessage({ ok: false, text: String(msg) });
+    } finally {
+      setLlmSaving(null);
+    }
+  };
+
+  const handleDeleteLlmKey = async (provider: LlmProvider) => {
+    if (!window.confirm(`Remove ${LLM_PROVIDER_LABELS[provider]} key from the server?`)) return;
+    setLlmMessage(null);
+    setLlmSaving(provider);
+    try {
+      await llmCredentialsApi.delete(provider);
+      setLlmMessage({
+        ok: true,
+        text: `${LLM_PROVIDER_LABELS[provider]} key removed.`,
+      });
+      await refreshLlmStatus();
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === 'object' && 'response' in err
+          ? (err as { response?: { data?: { message?: string } } }).response?.data?.message
+          : err instanceof Error
+            ? err.message
+            : 'Failed to delete key';
+      setLlmMessage({ ok: false, text: String(msg) });
+    } finally {
+      setLlmSaving(null);
+    }
+  };
 
   const handleSaveRetention = async (name: string) => {
     setRetentionMessage(null);
@@ -269,6 +382,110 @@ export const Settings = () => {
                 </p>
               )}
             </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <KeyRound className="h-5 w-5" />
+            LLM Credentials
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-gray-400">
+            API keys for the LLM proxy (<span className="font-mono">POST /api/v1/llm/complete</span>
+            ). The server uses these keys to call OpenAI, Anthropic and Google Gemini server-side —
+            keys never reach the browser. You can also configure each key via the environment
+            variables{' '}
+            <span className="font-mono">FERRESDB_OPENAI_API_KEY</span>,{' '}
+            <span className="font-mono">FERRESDB_ANTHROPIC_API_KEY</span>,{' '}
+            <span className="font-mono">FERRESDB_GEMINI_API_KEY</span> (env takes precedence over
+            DB).
+          </p>
+          {llmLoading ? (
+            <p className="text-sm text-gray-500">Loading…</p>
+          ) : (
+            <div className="space-y-3 max-w-2xl">
+              {LLM_PROVIDERS.map((p) => {
+                const status =
+                  llmStatus.find((s) => s.provider === p) ?? {
+                    provider: p,
+                    configured: false,
+                  };
+                const sourceLabel = status.source === 'env'
+                  ? 'env var'
+                  : status.source === 'db'
+                    ? 'database'
+                    : 'not configured';
+                return (
+                  <div
+                    key={p}
+                    className="flex flex-wrap items-center gap-2 border border-bg-tertiary rounded-md p-3"
+                  >
+                    <div className="min-w-[140px]">
+                      <p className="text-sm font-medium text-gray-200">
+                        {LLM_PROVIDER_LABELS[p]}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        Status:{' '}
+                        <span
+                          className={
+                            status.configured ? 'text-green-400' : 'text-amber-400'
+                          }
+                        >
+                          {status.configured ? 'configured' : 'missing'}
+                        </span>{' '}
+                        ({sourceLabel})
+                      </p>
+                      <p className="text-[10px] text-gray-500 font-mono">{LLM_ENV_VARS[p]}</p>
+                    </div>
+                    <Input
+                      type="password"
+                      autoComplete="off"
+                      placeholder={
+                        status.source === 'env'
+                          ? 'Configured via env var (DB save will be ignored)'
+                          : 'Paste API key to save'
+                      }
+                      value={llmInputs[p] ?? ''}
+                      onChange={(e) =>
+                        setLlmInputs((prev) => ({ ...prev, [p]: e.target.value }))
+                      }
+                      className="flex-1 min-w-[220px]"
+                    />
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={llmSaving !== null || !llmInputs[p]?.trim()}
+                      onClick={() => handleSaveLlmKey(p)}
+                    >
+                      {llmSaving === p ? 'Saving…' : 'Save'}
+                    </Button>
+                    {status.source === 'db' && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={llmSaving !== null}
+                        onClick={() => handleDeleteLlmKey(p)}
+                      >
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+              {llmMessage && (
+                <p
+                  className={`text-sm ${
+                    llmMessage.ok ? 'text-green-400' : 'text-amber-400'
+                  }`}
+                >
+                  {llmMessage.text}
+                </p>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>

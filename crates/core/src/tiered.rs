@@ -19,10 +19,12 @@ use std::fs;
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use memmap2::Mmap;
 use rayon::prelude::*;
+
+use crate::time::unix_now;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -126,10 +128,7 @@ impl AccessTracker {
 
     /// Registra um acesso ao ponto.
     pub fn record_access(&mut self, id: &str) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         self.last_access.insert(id.to_string(), now);
         *self.access_count.entry(id.to_string()).or_insert(0) += 1;
     }
@@ -142,10 +141,7 @@ impl AccessTracker {
 
     /// Determina o tier ideal para um ponto baseado no último acesso.
     pub fn get_tier(&self, id: &str, config: &TieredStorageConfig) -> StorageTier {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         self.get_tier_at(id, config, now)
     }
 
@@ -176,10 +172,7 @@ impl AccessTracker {
         config: &TieredStorageConfig,
         current_tiers: &HashMap<String, StorageTier>,
     ) -> Vec<(String, StorageTier)> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         self.points_to_demote_at(config, current_tiers, now)
     }
 
@@ -762,10 +755,7 @@ impl TieredCollection {
         // Todos os pontos existentes começam como HOT
         let mut point_tiers = HashMap::new();
         let mut tracker = AccessTracker::new();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
 
         for point in collection.points_owned() {
             point_tiers.insert(point.id.clone(), StorageTier::Hot);
@@ -1237,10 +1227,7 @@ impl TieredCollection {
             (tiers_vec, last_access_snapshot, self.config.clone())
         };
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
 
         // Cálculo paralelo de points_to_demote
         let changes: Vec<(String, StorageTier)> = tiers_vec
@@ -1535,10 +1522,7 @@ mod tests {
         let mut tracker = AccessTracker::new();
         let config = tiered_config();
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
 
         // Ponto acessado agora → Hot
         tracker.record_access_at("p1", now);
@@ -1575,10 +1559,7 @@ mod tests {
         let mut tracker = AccessTracker::new();
         let config = tiered_config();
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
 
         // Simula: p1 acessado recentemente, p2 há 30 horas, p3 há 200 horas
         tracker.record_access_at("p1", now);
@@ -2151,10 +2132,7 @@ mod tests {
         tc.insert(make_point("old", vec![0.0, 1.0, 0.0])).unwrap();
 
         // Simula que "old" foi acessado há 2 horas (> hot_threshold=1, < warm_threshold=5)
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         if let Ok(mut tracker) = tc.access_tracker.lock() {
             tracker.record_access_at("old", now - 2 * 3600);
         }
@@ -2194,10 +2172,7 @@ mod tests {
             tc.insert(make_point(&format!("p{i}"), vec)).unwrap();
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
 
         // Simula acessos variados: 0..300 recentes (Hot), 300..700 há 2 dias (Warm), 700..1000 há 10 dias (Cold)
         if let Ok(mut tracker) = tc.access_tracker.lock() {

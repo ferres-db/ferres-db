@@ -19,6 +19,7 @@ use crate::request_validation::{
     validate_search_limit, validate_vector_dimension, MAX_POINTS_PER_BATCH, MAX_VECTOR_DIM,
 };
 use crate::state::AppState;
+use crate::time::unix_now;
 
 const TOOL_SEARCH_POINTS: &str = "search_points";
 const TOOL_UPSERT_POINTS: &str = "upsert_points";
@@ -306,10 +307,7 @@ async fn do_upsert_points(
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 if let Some(ttl) = obj.get("ttl").and_then(|v| v.as_u64()) {
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
+                    let now_secs = unix_now();
                     point.expires_at = Some(now_secs.saturating_add(ttl));
                 }
                 point
@@ -338,10 +336,7 @@ async fn do_upsert_points(
     };
 
     if upserted > 0 {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now_secs = unix_now();
         app_state.record_ingest(now_secs, upserted as u64);
     }
 

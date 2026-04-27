@@ -24,10 +24,11 @@
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
+
+use crate::time::unix_now;
 
 /// Magic bytes no início do WAL quando compressão Zstd está ativa.
 const WAL_ZSTD_MAGIC: &[u8; 4] = b"WALz";
@@ -793,10 +794,7 @@ pub struct RestorePoints {
 
 /// Helper: timestamp Unix atual em segundos.
 fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs()
+    unix_now()
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────

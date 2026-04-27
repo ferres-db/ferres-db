@@ -23,8 +23,10 @@ use ferres_db_core::{
 use crate::api_keys::ApiKeyStore;
 use crate::audit::AuditLogger;
 use crate::cloud_settings::CloudSettingsStore;
+use crate::llm_credentials::LlmCredentialsStore;
 use crate::query_log_analytics::{avg_points_per_second_10m, QueryLogCache};
 use crate::query_logger::QueryLogger;
+use crate::time::unix_now;
 use crate::users::UserStore;
 
 // ─── GlobalQueryStats (dashboard: queries/min, top slow, histogram) ────────
@@ -106,10 +108,7 @@ impl GlobalQueryStats {
 
     /// Registra uma query (chamado após cada busca). Non-blocking fire-and-forget.
     pub fn record(&self, collection: &str, latency_ms: u64) {
-        let timestamp_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp_secs = unix_now();
         let event = GlobalQueryEvent {
             timestamp_secs,
             latency_ms,
@@ -123,10 +122,7 @@ impl GlobalQueryStats {
 
     /// Retorna eventos das últimas 24 horas.
     fn events_last_24h(&self) -> Vec<GlobalQueryEvent> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now_secs = unix_now();
         let cutoff = now_secs.saturating_sub(24 * 3600);
         let events = self.events.read().unwrap();
         events
@@ -565,6 +561,8 @@ pub struct AppState {
     pub user_store: Option<Arc<UserStore>>,
     /// Cloud (S3) backup settings from dashboard (SQLite). Overrides config when set.
     pub cloud_settings_store: Option<Arc<CloudSettingsStore>>,
+    /// LLM provider API keys (SQLite). Used by the server-side LLM proxy.
+    pub llm_credentials_store: Option<Arc<LlmCredentialsStore>>,
     /// Logger de auditoria (append-only JSONL, rotação diária).
     pub audit_logger: Arc<AuditLogger>,
     /// Broadcast channels para eventos de collection (streaming subscribers).
@@ -600,6 +598,7 @@ impl AppState {
         api_key_store: Option<Arc<ApiKeyStore>>,
         user_store: Option<Arc<UserStore>>,
         cloud_settings_store: Option<Arc<CloudSettingsStore>>,
+        llm_credentials_store: Option<Arc<LlmCredentialsStore>>,
         reranker: Option<Arc<dyn ferres_db_core::Reranker>>,
     ) -> Result<Self, ferres_db_core::FerresError> {
         info!(
@@ -712,6 +711,7 @@ impl AppState {
             api_key_store,
             user_store,
             cloud_settings_store,
+            llm_credentials_store,
             audit_logger,
             event_channels,
             ws_connections_active: Arc::new(AtomicU64::new(0)),
@@ -738,10 +738,7 @@ impl AppState {
         };
         events.push((timestamp_sec, points_count));
         const TEN_MIN: u64 = 10 * 60;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         let cutoff = now.saturating_sub(TEN_MIN);
         events.retain(|(ts, _)| *ts >= cutoff);
         if events.len() > 2000 {
@@ -752,10 +749,7 @@ impl AppState {
 
     /// Eventos de ingestão das últimas 10 minutos: (timestamp_sec, points_count).
     pub fn get_ingest_events_10m(&self) -> Vec<(u64, u64)> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         let cutoff = now.saturating_sub(10 * 60);
         let events = match self.ingest_events.read() {
             Ok(g) => g,

@@ -28,7 +28,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -39,6 +38,7 @@ use crate::point::Point;
 use crate::quantization::QuantizationConfig;
 use crate::search::{DistanceMetric, HnswConfig};
 use crate::tiered::{TierMetadata, TieredStorageConfig};
+use crate::time::unix_now;
 
 // ─── StorageCircuitBreaker ─────────────────────────────────────────────
 
@@ -114,10 +114,7 @@ impl StorageCircuitBreaker {
 
     fn should_attempt_reset(&self) -> bool {
         let last = self.last_failure.load(Ordering::Acquire);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         last.saturating_add(self.reset_timeout_secs) <= now
     }
 
@@ -128,10 +125,7 @@ impl StorageCircuitBreaker {
 
     fn on_failure(&self) {
         let prev = self.failure_count.fetch_add(1, Ordering::AcqRel);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
         self.last_failure.store(now, Ordering::Release);
 
         if prev + 1 >= self.failure_threshold {
@@ -450,10 +444,7 @@ impl FileStorage {
         Self::atomic_write(&path.join("config.json"), config_json.as_bytes())?;
 
         // 1b. last_snapshot_timestamp (for PITR: restore to a point in time)
-        let snapshot_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_secs();
+        let snapshot_ts = unix_now();
         Self::atomic_write(
             &path.join("last_snapshot_timestamp"),
             snapshot_ts.to_string().as_bytes(),

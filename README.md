@@ -171,6 +171,20 @@ curl -H "Authorization: Bearer sk-dev-abc123" \
 - All `/api/v1/collections/*`
 - All `/api/v1/points/*`
 - `POST /api/v1/save`
+- `POST /api/v1/llm/complete` (LLM proxy — Editor or Admin)
+- `*/api/v1/admin/*` (Admin)
+
+### LLM Proxy keys
+
+The dashboard's Query Tester runs RAG flows against OpenAI / Anthropic / Gemini through a server-side proxy so provider keys never reach the browser. Configure them via env (preferred) or via the dashboard `Settings → LLM Credentials` (Admin):
+
+```bash
+export FERRESDB_OPENAI_API_KEY="sk-..."
+export FERRESDB_ANTHROPIC_API_KEY="sk-ant-..."
+export FERRESDB_GEMINI_API_KEY="AIza..."
+```
+
+Env vars take precedence over the DB. See `docs/api.md` (section **LLM Proxy**) for the request/response schema.
 
 ## Benchmarks
 

@@ -667,6 +667,68 @@ export const restoreApi = {
   },
 };
 
+// LLM Proxy API — chama POST /api/v1/llm/complete (server-side proxy para
+// OpenAI/Anthropic/Gemini). As credenciais ficam no servidor; o navegador
+// nunca recebe nem envia chaves de provedor.
+export type LlmProvider = "openai" | "anthropic" | "gemini";
+
+export interface LlmCompleteRequest {
+  provider: LlmProvider;
+  model: string;
+  prompt: string;
+  maxTokens?: number;
+  temperature?: number;
+}
+
+export interface LlmCompleteResponse {
+  text: string;
+  usage?: { input_tokens: number; output_tokens: number };
+}
+
+export const llmApi = {
+  complete: async (params: LlmCompleteRequest): Promise<LlmCompleteResponse> => {
+    const response = await apiClient.post<LlmCompleteResponse>(
+      "/api/v1/llm/complete",
+      {
+        provider: params.provider,
+        model: params.model,
+        prompt: params.prompt,
+        max_tokens: params.maxTokens,
+        temperature: params.temperature,
+      },
+    );
+    return response.data;
+  },
+};
+
+// LLM Credentials Admin API — gerencia chaves dos provedores no servidor.
+// GET nunca retorna a chave; apenas o status `configured` e a `source` (env|db).
+export interface LlmProviderStatus {
+  provider: LlmProvider;
+  configured: boolean;
+  source?: "env" | "db";
+  updated_at?: number;
+}
+
+export const llmCredentialsApi = {
+  list: async (): Promise<LlmProviderStatus[]> => {
+    const response = await apiClient.get<{ providers: LlmProviderStatus[] }>(
+      "/api/v1/admin/llm-credentials",
+    );
+    return Array.isArray(response.data?.providers) ? response.data.providers : [];
+  },
+
+  put: async (provider: LlmProvider, apiKey: string): Promise<void> => {
+    await apiClient.put(`/api/v1/admin/llm-credentials/${provider}`, {
+      api_key: apiKey,
+    });
+  },
+
+  delete: async (provider: LlmProvider): Promise<void> => {
+    await apiClient.delete(`/api/v1/admin/llm-credentials/${provider}`);
+  },
+};
+
 // WebSocket URL helper
 export function getWsUrl(token?: string): string {
   const base = API_BASE_URL || window.location.origin;
