@@ -365,7 +365,9 @@ impl WarmStorage {
         let vector: Vec<f32> = bytes
             .chunks_exact(4)
             .map(|chunk| {
-                let arr: [u8; 4] = chunk.try_into().unwrap();
+                let arr: [u8; 4] = chunk
+                    .try_into()
+                    .expect("chunks_exact(4) guarantees a 4-byte slice");
                 f32::from_le_bytes(arr)
             })
             .collect();
@@ -643,7 +645,8 @@ impl ColdStorage {
                 // percent-encode: '/' -> "%2F", ':' -> "%3A", etc.
                 for byte in c.to_string().as_bytes() {
                     use std::fmt::Write;
-                    write!(&mut safe, "%{byte:02X}").unwrap();
+                    write!(&mut safe, "%{byte:02X}")
+                        .expect("writing percent-encoding to String is infallible");
                 }
             }
         }
@@ -1304,7 +1307,10 @@ impl TieredCollection {
     /// Retorna a distribuição de pontos por tier.
     pub fn tier_distribution(&self) -> TierDistribution {
         let dimension = self.collection.config().dimension;
-        let tiers = self.point_tiers.read().unwrap();
+        let tiers = self
+            .point_tiers
+            .read()
+            .expect("point_tiers RwLock poisoned — a thread panicked while holding a write guard");
 
         let mut hot = 0usize;
         let mut warm = 0usize;
@@ -1456,7 +1462,10 @@ impl TierMetadata {
     pub fn from_tiered_collection(tc: &TieredCollection) -> Self {
         let point_tiers = tc.point_tiers.read().map(|t| t.clone()).unwrap_or_default();
 
-        let tracker = tc.access_tracker.lock().unwrap();
+        let tracker = tc
+            .access_tracker
+            .lock()
+            .expect("access_tracker Mutex poisoned — a thread panicked while holding the guard");
         let mut last_access = HashMap::new();
         let mut access_count = HashMap::new();
 
