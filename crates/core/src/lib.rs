@@ -709,7 +709,10 @@ impl VectorDB {
                     .collect();
 
                 if !validation_errors.is_empty() {
-                    return Err(validation_errors.into_iter().next().unwrap());
+                    return Err(validation_errors
+                        .into_iter()
+                        .next()
+                        .expect("validation_errors is non-empty — checked by the if-guard above"));
                 }
 
                 // Para métrica Cosine, normaliza vetores em paralelo
