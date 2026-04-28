@@ -229,8 +229,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     let shutdown_signal = async {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate())
+            .unwrap_or_else(|e| unreachable!("failed to install SIGTERM handler: {e}"));
+        let mut sigint = signal(SignalKind::interrupt())
+            .unwrap_or_else(|e| unreachable!("failed to install SIGINT handler: {e}"));
         tokio::select! {
             _ = sigterm.recv() => { info!("received SIGTERM") }
             _ = sigint.recv() => { info!("received SIGINT") }
