@@ -1004,7 +1004,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
     } else {
         let predicate = |id: &str| {
             coll.get(id)
-                .map(|p| filter.matches_point(&p))
+                .map(|p| filter.matches_point(p))
                 .unwrap_or(false)
         };
         coll.search(&req.vector, req.limit as usize, Some(&predicate), None)
@@ -1033,7 +1033,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
     state
         .query_stats
         .entry(req.collection.clone())
-        .or_insert_with(|| crate::state::QueryStats::new())
+        .or_insert_with(crate::state::QueryStats::new)
         .record_query(took_ms);
     state.global_query_stats.record(&req.collection, took_ms);
 
