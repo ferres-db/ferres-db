@@ -2,12 +2,17 @@
 
 use axum::{routing::get, Router};
 
-use crate::handlers::health::health_check;
+use crate::handlers::health::{health_check, ready_check};
 use crate::state::AppState;
 
 /// Cria as rotas de health check (públicas, sem autenticação).
+///
+/// - `GET /health` — liveness (barato, usado pelo Dockerfile HEALTHCHECK e livenessProbe).
+/// - `GET /ready`  — readiness (toca locks e disco, usado pela readinessProbe e load balancer).
 pub fn create_health_routes() -> Router<AppState> {
-    Router::new().route("/health", get(health_check))
+    Router::new()
+        .route("/health", get(health_check))
+        .route("/ready", get(ready_check))
 }
 
 /// Cria a rota de save (protegida, requer API key).

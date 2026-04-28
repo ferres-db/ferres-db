@@ -6,7 +6,7 @@ type: project
 
 # FerresDB — Architectural Decisions
 
-_All decisions below were originally documented in `docs/decisions.md`. This vault copy is the canonical reference. When adding new decisions, use the template in `valt/templates/decision.md` and also update `docs/decisions.md`. Last ADR: 026._
+_All decisions below were originally documented in `docs/decisions.md`. This vault copy is the canonical reference. When adding new decisions, use the template in `valt/templates/decision.md` and also update `docs/decisions.md`. Last ADR: 027._
 
 ---
 
@@ -497,3 +497,25 @@ Files changed: `collection.rs` (8 sites), `search.rs` (1 site), `tiered.rs` (4 s
 - 242 unit tests still pass.
 - Lock-poison sites now recover gracefully via `into_inner()` instead of panicking, which is strictly more robust.
 - No semantic behaviour change for the normal (non-poisoned) code paths.
+
+---
+
+## ADR-027 — Server-side embedding proxy; browser never handles provider keys
+
+### Status
+Accepted — 2026-04-28
+
+### Context
+The QueryTester and Embedding Studio previously called OpenAI and Gemini embedding APIs directly from the browser, requiring the user to paste an API key into a password input on every session. This exposed credentials in browser memory, network requests, and developer tools. The LLM completion proxy (ADR introduced with the llm_proxy feature) already solved this for text generation; embeddings were the remaining gap.
+
+### Decision
+Add `POST /api/v1/llm/embed` (Editor+ role) that proxies embedding calls to OpenAI `/v1/embeddings` and Gemini `embedContent` / `batchEmbedContents` using credentials from the existing `LlmCredentialsStore` (SQLite). Remove the "Embedding API Key" password input from all dashboard pages (QueryTester, SingleEmbed, BatchEmbed, Pipeline). If no key is configured, the endpoint returns 503 with a clear message pointing to Settings → LLM Credentials.
+
+As part of the same change, apply `reqwest::Error::without_url()` in `From<reqwest::Error> for ProxyError` to strip `?key=` query params from Gemini error strings before they reach logs or 502 response bodies.
+
+### Consequences
+- Browser never handles any provider API key; all credentials stay server-side.
+- Single credential store (SQLite) used for both completions and embeddings.
+- 503 with actionable message when provider is not configured, instead of silent failure.
+- `useEmbedding.ts` no longer calls external APIs; `apiKey` parameter removed from `embed()` / `embedBatch()`.
+- Gemini API key no longer leaks via `reqwest::Error::to_string()` in network error paths.

@@ -249,49 +249,63 @@ fn otel_trace_id(span: &tracing::Span) -> Option<String> {
 
 // ─── Rate Limiting por Coleção ────────────────────────────────────────────
 
-/// Extrator de chave baseado no nome da coleção da rota.
+/// Extrator de chave baseado em IP do cliente + nome da coleção.
 ///
-/// Extrai o nome da coleção do path da URL (formato: /api/v1/collections/{name}/...).
-/// Usado pelo rate limiter para aplicar limites independentes por coleção.
+/// Chave = `"{ip}:{collection}"` — cada cliente tem seu próprio bucket por coleção,
+/// impedindo que um único abusador esgote o limite de outros clientes.
+///
+/// IP resolution (ordem de prioridade):
+/// 1. `X-Real-IP` — setado pelo nginx/Caddy com o IP real do cliente.
+/// 2. `X-Forwarded-For` rightmost — o valor mais à direita é adicionado pelo proxy
+///    confiável e não pode ser forjado pelo cliente.
+/// 3. `"unknown"` — fallback para conexões diretas sem headers de proxy; todos os
+///    clientes sem header compartilham um único bucket por coleção.
 #[derive(Clone, Debug)]
-pub struct CollectionKeyExtractor;
+pub struct IpCollectionKeyExtractor;
 
-impl KeyExtractor for CollectionKeyExtractor {
+impl KeyExtractor for IpCollectionKeyExtractor {
     type Key = String;
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
-        // Extrai o nome da coleção da URL
-        // Formato esperado: /api/v1/collections/{name}/...
-        // Nunca retorna Err para evitar 500 (ex.: path "/" ou "/api/v1/collections/").
         let path = req.uri().path();
         let parts: Vec<&str> = path.split('/').collect();
 
-        if let Some(pos) = parts.iter().position(|&p| p == "collections") {
-            if pos + 1 < parts.len() {
-                let collection_name = parts[pos + 1];
-                return Ok(if collection_name.is_empty() {
-                    "__no_collection__".to_string()
-                } else {
-                    collection_name.to_string()
-                });
-            }
-        }
+        let collection = parts
+            .iter()
+            .position(|&p| p == "collections")
+            .and_then(|pos| parts.get(pos + 1).copied())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("__no_collection__");
 
-        Ok("__no_collection__".to_string())
+        let ip = req
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .or_else(|| {
+                req.headers()
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.split(',').next_back())
+                    .map(|s| s.trim().to_string())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Ok(format!("{ip}:{collection}"))
     }
 }
 
-/// Cria o layer de rate limiting por coleção.
+/// Cria o layer de rate limiting por IP + coleção.
 /// Valores vêm da configuração do servidor (config.toml ou env).
 pub fn create_collection_rate_limit_layer(
     per_second: u32,
     burst_size: u32,
-) -> GovernorLayer<CollectionKeyExtractor, NoOpMiddleware> {
+) -> GovernorLayer<IpCollectionKeyExtractor, NoOpMiddleware> {
     let mut builder = GovernorConfigBuilder::default();
     builder.per_second(per_second as u64);
     builder.burst_size(burst_size);
     let config = builder
-        .key_extractor(CollectionKeyExtractor)
+        .key_extractor(IpCollectionKeyExtractor)
         .finish()
         .unwrap_or_else(|| unreachable!("GovernorConfigBuilder with valid params must succeed"));
 
