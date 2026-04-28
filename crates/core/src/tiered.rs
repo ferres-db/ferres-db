@@ -1836,15 +1836,22 @@ mod tests {
 
         let mut tc = TieredCollection::new(collection, tiered_config, Some(&tmp)).unwrap();
 
-        // warm1 e cold1 têm vetores propositalmente próximos da query [1,0,0]
-        // (top-3 mais próximos), garantindo que apareçam nos resultados mesmo
-        // quando HNSW retorna menos que k em grafos muito pequenos.
+        // 10 pontos: hot1/warm1/cold1 são únicamente próximos da query [1,0,0].
+        // 7 fillers espalham o espaço para o HNSW construir um grafo denso e
+        // bem conectado — sem eles (5 nós) o beam search pode perder cold1.
+        // Distâncias de [1,0,0]: hot1=0, warm1≈0.001, cold1≈0.003, fillers≥0.7.
         tc.insert(make_point("hot1", vec![1.0, 0.0, 0.0])).unwrap();
-        tc.insert(make_point("hot2", vec![0.5, 0.5, 0.0])).unwrap();
-        tc.insert(make_point("hot3", vec![0.0, 0.0, 1.0])).unwrap();
-        tc.insert(make_point("warm1", vec![0.9, 0.1, 0.0])).unwrap();
-        tc.insert(make_point("cold1", vec![0.95, 0.05, 0.0]))
+        tc.insert(make_point("warm1", vec![0.999, 0.001, 0.0]))
             .unwrap();
+        tc.insert(make_point("cold1", vec![0.998, 0.002, 0.0]))
+            .unwrap();
+        tc.insert(make_point("f1", vec![0.0, 1.0, 0.0])).unwrap();
+        tc.insert(make_point("f2", vec![0.0, 0.0, 1.0])).unwrap();
+        tc.insert(make_point("f3", vec![-1.0, 0.0, 0.0])).unwrap();
+        tc.insert(make_point("f4", vec![0.0, -1.0, 0.0])).unwrap();
+        tc.insert(make_point("f5", vec![0.5, 0.5, 0.5])).unwrap();
+        tc.insert(make_point("f6", vec![-0.5, 0.5, 0.0])).unwrap();
+        tc.insert(make_point("f7", vec![0.5, 0.0, -0.5])).unwrap();
 
         // Demove warm1 e cold1
         tc.demote_to_warm("warm1").unwrap();
@@ -1852,32 +1859,18 @@ mod tests {
         tc.demote_to_cold("cold1").unwrap();
 
         assert_eq!(tc.point_tier("hot1"), Some(StorageTier::Hot));
-        assert_eq!(tc.point_tier("hot2"), Some(StorageTier::Hot));
-        assert_eq!(tc.point_tier("hot3"), Some(StorageTier::Hot));
         assert_eq!(tc.point_tier("warm1"), Some(StorageTier::Warm));
         assert_eq!(tc.point_tier("cold1"), Some(StorageTier::Cold));
 
-        // Busca HNSW retorna IDs de pontos em TODOS os tiers
-        // (porque demote usa remove_data_only, sem tombstone no HNSW).
-        // HNSW é aproximado — não garantimos exatamente 5 resultados para
-        // grafos de 5 nós, mas warm1 e cold1 são os 2 mais próximos da query
-        // (além de hot1), então sempre aparecem mesmo que HNSW retorne < 5.
+        // remove_data_only não cria tombstone no HNSW: warm1 e cold1 ainda
+        // aparecem na busca. São os 2 únicos pontos com d < 0.005 da query —
+        // qualquer grafo HNSW com 10 nós os retorna nos top-5 de forma confiável.
         let results = tc.search(&[1.0, 0.0, 0.0], 5).unwrap();
-        assert!(
-            results.len() >= 3,
-            "HNSW search must return at least hot1, cold1 and warm1 (the 3 closest points)"
-        );
+        assert!(!results.is_empty(), "search returned no results");
+        assert_eq!(results[0].0, "hot1", "hot1 must be closest to [1,0,0]");
 
-        // hot1 deve ser o mais próximo de [1,0,0]
-        assert_eq!(results[0].0, "hot1");
-
-        // Pontos em todos os tiers devem estar presentes
         let result_ids: std::collections::HashSet<&str> =
             results.iter().map(|r| r.0.as_str()).collect();
-        assert!(
-            result_ids.contains("hot1"),
-            "hot point must appear in results"
-        );
         assert!(
             result_ids.contains("warm1"),
             "warm point must appear in results"
@@ -1900,14 +1893,14 @@ mod tests {
             warm_point.is_some(),
             "get_from_any_tier must find warm points"
         );
-        assert_eq!(warm_point.unwrap().vector, vec![0.9, 0.1, 0.0]);
+        assert_eq!(warm_point.unwrap().vector, vec![0.999, 0.001, 0.0]);
 
         let cold_point = tc.get_from_any_tier("cold1");
         assert!(
             cold_point.is_some(),
             "get_from_any_tier must find cold points"
         );
-        assert_eq!(cold_point.unwrap().vector, vec![0.95, 0.05, 0.0]);
+        assert_eq!(cold_point.unwrap().vector, vec![0.998, 0.002, 0.0]);
 
         // Ponto inexistente retorna None
         assert!(tc.get_from_any_tier("nonexistent").is_none());
