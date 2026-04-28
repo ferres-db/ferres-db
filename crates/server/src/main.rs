@@ -1,3 +1,4 @@
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
@@ -245,19 +246,26 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|e| unreachable!("failed to listen for Ctrl+C: {e}"));
     };
 
-    // Serve with graceful shutdown: wait for the signal, then drain in-flight requests.
-    // A 30-second outer timeout prevents hanging indefinitely if clients don't close.
+    // Timeout applies only to the drain phase (after signal), not to normal serving.
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+    let graceful = axum::serve(listener, app)
+        .with_graceful_shutdown(async move { drain_rx.await.ok(); });
+    let graceful_task = tokio::spawn(graceful.into_future());
+
+    shutdown_signal.await;
+    let _ = drain_tx.send(());
+
     const IN_FLIGHT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-    let graceful = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal);
-    match tokio::time::timeout(IN_FLIGHT_DRAIN_TIMEOUT, graceful).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => error!(error = %e, "server error during shutdown"),
+    match tokio::time::timeout(IN_FLIGHT_DRAIN_TIMEOUT, graceful_task).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => error!(error = %e, "server error during shutdown"),
+        Ok(Err(e)) => error!(error = %e, "graceful shutdown task panicked"),
         Err(_) => warn!(
             "server did not drain in-flight requests within {}s, proceeding",
             IN_FLIGHT_DRAIN_TIMEOUT.as_secs()
         ),
     }
-    info!("shutdown signal received, performing graceful shutdown...");
+    info!("drain complete, shutting down background workers...");
 
     // Mark shutdown before notifying (tasks stop initiating new saves/reindexes).
     app_state.set_shutting_down();
