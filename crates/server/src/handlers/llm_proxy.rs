@@ -182,7 +182,7 @@ pub async fn complete(
                     StatusCode::BAD_GATEWAY,
                     Json(json!({
                         "error": "llm_network_error",
-                        "message": msg,
+                        "message": format!("{} network error", provider_label),
                         "code": 502,
                     })),
                 )
@@ -283,7 +283,8 @@ impl From<reqwest::Error> for ProxyError {
         if e.is_timeout() {
             ProxyError::Timeout
         } else {
-            ProxyError::Network(e.to_string())
+            // without_url() strips ?key=... from the error string before logging/returning
+            ProxyError::Network(e.without_url().to_string())
         }
     }
 }
@@ -503,3 +504,325 @@ fn gemini_url(model: &str, api_key: &str) -> String {
 /// to redirect requests to a mock server (e.g. wiremock). Production deployments
 /// should leave this unset.
 const LLM_PROXY_BASE_URL_ENV: &str = "FERRESDB_LLM_PROXY_BASE_URL";
+
+// ─── Embed Handler ────────────────────────────────────────────────────────
+
+const MAX_EMBED_INPUT_BYTES: usize = 100_000; // 100 KB total across all texts
+const MAX_EMBED_BATCH_SIZE: usize = 2_048;
+
+/// Request body de POST /api/v1/llm/embed.
+#[derive(Debug, serde::Deserialize)]
+pub struct EmbedRequest {
+    pub provider: LlmProvider,
+    pub model: String,
+    /// Texto único ou lista de textos para embedding em batch.
+    pub input: EmbedInput,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+pub enum EmbedInput {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+/// POST /api/v1/llm/embed
+///
+/// Retorna `{ vectors: [[f32]], model, dimensions }`.
+/// Usa as mesmas credenciais armazenadas em Settings → LLM Credentials.
+/// Requer role Editor ou Admin.
+pub async fn embed(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(app_state): State<AppState>,
+    Json(req): Json<EmbedRequest>,
+) -> Response {
+    use crate::users::Role;
+    if user.role < Role::Editor {
+        return ApiError::forbidden("Admin or Editor role required for LLM embed").into_response();
+    }
+
+    if req.model.trim().is_empty() {
+        return ApiError::invalid_payload("model is required").into_response();
+    }
+
+    if req.provider == LlmProvider::Anthropic {
+        return ApiError::invalid_payload(
+            "Anthropic does not support embeddings; use openai or gemini",
+        )
+        .into_response();
+    }
+
+    let texts: Vec<String> = match req.input {
+        EmbedInput::Single(s) => {
+            if s.trim().is_empty() {
+                return ApiError::invalid_payload("input cannot be empty").into_response();
+            }
+            vec![s]
+        }
+        EmbedInput::Batch(v) => {
+            if v.is_empty() {
+                return ApiError::invalid_payload("input batch cannot be empty").into_response();
+            }
+            if v.len() > MAX_EMBED_BATCH_SIZE {
+                return ApiError::invalid_payload(format!(
+                    "batch size {} exceeds limit of {}",
+                    v.len(),
+                    MAX_EMBED_BATCH_SIZE
+                ))
+                .into_response();
+            }
+            v
+        }
+    };
+
+    let total_bytes: usize = texts.iter().map(|s| s.len()).sum();
+    if total_bytes > MAX_EMBED_INPUT_BYTES {
+        return ApiError::invalid_payload(format!(
+            "total input size {} bytes exceeds limit of {} bytes",
+            total_bytes, MAX_EMBED_INPUT_BYTES
+        ))
+        .into_response();
+    }
+
+    let provider_label = req.provider.as_str();
+
+    let (api_key, _key_source) = match resolve_api_key(&app_state, req.provider) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "llm_provider_not_configured",
+                    "message": format!(
+                        "Provider '{}' has no API key configured. Set {} or configure via Admin → Settings → LLM Credentials.",
+                        provider_label,
+                        req.provider.env_var()
+                    ),
+                    "code": 503,
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return ApiError::internal_error(format!("failed to resolve LLM credential: {e}"))
+                .into_response();
+        }
+    };
+
+    let result = match req.provider {
+        LlmProvider::Openai => embed_openai(&api_key, &req.model, &texts).await,
+        LlmProvider::Gemini => embed_gemini(&api_key, &req.model, &texts).await,
+        LlmProvider::Anthropic => unreachable!("validated above"),
+    };
+
+    match result {
+        Ok(vectors) => {
+            let dimensions = vectors.first().map(|v| v.len()).unwrap_or(0);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "vectors": vectors,
+                    "model": req.model,
+                    "dimensions": dimensions,
+                })),
+            )
+                .into_response()
+        }
+        Err(ProxyError::Upstream { status, message }) => {
+            warn!(provider = provider_label, status, message = %message, "LLM embed upstream error");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": "llm_upstream_error",
+                    "message": format!("{} returned {}: {}", provider_label, status, message),
+                    "code": 502,
+                })),
+            )
+                .into_response()
+        }
+        Err(ProxyError::Network(msg)) => {
+            warn!(provider = provider_label, error = %msg, "LLM embed network error");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": "llm_network_error",
+                    "message": format!("{} network error", provider_label),
+                    "code": 502,
+                })),
+            )
+                .into_response()
+        }
+        Err(ProxyError::Timeout) => {
+            warn!(provider = provider_label, "LLM embed timeout");
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({
+                    "error": "llm_timeout",
+                    "message": format!("LLM provider '{}' timed out", provider_label),
+                    "code": 504,
+                })),
+            )
+                .into_response()
+        }
+        Err(ProxyError::ResponseParse(msg)) => {
+            warn!(provider = provider_label, error = %msg, "LLM embed parse error");
+            ApiError::internal_error(format!(
+                "failed to parse {provider_label} embed response: {msg}"
+            ))
+            .into_response()
+        }
+    }
+}
+
+// ─── OpenAI Embeddings ────────────────────────────────────────────────────
+
+async fn embed_openai(
+    api_key: &str,
+    model: &str,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>, ProxyError> {
+    let url = openai_embed_url();
+    debug!(url, "calling openai embeddings");
+    let client = build_client()?;
+    let body = json!({ "model": model, "input": texts });
+    let resp = client
+        .post(url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(read_provider_error(resp).await);
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ProxyError::ResponseParse(e.to_string()))?;
+    let data = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| ProxyError::ResponseParse("missing 'data' array".to_string()))?;
+    let mut indexed: Vec<(usize, Vec<f32>)> = data
+        .iter()
+        .filter_map(|item| {
+            let idx = item.get("index")?.as_u64()? as usize;
+            let emb = item
+                .get("embedding")?
+                .as_array()?
+                .iter()
+                .filter_map(|x| x.as_f64().map(|f| f as f32))
+                .collect();
+            Some((idx, emb))
+        })
+        .collect();
+    indexed.sort_by_key(|(i, _)| *i);
+    Ok(indexed.into_iter().map(|(_, v)| v).collect())
+}
+
+fn openai_embed_url() -> String {
+    if let Ok(base) = std::env::var(LLM_PROXY_BASE_URL_ENV) {
+        format!("{}/openai/v1/embeddings", base.trim_end_matches('/'))
+    } else {
+        "https://api.openai.com/v1/embeddings".to_string()
+    }
+}
+
+// ─── Gemini Embeddings ────────────────────────────────────────────────────
+
+async fn embed_gemini(
+    api_key: &str,
+    model: &str,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>, ProxyError> {
+    if texts.len() == 1 {
+        let url = gemini_embed_url(model, api_key);
+        debug!(url = url.replace(api_key, "***"), "calling gemini embedContent");
+        let client = build_client()?;
+        let body = json!({
+            "model": format!("models/{model}"),
+            "content": { "parts": [{ "text": texts[0] }] }
+        });
+        let resp = client.post(url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            return Err(read_provider_error(resp).await);
+        }
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ProxyError::ResponseParse(e.to_string()))?;
+        let values = v
+            .get("embedding")
+            .and_then(|e| e.get("values"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| ProxyError::ResponseParse("missing 'embedding.values'".to_string()))?
+            .iter()
+            .filter_map(|x| x.as_f64().map(|f| f as f32))
+            .collect();
+        Ok(vec![values])
+    } else {
+        let url = gemini_batch_embed_url(model, api_key);
+        debug!(url = url.replace(api_key, "***"), "calling gemini batchEmbedContents");
+        let client = build_client()?;
+        let requests: Vec<_> = texts
+            .iter()
+            .map(|t| {
+                json!({
+                    "model": format!("models/{model}"),
+                    "content": { "parts": [{ "text": t }] }
+                })
+            })
+            .collect();
+        let body = json!({ "requests": requests });
+        let resp = client.post(url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            return Err(read_provider_error(resp).await);
+        }
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ProxyError::ResponseParse(e.to_string()))?;
+        let embeddings = v
+            .get("embeddings")
+            .and_then(|e| e.as_array())
+            .ok_or_else(|| ProxyError::ResponseParse("missing 'embeddings' array".to_string()))?;
+        Ok(embeddings
+            .iter()
+            .map(|e| {
+                e.get("values")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_f64().map(|f| f as f32))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect())
+    }
+}
+
+fn gemini_embed_url(model: &str, api_key: &str) -> String {
+    if let Ok(base) = std::env::var(LLM_PROXY_BASE_URL_ENV) {
+        format!(
+            "{}/gemini/v1beta/models/{model}:embedContent?key={api_key}",
+            base.trim_end_matches('/')
+        )
+    } else {
+        format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent?key={api_key}"
+        )
+    }
+}
+
+fn gemini_batch_embed_url(model: &str, api_key: &str) -> String {
+    if let Ok(base) = std::env::var(LLM_PROXY_BASE_URL_ENV) {
+        format!(
+            "{}/gemini/v1beta/models/{model}:batchEmbedContents?key={api_key}",
+            base.trim_end_matches('/')
+        )
+    } else {
+        format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents?key={api_key}"
+        )
+    }
+}

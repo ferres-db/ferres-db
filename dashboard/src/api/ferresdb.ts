@@ -685,6 +685,18 @@ export interface LlmCompleteResponse {
   usage?: { input_tokens: number; output_tokens: number };
 }
 
+export interface LlmEmbedRequest {
+  provider: "openai" | "gemini";
+  model: string;
+  input: string | string[];
+}
+
+export interface LlmEmbedResponse {
+  vectors: number[][];
+  model: string;
+  dimensions: number;
+}
+
 export const llmApi = {
   complete: async (params: LlmCompleteRequest): Promise<LlmCompleteResponse> => {
     const response = await apiClient.post<LlmCompleteResponse>(
@@ -697,6 +709,15 @@ export const llmApi = {
         temperature: params.temperature,
       },
     );
+    return response.data;
+  },
+
+  embed: async (params: LlmEmbedRequest): Promise<LlmEmbedResponse> => {
+    const response = await apiClient.post<LlmEmbedResponse>("/api/v1/llm/embed", {
+      provider: params.provider,
+      model: params.model,
+      input: params.input,
+    });
     return response.data;
   },
 };

@@ -66,15 +66,11 @@ export const Embeddings = () => {
 function ProviderConfig({
   provider,
   setProvider,
-  apiKey,
-  setApiKey,
   model,
   setModel,
 }: {
   provider: EmbeddingProvider;
   setProvider: (p: EmbeddingProvider) => void;
-  apiKey: string;
-  setApiKey: (k: string) => void;
   model: string;
   setModel: (m: string) => void;
 }) {
@@ -120,16 +116,10 @@ function ProviderConfig({
         </select>
       </div>
 
-      <div>
-        <label className="block text-sm font-medium text-gray-400 mb-2">API Key</label>
-        <Input
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder={`Enter your ${provider === "openai" ? "OpenAI" : "Gemini"} API key`}
-          className="bg-bg-secondary border-bg-tertiary text-gray-50"
-        />
-      </div>
+      <p className="text-xs text-gray-500">
+        API keys are configured server-side by Admins in{" "}
+        <span className="font-mono">Settings → LLM Credentials</span>.
+      </p>
     </div>
   );
 }
@@ -194,7 +184,6 @@ function SingleEmbedTab() {
   const { embed, isLoading, error: embedError, clearError } = useEmbedding();
 
   const [provider, setProvider] = useState<EmbeddingProvider>("openai");
-  const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("text-embedding-3-small");
   const [text, setText] = useState("");
   const [result, setResult] = useState<EmbeddingResult | null>(null);
@@ -211,10 +200,10 @@ function SingleEmbedTab() {
   const [upsertError, setUpsertError] = useState<string | null>(null);
 
   const handleEmbed = async () => {
-    if (!text || !apiKey) return;
+    if (!text) return;
     clearError();
     try {
-      const res = await embed(text, provider, apiKey, model);
+      const res = await embed(text, provider, model);
       setResult(res);
       // Auto-fill metadata text
       setMetadataJson(JSON.stringify({ text }, null, 2));
@@ -264,8 +253,6 @@ function SingleEmbedTab() {
           <ProviderConfig
             provider={provider}
             setProvider={setProvider}
-            apiKey={apiKey}
-            setApiKey={setApiKey}
             model={model}
             setModel={setModel}
           />
@@ -283,7 +270,7 @@ function SingleEmbedTab() {
 
           <Button
             onClick={handleEmbed}
-            disabled={isLoading || !text || !apiKey}
+            disabled={isLoading || !text}
             className="w-full"
             variant="primary"
           >
@@ -452,7 +439,6 @@ function BatchEmbedTab() {
   const { embedBatch, isLoading, error: embedError, clearError } = useEmbedding();
 
   const [provider, setProvider] = useState<EmbeddingProvider>("openai");
-  const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("text-embedding-3-small");
   const [rawInput, setRawInput] = useState("");
   const [items, setItems] = useState<BatchItem[]>([]);
@@ -495,7 +481,7 @@ function BatchEmbedTab() {
   };
 
   const handleEmbed = async () => {
-    if (!rawInput || !apiKey) return;
+    if (!rawInput) return;
     clearError();
 
     const parsed = parseInput();
@@ -504,7 +490,7 @@ function BatchEmbedTab() {
 
     try {
       const texts = parsed.map((p) => p.text);
-      const results = await embedBatch(texts, provider, apiKey, model, (done, total) => {
+      const results = await embedBatch(texts, provider, model, (done, total) => {
         setProgress({ done, total });
       });
 
@@ -569,8 +555,6 @@ function BatchEmbedTab() {
             <ProviderConfig
               provider={provider}
               setProvider={setProvider}
-              apiKey={apiKey}
-              setApiKey={setApiKey}
               model={model}
               setModel={setModel}
             />
@@ -590,7 +574,7 @@ function BatchEmbedTab() {
 
             <Button
               onClick={handleEmbed}
-              disabled={isLoading || !rawInput || !apiKey}
+              disabled={isLoading || !rawInput}
               className="w-full"
               variant="primary"
             >
@@ -781,7 +765,6 @@ function PipelineTab() {
   const { embed } = useEmbedding();
 
   const [provider, setProvider] = useState<EmbeddingProvider>("openai");
-  const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("text-embedding-3-small");
   const [selectedCollection, setSelectedCollection] = useState("");
   const [pipelineNamespace, setPipelineNamespace] = useState("");
@@ -791,7 +774,7 @@ function PipelineTab() {
   const [running, setRunning] = useState(false);
 
   const handleRun = async () => {
-    if (!rawInput || !apiKey || !selectedCollection) return;
+    if (!rawInput || !selectedCollection) return;
 
     const lines = rawInput
       .split("\n")
@@ -817,7 +800,7 @@ function PipelineTab() {
       );
 
       try {
-        const result = await embed(item.text, provider, apiKey, model);
+        const result = await embed(item.text, provider, model);
 
         // Update status: upserting
         setItems((prev) =>
@@ -867,8 +850,6 @@ function PipelineTab() {
           <ProviderConfig
             provider={provider}
             setProvider={setProvider}
-            apiKey={apiKey}
-            setApiKey={setApiKey}
             model={model}
             setModel={setModel}
           />
@@ -934,7 +915,7 @@ function PipelineTab() {
 
           <Button
             onClick={handleRun}
-            disabled={running || !rawInput || !apiKey || !selectedCollection}
+            disabled={running || !rawInput || !selectedCollection}
             className="w-full"
             variant="primary"
           >

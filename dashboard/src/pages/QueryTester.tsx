@@ -93,7 +93,6 @@ function QueryTesterContent() {
   const [llmModel, setLlmModel] = useState<string>(DEFAULT_LLM_MODELS.openai);
   const [embeddingProvider, setEmbeddingProvider] = useState<EmbeddingProvider>('openai');
   const [embeddingModel, setEmbeddingModel] = useState('text-embedding-3-small');
-  const [apiKey, setApiKey] = useState('');
   const [selectedCollection, setSelectedCollection] = useState('');
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(5);
@@ -147,16 +146,14 @@ function QueryTesterContent() {
   };
 
   const getEmbedding = async (): Promise<number[]> => {
-    const result = await embed(query, embeddingProvider, apiKey, embeddingModel);
+    const result = await embed(query, embeddingProvider, embeddingModel);
     return result.vector;
   };
 
   // ─── RAG Test ─────────────────────────────────────────────────
   const handleRAGTest = async () => {
-    if (!selectedCollection || !query || !apiKey) {
-      setError(
-        'Please fill in collection, query, and embedding API key (LLM keys are server-side now).',
-      );
+    if (!selectedCollection || !query) {
+      setError('Please fill in collection and query.');
       return;
     }
     setIsLoading(true);
@@ -212,8 +209,8 @@ function QueryTesterContent() {
 
   // ─── Hybrid Search ────────────────────────────────────────────
   const handleHybridSearch = async () => {
-    if (!selectedCollection || !query || !apiKey) {
-      setHybridError('Please fill in collection, query, and API key');
+    if (!selectedCollection || !query) {
+      setHybridError('Please fill in collection and query.');
       return;
     }
     setHybridLoading(true);
@@ -244,8 +241,8 @@ function QueryTesterContent() {
 
   // ─── Explain ──────────────────────────────────────────────────
   const handleExplain = async () => {
-    if (!selectedCollection || !query || !apiKey) {
-      setExplainError('Please fill in collection, query, and API key');
+    if (!selectedCollection || !query) {
+      setExplainError('Please fill in collection and query.');
       return;
     }
     setExplainLoading(true);
@@ -273,8 +270,8 @@ function QueryTesterContent() {
 
   // ─── Estimate ─────────────────────────────────────────────────
   const handleEstimate = async () => {
-    if (!selectedCollection || !query || !apiKey) {
-      setEstimateError('Please fill in collection, query, and API key');
+    if (!selectedCollection || !query) {
+      setEstimateError('Please fill in collection and query.');
       return;
     }
     setEstimateLoading(true);
@@ -393,25 +390,6 @@ function QueryTesterContent() {
               </select>
             </div>
 
-            {/* Embedding API Key (LLM keys are server-side via /api/v1/llm/complete) */}
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">
-                Embedding API Key
-              </label>
-              <Input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={`API key for the embedding provider (${embeddingProvider})`}
-                className="bg-bg-secondary border-bg-tertiary text-gray-50"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                LLM keys (OpenAI / Anthropic / Gemini) are configured on the server by Admins in{' '}
-                <span className="font-mono">Settings → LLM Credentials</span> and never leave the
-                browser.
-              </p>
-            </div>
-
             {/* Collection */}
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-2">Collection</label>
@@ -505,7 +483,7 @@ function QueryTesterContent() {
               variant="secondary"
               size="sm"
               onClick={handleExplain}
-              disabled={explainLoading || !selectedCollection || !query || !apiKey}
+              disabled={explainLoading || !selectedCollection || !query}
             >
               {explainLoading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -531,7 +509,7 @@ function QueryTesterContent() {
                 <div className="space-y-4">
                   <Button
                     onClick={handleRAGTest}
-                    disabled={isLoading || !selectedCollection || !query || !apiKey}
+                    disabled={isLoading || !selectedCollection || !query}
                     className="w-full"
                     variant="primary"
                   >
@@ -712,7 +690,7 @@ function QueryTesterContent() {
 
                   <Button
                     onClick={handleHybridSearch}
-                    disabled={hybridLoading || !selectedCollection || !query || !apiKey}
+                    disabled={hybridLoading || !selectedCollection || !query}
                     className="w-full"
                     variant="primary"
                   >
@@ -745,7 +723,7 @@ function QueryTesterContent() {
                 <div className="space-y-4">
                   <Button
                     onClick={handleExplain}
-                    disabled={explainLoading || !selectedCollection || !query || !apiKey}
+                    disabled={explainLoading || !selectedCollection || !query}
                     className="w-full"
                     variant="primary"
                   >
@@ -1065,7 +1043,7 @@ function QueryTesterContent() {
                 <div className="space-y-4">
                   <Button
                     onClick={handleEstimate}
-                    disabled={estimateLoading || !selectedCollection || !query || !apiKey}
+                    disabled={estimateLoading || !selectedCollection || !query}
                     className="w-full"
                     variant="primary"
                   >
