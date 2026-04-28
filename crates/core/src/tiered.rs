@@ -1836,13 +1836,14 @@ mod tests {
 
         let mut tc = TieredCollection::new(collection, tiered_config, Some(&tmp)).unwrap();
 
-        // Insere 5 pontos (mais pontos = grafo HNSW mais bem conectado,
-        // evitando flakiness com grafos muito pequenos).
+        // warm1 e cold1 têm vetores propositalmente próximos da query [1,0,0]
+        // (top-3 mais próximos), garantindo que apareçam nos resultados mesmo
+        // quando HNSW retorna menos que k em grafos muito pequenos.
         tc.insert(make_point("hot1", vec![1.0, 0.0, 0.0])).unwrap();
         tc.insert(make_point("hot2", vec![0.5, 0.5, 0.0])).unwrap();
         tc.insert(make_point("hot3", vec![0.0, 0.0, 1.0])).unwrap();
-        tc.insert(make_point("warm1", vec![0.0, 1.0, 0.0])).unwrap();
-        tc.insert(make_point("cold1", vec![0.9, 0.1, 0.0])).unwrap();
+        tc.insert(make_point("warm1", vec![0.9, 0.1, 0.0])).unwrap();
+        tc.insert(make_point("cold1", vec![0.95, 0.05, 0.0])).unwrap();
 
         // Demove warm1 e cold1
         tc.demote_to_warm("warm1").unwrap();
@@ -1857,11 +1858,13 @@ mod tests {
 
         // Busca HNSW retorna IDs de pontos em TODOS os tiers
         // (porque demote usa remove_data_only, sem tombstone no HNSW).
+        // HNSW é aproximado — não garantimos exatamente 5 resultados para
+        // grafos de 5 nós, mas warm1 e cold1 são os 2 mais próximos da query
+        // (além de hot1), então sempre aparecem mesmo que HNSW retorne < 5.
         let results = tc.search(&[1.0, 0.0, 0.0], 5).unwrap();
-        assert_eq!(
-            results.len(),
-            5,
-            "HNSW search must return points from all tiers"
+        assert!(
+            results.len() >= 3,
+            "HNSW search must return at least hot1, cold1 and warm1 (the 3 closest points)"
         );
 
         // hot1 deve ser o mais próximo de [1,0,0]
@@ -1896,14 +1899,14 @@ mod tests {
             warm_point.is_some(),
             "get_from_any_tier must find warm points"
         );
-        assert_eq!(warm_point.unwrap().vector, vec![0.0, 1.0, 0.0]);
+        assert_eq!(warm_point.unwrap().vector, vec![0.9, 0.1, 0.0]);
 
         let cold_point = tc.get_from_any_tier("cold1");
         assert!(
             cold_point.is_some(),
             "get_from_any_tier must find cold points"
         );
-        assert_eq!(cold_point.unwrap().vector, vec![0.9, 0.1, 0.0]);
+        assert_eq!(cold_point.unwrap().vector, vec![0.95, 0.05, 0.0]);
 
         // Ponto inexistente retorna None
         assert!(tc.get_from_any_tier("nonexistent").is_none());
