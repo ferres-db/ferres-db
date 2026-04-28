@@ -1,4 +1,4 @@
-//! # Error — tratamento de erros HTTP
+﻿//! # Error — tratamento de erros HTTP
 //!
 //! Define tipos de erro HTTP customizados e conversões de erros do core
 //! para respostas HTTP apropriadas.
@@ -300,6 +300,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use serde_json::Value;
 

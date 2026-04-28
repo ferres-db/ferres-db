@@ -1,4 +1,4 @@
-//! # Collection — container lógico de pontos vetoriais
+﻿//! # Collection — container lógico de pontos vetoriais
 //!
 //! Uma `Collection` é a unidade principal de organização no FerresDB.
 //! Ela combina:
@@ -194,7 +194,9 @@ impl Collection {
         let index = create_ann_index(config.distance, config.hnsw.clone(), &config.quantization);
         let search_cache = if config.search_cache_size > 0 {
             Some(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(config.search_cache_size).unwrap(),
+                std::num::NonZeroUsize::new(config.search_cache_size).unwrap_or_else(|| {
+                    unreachable!("search_cache_size > 0 was checked in the enclosing if-guard")
+                }),
             )))
         } else {
             None
@@ -231,7 +233,9 @@ impl Collection {
     pub fn with_index(config: CollectionConfig, index: Box<dyn ANNIndex>) -> Self {
         let search_cache = if config.search_cache_size > 0 {
             Some(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(config.search_cache_size).unwrap(),
+                std::num::NonZeroUsize::new(config.search_cache_size).unwrap_or_else(|| {
+                    unreachable!("search_cache_size > 0 was checked in the enclosing if-guard")
+                }),
             )))
         } else {
             None
@@ -352,7 +356,9 @@ impl Collection {
             );
             self.vector_indices.insert(field.to_string(), idx);
         }
-        Ok(self.vector_indices.get_mut(field).unwrap())
+        Ok(self.vector_indices.get_mut(field).unwrap_or_else(|| {
+            unreachable!("field was just inserted into vector_indices on the line above")
+        }))
     }
 
     /// Invalida o cache de busca após mutação (insert/remove).
@@ -471,7 +477,9 @@ impl Collection {
                 .collect();
 
             if !validation_errors.is_empty() {
-                return Err(validation_errors.into_iter().next().unwrap());
+                return Err(validation_errors.into_iter().next().unwrap_or_else(|| {
+                    unreachable!("validation_errors is non-empty — checked by the if-guard above")
+                }));
             }
             for point in &points {
                 self.validate_point_named_vectors(point)?;
@@ -700,7 +708,13 @@ impl Collection {
                 .entered();
                 match index_to_use {
                     None => self.index.search(query, k, None)?,
-                    Some(f) => self.vector_indices.get(f).unwrap().search(query, k, None)?,
+                    Some(f) => self
+                        .vector_indices
+                        .get(f)
+                        .unwrap_or_else(|| {
+                            unreachable!("vector field validated by contains_key above")
+                        })
+                        .search(query, k, None)?,
                 }
             };
 
@@ -723,7 +737,7 @@ impl Collection {
             Some(f) => self
                 .vector_indices
                 .get(f)
-                .unwrap()
+                .unwrap_or_else(|| unreachable!("vector field validated by contains_key above"))
                 .search(query, k, predicate),
         }
     }
@@ -768,12 +782,11 @@ impl Collection {
         let k_candidates = (k * 5).min(self.points.len().max(1));
         let candidates = match index_to_use {
             None => self.index.search(query, k_candidates, predicate)?,
-            Some(f) => {
-                self.vector_indices
-                    .get(f)
-                    .unwrap()
-                    .search(query, k_candidates, predicate)?
-            }
+            Some(f) => self
+                .vector_indices
+                .get(f)
+                .unwrap_or_else(|| unreachable!("vector field validated by contains_key above"))
+                .search(query, k_candidates, predicate)?,
         };
         if candidates.is_empty() {
             return Ok(candidates);
@@ -830,7 +843,7 @@ impl Collection {
             Some(f) => self
                 .vector_indices
                 .get(f)
-                .unwrap()
+                .unwrap_or_else(|| unreachable!("vector field validated by contains_key above"))
                 .search_explain(query, k, predicate),
         }
     }
@@ -1228,6 +1241,7 @@ impl Drop for Collection {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn test_config() -> CollectionConfig {
@@ -1580,6 +1594,7 @@ mod tests {
 
     #[cfg(test)]
     mod prop_tests {
+        #![allow(clippy::unwrap_used, clippy::expect_used)]
         use super::*;
         use quickcheck::TestResult;
         use quickcheck_macros::quickcheck;

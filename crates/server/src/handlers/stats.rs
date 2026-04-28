@@ -371,13 +371,8 @@ pub async fn get_analytics(
         let vector_bytes = dimension * 4;
         let metadata_est = 200;
         let hnsw_node_est = 128;
-        if !config.tiered_storage.enabled {
-            hot += num_points;
-            hot_memory_bytes += num_points * (vector_bytes + metadata_est + hnsw_node_est);
-        } else {
-            hot += num_points;
-            hot_memory_bytes += num_points * (vector_bytes + metadata_est + hnsw_node_est);
-        }
+        hot += num_points;
+        hot_memory_bytes += num_points * (vector_bytes + metadata_est + hnsw_node_est);
     }
 
     // Latência: query_log_cache
@@ -506,8 +501,7 @@ pub async fn get_analytics(
             }
         })
         .collect();
-    top_namespaces_by_storage
-        .sort_by(|a, b| b.storage_bytes_estimate.cmp(&a.storage_bytes_estimate));
+    top_namespaces_by_storage.sort_by_key(|b| std::cmp::Reverse(b.storage_bytes_estimate));
     top_namespaces_by_storage.truncate(30);
 
     // Re-ranking overhead: média da fase "rerank" nos perfis de query recentes

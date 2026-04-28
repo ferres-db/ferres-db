@@ -66,7 +66,7 @@ impl QueryLogCache {
 
     /// Carrega todas as entradas do log (re-lê do disco se cache expirado).
     fn get_entries(&self) -> Vec<ParsedQueryEntry> {
-        let mut guard = self.cache.write().unwrap();
+        let mut guard = self.cache.write().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let refresh = match guard.as_ref() {
             None => true,
@@ -77,7 +77,11 @@ impl QueryLogCache {
             *guard = Some((entries.clone(), now));
             entries
         } else {
-            guard.as_ref().unwrap().0.clone()
+            guard
+                .as_ref()
+                .unwrap_or_else(|| unreachable!("cache is Some — refresh=false branch only reached when cache was previously populated"))
+                .0
+                .clone()
         }
     }
 
@@ -244,9 +248,9 @@ impl QueryLogCache {
             entries.retain(|e| e.collection == c);
         }
         if sort_by_latency {
-            entries.sort_by(|a, b| b.took_ms.cmp(&a.took_ms));
+            entries.sort_by_key(|b| std::cmp::Reverse(b.took_ms));
         } else {
-            entries.sort_by(|a, b| b.timestamp_secs.cmp(&a.timestamp_secs));
+            entries.sort_by_key(|b| std::cmp::Reverse(b.timestamp_secs));
         }
         entries.into_iter().take(limit).collect()
     }
@@ -255,7 +259,7 @@ impl QueryLogCache {
     pub fn get_slow_queries(&self, threshold_ms: u64, limit: usize) -> Vec<ParsedQueryEntry> {
         let mut entries = self.entries_24h();
         entries.retain(|e| e.took_ms >= threshold_ms);
-        entries.sort_by(|a, b| b.took_ms.cmp(&a.took_ms));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.took_ms));
         entries.into_iter().take(limit).collect()
     }
 
@@ -266,7 +270,7 @@ impl QueryLogCache {
         let last_n: Vec<ParsedQueryEntry> = all.into_iter().rev().take(n).rev().collect();
         last_n
             .into_iter()
-            .filter(|e| e.vector.as_ref().map_or(false, |v| !v.is_empty()))
+            .filter(|e| e.vector.as_ref().is_some_and(|v| !v.is_empty()))
             .collect()
     }
 }

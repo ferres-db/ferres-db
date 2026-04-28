@@ -1,8 +1,27 @@
-//! # Write-Ahead Log (WAL) — durabilidade de operações
+﻿//! # Write-Ahead Log (WAL) — durabilidade de operações
 //!
 //! Antes de modificar uma coleção em memória, a operação é registrada
 //! no WAL (`wal.log`). Em caso de crash, as operações pendentes são
 //! re-aplicadas sobre o último snapshot na recuperação.
+//!
+//! ## Durability semantics
+//!
+//! `Wal::append_*` retorna `Ok` somente após:
+//! - `write_all` ter sucedido (dados no buffer do OS);
+//! - `flush()` ter descarregado o BufWriter para o page cache do OS;
+//! - `sync_data()` ter persistido os dados em disco (quando configurado).
+//!
+//! Se `fsync_per_write = true` (padrão em produção), cada `append_*` chama
+//! `sync_data()` antes de retornar `Ok`. Dados são duráveis contra kernel
+//! panic e perda de energia.
+//!
+//! Se `fsync_per_write = false`, o `sync_data()` é chamado periodicamente
+//! (a cada `fsync_interval` ou `fsync_every_n_ops` operações). Dados podem
+//! ser perdidos em kernel panic ou perda de energia entre o `write` e o
+//! próximo fsync.
+//!
+//! O WAL usa `sync_data()` (não `sync_all()`) — flush de conteúdo sem
+//! metadados, mais rápido e suficiente para recuperação de crash.
 //!
 //! ## Formato
 //!
@@ -24,6 +43,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -72,6 +92,38 @@ pub enum WalOperation {
     },
 }
 
+// ─── WalConfig ────────────────────────────────────────────────────────
+
+/// Configuração do Write-Ahead Log.
+///
+/// O default (`fsync_per_write=false`) mantém compatibilidade com o comportamento
+/// anterior (sem fsync). Em produção, USE `fsync_per_write=true`.
+pub struct WalConfig {
+    /// Número de operações antes de disparar snapshot automático.
+    pub snapshot_threshold: usize,
+    /// Habilita compressão Zstd para entradas do WAL.
+    pub compress: bool,
+    /// Chama `sync_data()` após cada `append_*`. Mais seguro, mais lento.
+    /// Default: false (compat). Produção DEVE usar true.
+    pub fsync_per_write: bool,
+    /// Quando `fsync_per_write=false`, intervalo máximo entre sync_data().
+    pub fsync_interval: Duration,
+    /// Quando `fsync_per_write=false`, número máximo de ops antes de forçar sync_data().
+    pub fsync_every_n_ops: usize,
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        Self {
+            snapshot_threshold: 1000,
+            compress: false,
+            fsync_per_write: false,
+            fsync_interval: Duration::from_secs(1),
+            fsync_every_n_ops: 1000,
+        }
+    }
+}
+
 // ─── Wal ──────────────────────────────────────────────────────────────
 
 /// Write-Ahead Log por coleção.
@@ -86,10 +138,14 @@ pub struct Wal {
     writer: Option<BufWriter<fs::File>>,
     /// Número de operações desde o último snapshot.
     ops_since_snapshot: usize,
-    /// Limite para disparar snapshot automático.
-    snapshot_threshold: usize,
-    /// Se true, entradas são escritas com compressão Zstd (formato frame: len + compressed).
-    compress: bool,
+    /// Configuração do WAL (threshold, compressão, fsync).
+    config: WalConfig,
+    /// Número de operações desde o último fsync.
+    ops_since_fsync: usize,
+    /// Timestamp do último fsync.
+    last_fsync: Instant,
+    /// Callback opcional chamado após cada sync_data().
+    fsync_hook: Option<Box<dyn Fn(Duration) + Send>>,
 }
 
 /// Limite de operações no WAL antes de forçar backpressure (snapshot obrigatório).
@@ -100,7 +156,7 @@ impl Wal {
     /// Threshold padrão: snapshot a cada 1000 operações.
     pub const DEFAULT_SNAPSHOT_THRESHOLD: usize = 1000;
 
-    /// Abre (ou cria) o WAL para o diretório da coleção.
+    /// Abre (ou cria) o WAL com configuração padrão (sem fsync).
     ///
     /// Se `compress` for true, as entradas são escritas com compressão Zstd (menor uso de disco).
     /// Não faz replay — use `recover_collection()` para recuperação.
@@ -109,6 +165,18 @@ impl Wal {
         snapshot_threshold: usize,
         compress: bool,
     ) -> Result<Self, FerresError> {
+        let config = WalConfig {
+            snapshot_threshold,
+            compress,
+            ..Default::default()
+        };
+        Self::open_with_config(collection_dir, config)
+    }
+
+    /// Abre (ou cria) o WAL com configuração completa.
+    ///
+    /// Não faz replay — use `recover_collection()` para recuperação.
+    pub fn open_with_config(collection_dir: &Path, config: WalConfig) -> Result<Self, FerresError> {
         fs::create_dir_all(collection_dir).map_err(|e| {
             FerresError::Storage(format!(
                 "failed to create collection directory {}: {e}",
@@ -135,7 +203,7 @@ impl Wal {
             })?;
 
         // Se compressão ativa e ficheiro novo (0 bytes), escreve magic
-        if compress {
+        if config.compress {
             let meta = file.metadata().map_err(|e| {
                 FerresError::Storage(format!("failed to stat WAL at {}: {e}", wal_path.display()))
             })?;
@@ -153,8 +221,10 @@ impl Wal {
             collection_dir: collection_dir.to_path_buf(),
             writer: Some(BufWriter::new(file)),
             ops_since_snapshot,
-            snapshot_threshold,
-            compress,
+            config,
+            ops_since_fsync: 0,
+            last_fsync: Instant::now(),
+            fsync_hook: None,
         })
     }
 
@@ -222,7 +292,7 @@ impl Wal {
 
     /// Retorna true se o número de operações atingiu o threshold.
     pub fn should_snapshot(&self) -> bool {
-        self.ops_since_snapshot >= self.snapshot_threshold
+        self.ops_since_snapshot >= self.config.snapshot_threshold
     }
 
     /// Trunca o WAL após um snapshot bem-sucedido.
@@ -247,7 +317,7 @@ impl Wal {
                 ))
             })?;
 
-        if self.compress {
+        if self.config.compress {
             file.write_all(WAL_ZSTD_MAGIC).map_err(|e| {
                 FerresError::Storage(format!(
                     "failed to write WAL magic after truncate at {}: {e}",
@@ -348,6 +418,16 @@ impl Wal {
         self.collection_dir.join("wal.log")
     }
 
+    /// Número de operações desde o último fsync (para métricas).
+    pub fn ops_since_fsync(&self) -> usize {
+        self.ops_since_fsync
+    }
+
+    /// Registra um callback chamado após cada sync_data().
+    pub fn set_fsync_hook(&mut self, hook: Box<dyn Fn(Duration) + Send>) {
+        self.fsync_hook = Some(hook);
+    }
+
     // ─── Private ──────────────────────────────────────────────────────
 
     /// Serializa e escreve uma entrada, seguida de flush.
@@ -357,7 +437,7 @@ impl Wal {
             .as_mut()
             .ok_or_else(|| FerresError::Storage("WAL writer is closed".to_string()))?;
 
-        if self.compress {
+        if self.config.compress {
             let json = serde_json::to_string(entry)
                 .map_err(|e| FerresError::Storage(format!("failed to serialize WAL entry: {e}")))?;
             let compressed = zstd::encode_all(json.as_bytes(), 0)
@@ -383,6 +463,35 @@ impl Wal {
         writer
             .flush()
             .map_err(|e| FerresError::Storage(format!("failed to flush WAL: {e}")))?;
+
+        // Durabilidade: sync_data() para persistir em disco
+        let needs_fsync = if self.config.fsync_per_write {
+            true
+        } else {
+            self.ops_since_fsync += 1;
+            self.ops_since_fsync >= self.config.fsync_every_n_ops
+                || self.last_fsync.elapsed() >= self.config.fsync_interval
+        };
+
+        if needs_fsync {
+            let sync_start = Instant::now();
+            self.writer
+                .as_ref()
+                .unwrap_or_else(|| {
+                    unreachable!("WAL writer is Some when needs_fsync=true (append initialises it)")
+                })
+                .get_ref()
+                .sync_data()
+                .map_err(|e| FerresError::Storage(format!("WAL fsync failed: {e}")))?;
+            let sync_duration = sync_start.elapsed();
+
+            self.ops_since_fsync = 0;
+            self.last_fsync = Instant::now();
+
+            if let Some(ref hook) = self.fsync_hook {
+                hook(sync_duration);
+            }
+        }
 
         Ok(())
     }
@@ -801,6 +910,7 @@ fn current_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::collection::CollectionConfig;
     use crate::search::DistanceMetric;
@@ -823,6 +933,155 @@ mod tests {
 
     fn make_point(id: &str, v: Vec<f32>) -> Point {
         Point::new(id.to_string(), v, serde_json::Value::Null).unwrap()
+    }
+
+    // ─── WalConfig Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn wal_config_default_no_fsync() {
+        let cfg = WalConfig::default();
+        assert_eq!(cfg.snapshot_threshold, 1000);
+        assert!(!cfg.compress);
+        assert!(!cfg.fsync_per_write);
+        assert_eq!(cfg.fsync_interval, Duration::from_secs(1));
+        assert_eq!(cfg.fsync_every_n_ops, 1000);
+    }
+
+    // ─── WAL Fsync Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn wal_fsync_per_write_durability() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("fsync_col");
+
+        let config = WalConfig {
+            fsync_per_write: true,
+            ..Default::default()
+        };
+
+        // Write entries with fsync enabled
+        {
+            let mut wal = Wal::open_with_config(&dir, config).unwrap();
+            wal.append_upsert(&make_point("p1", vec![1.0, 2.0, 3.0]))
+                .unwrap();
+            wal.append_upsert(&make_point("p2", vec![4.0, 5.0, 6.0]))
+                .unwrap();
+            wal.append_upsert(&make_point("p3", vec![7.0, 8.0, 9.0]))
+                .unwrap();
+            // Wal is dropped here — entries should be on disk
+        }
+
+        // Reopen and verify all entries present
+        let entries = Wal::read_entries(&dir).unwrap();
+        assert_eq!(entries.len(), 3);
+        match &entries[2].operation {
+            WalOperation::Upsert { point } => assert_eq!(point.id, "p3"),
+            _ => panic!("expected upsert"),
+        }
+    }
+
+    #[test]
+    fn wal_periodic_fsync_after_n_ops() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("periodic_col");
+
+        let sync_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sync_count_clone = sync_count.clone();
+
+        let config = WalConfig {
+            fsync_per_write: false,
+            fsync_every_n_ops: 5,
+            fsync_interval: Duration::from_secs(3600), // high — won't trigger
+            ..Default::default()
+        };
+
+        let mut wal = Wal::open_with_config(&dir, config).unwrap();
+        wal.set_fsync_hook(Box::new(move |_dur| {
+            sync_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        // Write 5 entries — should trigger exactly 1 fsync
+        for i in 0..5 {
+            wal.append_upsert(&make_point(&format!("p{i}"), vec![i as f32]))
+                .unwrap();
+        }
+
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(wal.ops_since_fsync(), 0); // reset after fsync
+    }
+
+    #[test]
+    fn wal_periodic_fsync_after_interval() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("interval_col");
+
+        let sync_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sync_count_clone = sync_count.clone();
+
+        let config = WalConfig {
+            fsync_per_write: false,
+            fsync_every_n_ops: 10000, // high — won't trigger by count
+            fsync_interval: Duration::from_millis(1),
+            ..Default::default()
+        };
+
+        let mut wal = Wal::open_with_config(&dir, config).unwrap();
+        wal.set_fsync_hook(Box::new(move |_dur| {
+            sync_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        wal.append_upsert(&make_point("p1", vec![1.0])).unwrap();
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        std::thread::sleep(Duration::from_millis(5));
+
+        wal.append_upsert(&make_point("p2", vec![2.0])).unwrap();
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn wal_no_fsync_still_flushes_to_os() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("nofsync_col");
+
+        let config = WalConfig {
+            fsync_per_write: false,
+            fsync_every_n_ops: 10000,
+            fsync_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+
+        {
+            let mut wal = Wal::open_with_config(&dir, config).unwrap();
+            wal.append_upsert(&make_point("p1", vec![1.0, 2.0, 3.0]))
+                .unwrap();
+            wal.append_upsert(&make_point("p2", vec![4.0, 5.0, 6.0]))
+                .unwrap();
+            // BufWriter::flush() is called by append_entry, so data is in OS page cache
+        }
+
+        // Data is readable (it's in the OS page cache, flushed by BufWriter)
+        let entries = Wal::read_entries(&dir).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // NOTE: This test documents the trade-off. In a real kernel panic,
+        // data in the OS page cache but not on disk would be lost.
+        // With fsync_per_write=false, we trade durability for write throughput.
+    }
+
+    #[test]
+    fn wal_open_with_config_backward_compat() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("compat_col");
+
+        // Open with old API
+        let wal1 = Wal::open(&dir, 500, true).unwrap();
+        assert_eq!(wal1.ops_since_snapshot(), 0);
+
+        // Verify config matches
+        assert_eq!(wal1.config.snapshot_threshold, 500);
+        assert!(wal1.config.compress);
+        assert!(!wal1.config.fsync_per_write); // default — backward compat
     }
 
     // ─── WAL Unit Tests ───────────────────────────────────────────────

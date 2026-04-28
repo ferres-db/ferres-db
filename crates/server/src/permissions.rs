@@ -1,4 +1,4 @@
-//! # Permissions — modelo de permissões granulares (RBAC)
+﻿//! # Permissions — modelo de permissões granulares (RBAC)
 //!
 //! Define recursos, ações e restrições de metadata para controle de acesso
 //! granular por coleção. Admins implicitamente têm todas as permissões.
@@ -223,6 +223,7 @@ pub fn merge_restriction_filter(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

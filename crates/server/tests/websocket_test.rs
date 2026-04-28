@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # WebSocket Integration Tests
 //!
 //! Testes E2E para ingestão em tempo real via WebSocket.
@@ -11,10 +12,8 @@ use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use ferres_db_server::auth;
-use ferres_db_server::middleware;
-use ferres_db_server::routes;
-use ferres_db_server::state::{AppState, ServerConfig};
+use ferres_db_server::bootstrap::{bootstrap_state, build_app};
+use ferres_db_server::state::ServerConfig;
 
 /// API key usada nos testes.
 const TEST_API_KEY: &str = "test-ws-key-123";
@@ -30,9 +29,6 @@ struct TestServer {
 
 /// Inicia um servidor de teste com autenticação habilitada.
 async fn setup_server() -> TestServer {
-    std::env::set_var("FERRESDB_API_KEYS", TEST_API_KEY);
-    auth::init_api_keys();
-
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let port = addr.port();
@@ -50,17 +46,8 @@ async fn setup_server() -> TestServer {
         ..Default::default()
     };
 
-    let app_state = AppState::new(config.clone(), None, None, None, None, None).unwrap();
-
-    let app = routes::create_router(&config)
-        .layer(axum::middleware::from_fn(middleware::request_logger))
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        )
-        .with_state(app_state);
+    let app_state = bootstrap_state(&config).unwrap();
+    let app = build_app(&config, app_state);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

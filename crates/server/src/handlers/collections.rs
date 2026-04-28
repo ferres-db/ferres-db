@@ -28,7 +28,9 @@ use crate::time::unix_now;
 
 // Validação de nome: apenas letras, números, hífens e underscores.
 lazy_static::lazy_static! {
-    static ref VALID_NAME_REGEX: regex::Regex = regex::Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap();
+    static ref VALID_NAME_REGEX: regex::Regex =
+        regex::Regex::new(r"^[a-zA-Z0-9_-]+$")
+            .unwrap_or_else(|e| unreachable!("VALID_NAME_REGEX is a hardcoded literal: {e}"));
 }
 
 /// Validador customizado para nome de coleção usando validator crate.

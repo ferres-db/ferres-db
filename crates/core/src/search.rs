@@ -1,4 +1,4 @@
-//! # Search — motor de busca aproximada por vizinhos mais próximos (ANN)
+﻿//! # Search — motor de busca aproximada por vizinhos mais próximos (ANN)
 //!
 //! Define o trait [`ANNIndex`] que abstrai qualquer backend de busca
 //! vetorial, e fornece [`HnswIndex`] como implementação concreta
@@ -397,7 +397,10 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 pub fn simd_enabled() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        std::arch::is_x86_feature_detected!("avx2") || std::arch::is_x86_feature_detected!("sse4.1")
+        #[allow(clippy::nonminimal_bool)]
+        let supported = std::arch::is_x86_feature_detected!("avx2")
+            || std::arch::is_x86_feature_detected!("sse4.1");
+        supported
     }
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
@@ -1125,7 +1128,11 @@ impl ANNIndex for QuantizedHnswIndex {
             return self.inner.add_point(point);
         }
 
-        let params = self.params.as_ref().unwrap();
+        let params = self.params.as_ref().unwrap_or_else(|| {
+            unreachable!(
+                "params is Some — the is_none() early-return on the lines above would have exited"
+            )
+        });
 
         // Quantiza o vetor
         let quantized = params.quantize(&point.vector);
@@ -1398,6 +1405,7 @@ pub fn create_ann_index(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::error::FerresError;
 

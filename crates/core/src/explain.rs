@@ -1,4 +1,4 @@
-//! # Explain — explicação detalhada de resultados de busca vetorial
+﻿//! # Explain — explicação detalhada de resultados de busca vetorial
 //!
 //! Este módulo fornece tipos e funções para explicar **por que** cada
 //! resultado foi retornado (ou filtrado) em uma busca vetorial. É útil
@@ -474,6 +474,7 @@ pub fn build_search_explanation_with_resolver(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::{CollectionConfig, DistanceMetric, HnswConfig, MetadataFilter, Point, VectorDB};
     use serde_json::json;
@@ -617,7 +618,10 @@ mod tests {
                 sim,
                 result.score,
             );
-            assert!(sim >= 0.0 && sim <= 1.0, "similarity deve estar em [0, 1]");
+            assert!(
+                (0.0..=1.0).contains(&sim),
+                "similarity deve estar em [0, 1]"
+            );
 
             // score_breakdown deve conter cosine_similarity
             assert!(

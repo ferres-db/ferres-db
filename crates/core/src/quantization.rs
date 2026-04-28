@@ -1,4 +1,4 @@
-//! # Quantization — compressão de vetores para redução de memória
+﻿//! # Quantization — compressão de vetores para redução de memória
 //!
 //! Implementa **Scalar Quantization (SQ8)**: comprime vetores `f32` para `u8`
 //! com perda mínima de recall. Cada dimensão é mapeada independentemente de
@@ -1058,6 +1058,7 @@ pub fn polar_distance_asymmetric(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Testa calibração com vetores conhecidos: verifica min/max corretos.
@@ -1345,6 +1346,7 @@ mod tests {
 
     /// Testa polar_encode com dimensões pequenas e ímpares.
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_polar_encode_small_dims() {
         // dim=1
         let v1 = vec![3.14f32];

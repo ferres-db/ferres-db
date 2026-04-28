@@ -1,4 +1,4 @@
-//! # Time helpers — clock-safe Unix timestamp accessors
+﻿//! # Time helpers — clock-safe Unix timestamp accessors
 //!
 //! O padrão `SystemTime::now().duration_since(UNIX_EPOCH).unwrap()` causa panic
 //! se o relógio do sistema retroceder antes da época Unix (cenário improvável,
@@ -34,6 +34,7 @@ pub fn unix_duration() -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

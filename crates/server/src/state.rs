@@ -124,7 +124,7 @@ impl GlobalQueryStats {
     fn events_last_24h(&self) -> Vec<GlobalQueryEvent> {
         let now_secs = unix_now();
         let cutoff = now_secs.saturating_sub(24 * 3600);
-        let events = self.events.read().unwrap();
+        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
         events
             .iter()
             .filter(|e| e.timestamp_secs >= cutoff)
@@ -148,7 +148,7 @@ impl GlobalQueryStats {
     /// Top N queries mais lentas (collection, latency_ms, timestamp_secs).
     pub fn top_slowest(&self, n: usize) -> Vec<GlobalQueryEvent> {
         let mut events = self.events_last_24h();
-        events.sort_by(|a, b| b.latency_ms.cmp(&a.latency_ms));
+        events.sort_by_key(|b| std::cmp::Reverse(b.latency_ms));
         events.into_iter().take(n).collect()
     }
 
@@ -227,6 +227,9 @@ pub struct ServerConfig {
     /// Comprimir WAL com Zstd (quando usar VectorDB com WAL). Default: false.
     #[serde(default)]
     pub wal_compression: bool,
+    /// Faz fsync após cada append do WAL. Default: true.
+    #[serde(default = "default_true")]
+    pub wal_fsync_per_write: bool,
     /// Gravar snapshots em formato binário (points.bin) em vez de JSONL. Reduz tamanho e tempo de carga. Default: false.
     #[serde(default)]
     pub binary_snapshot: bool,
@@ -282,6 +285,10 @@ fn default_rate_limit_per_second() -> u32 {
     2_000
 }
 
+pub(crate) fn default_true() -> bool {
+    true
+}
+
 fn default_rate_limit_burst() -> u32 {
     10_000
 }
@@ -293,6 +300,7 @@ impl ServerConfig {
     /// 1. Variáveis de ambiente (HOST, PORT, STORAGE_PATH, LOG_LEVEL)
     /// 2. Arquivo config.toml (se existir)
     /// 3. Valores padrão
+    ///
     /// Procura config.toml no diretório atual e em diretórios pais (para quando
     /// o servidor é iniciado de subpastas como dashboard/ ou crates/server/).
     fn find_config_path() -> Option<PathBuf> {
@@ -337,6 +345,9 @@ impl ServerConfig {
         }
         if let Ok(v) = std::env::var("FERRESDB_WAL_COMPRESSION") {
             config.wal_compression = v.eq_ignore_ascii_case("true") || v == "1";
+        }
+        if let Ok(v) = std::env::var("FERRESDB_WAL_FSYNC_PER_WRITE") {
+            config.wal_fsync_per_write = v.eq_ignore_ascii_case("true") || v == "1";
         }
         if let Ok(v) = std::env::var("FERRESDB_BINARY_SNAPSHOT") {
             config.binary_snapshot = v.eq_ignore_ascii_case("true") || v == "1";
@@ -425,6 +436,7 @@ impl Default for ServerConfig {
             log_level: default_log_level(),
             api_keys: None,
             wal_compression: false,
+            wal_fsync_per_write: true,
             binary_snapshot: false,
             namespace_physical_isolation: false,
             replica_of: None,
@@ -509,7 +521,7 @@ impl QueryStats {
 
     /// Calcula percentis das latências.
     pub fn calculate_percentiles(&self) -> (f64, f64, f64, f64) {
-        let latencies = self.latencies_ms.read().unwrap();
+        let latencies = self.latencies_ms.read().unwrap_or_else(|e| e.into_inner());
         let mut sorted: Vec<u64> = latencies.iter().copied().collect();
         sorted.sort();
 
@@ -963,14 +975,12 @@ impl AppState {
             })?;
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if collection_name.map(|n| n == name).unwrap_or(true) && path.is_dir() {
-                if path.join("config.json").exists() {
-                    match list_restore_points(&path) {
-                        Ok(rp) => {
-                            out.insert(name, rp);
-                        }
-                        Err(_) => {}
-                    }
+            if collection_name.map(|n| n == name).unwrap_or(true)
+                && path.is_dir()
+                && path.join("config.json").exists()
+            {
+                if let Ok(rp) = list_restore_points(&path) {
+                    out.insert(name, rp);
                 }
             }
         }
@@ -1035,11 +1045,13 @@ impl AppState {
         drop(collection);
         drop(guard);
 
-        let mut wal = Wal::open(
-            &collection_dir,
-            Wal::DEFAULT_SNAPSHOT_THRESHOLD,
-            self.config.wal_compression,
-        )?;
+        let wal_config = ferres_db_core::wal::WalConfig {
+            snapshot_threshold: Wal::DEFAULT_SNAPSHOT_THRESHOLD,
+            compress: self.config.wal_compression,
+            fsync_per_write: self.config.wal_fsync_per_write,
+            ..Default::default()
+        };
+        let mut wal = Wal::open_with_config(&collection_dir, wal_config)?;
         wal.truncate_after_snapshot()?;
 
         info!(
