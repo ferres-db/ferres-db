@@ -1,4 +1,4 @@
-//! # BM25 — índice de busca por palavras-chave
+﻿//! # BM25 — índice de busca por palavras-chave
 //!
 //! Implementação in-memory de BM25 para busca lexical. Usada em conjunto
 //! com o índice vetorial para busca híbrida (RRF).
@@ -151,6 +151,7 @@ impl Default for BM25Index {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

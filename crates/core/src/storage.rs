@@ -1,4 +1,4 @@
-//! # Storage — camada de persistência em disco
+﻿//! # Storage — camada de persistência em disco
 //!
 //! ## Decisões arquiteturais
 //!
@@ -161,7 +161,7 @@ impl Default for StorageCircuitBreaker {
 ///
 /// Permite ativar compressão Zstd no WAL, snapshots em formato binário (bincode)
 /// e isolamento físico por namespace (multitenancy).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageOptions {
     /// Comprimir entradas do WAL com Zstd (menor uso de disco no `wal.log`).
     #[serde(default)]
@@ -174,6 +174,24 @@ pub struct StorageOptions {
     /// snapshot e limpeza por tenant sem afetar outros.
     #[serde(default)]
     pub namespace_physical_isolation: bool,
+    /// Faz fsync após cada append do WAL. Default: true em produção.
+    #[serde(default = "default_true")]
+    pub wal_fsync_per_write: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for StorageOptions {
+    fn default() -> Self {
+        Self {
+            wal_compression: false,
+            binary_snapshot: false,
+            namespace_physical_isolation: false,
+            wal_fsync_per_write: true,
+        }
+    }
 }
 
 /// Metadados persistidos de uma coleção.
@@ -790,6 +808,7 @@ impl FileStorage {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

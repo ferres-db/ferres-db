@@ -15,5 +15,5 @@ pub async fn get_metrics() -> Response<Body> {
         .status(StatusCode::OK)
         .header("Content-Type", "text/plain; version=0.0.4")
         .body(Body::from(metrics))
-        .unwrap()
+        .unwrap_or_else(|e| unreachable!("response builder with valid inputs never fails: {e}"))
 }

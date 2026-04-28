@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # RBAC Integration Tests
 //!
 //! Testes de integração para controle de acesso granular (RBAC) e audit trail.
@@ -8,10 +9,9 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 
 use ferres_db_server::auth;
-use ferres_db_server::middleware;
+use ferres_db_server::bootstrap::{bootstrap_state, build_app};
 use ferres_db_server::permissions::{Action, MetadataRestriction, Permission, Resource};
-use ferres_db_server::routes;
-use ferres_db_server::state::{AppState, ServerConfig};
+use ferres_db_server::state::ServerConfig;
 use ferres_db_server::users::{Role, UserStore};
 
 const TEST_API_KEY: &str = "rbac-test-key-123";
@@ -27,9 +27,6 @@ struct TestServer {
 }
 
 async fn setup_server() -> TestServer {
-    std::env::set_var("FERRESDB_API_KEYS", TEST_API_KEY);
-    auth::init_api_keys();
-
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let port = addr.port();
@@ -37,9 +34,6 @@ async fn setup_server() -> TestServer {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let storage_path = temp_dir.path().to_path_buf();
-
-    // JWT secret for dashboard login
-    auth::set_jwt_secret(b"test-jwt-secret-rbac".to_vec());
 
     let config = ServerConfig {
         host: "127.0.0.1".to_string(),
@@ -50,87 +44,71 @@ async fn setup_server() -> TestServer {
         ..Default::default()
     };
 
-    // Create user store with test users
-    let users_path = storage_path.join("users.db");
-    let user_store = UserStore::new(&users_path).unwrap();
-    user_store.ensure_default_user().unwrap();
+    let app_state = bootstrap_state(&config).unwrap();
 
-    // Create a Viewer user with NO granular permissions (legacy behavior)
-    user_store
-        .create("viewer_user", "viewer_pass", Some(Role::Viewer))
-        .unwrap();
+    // Override JWT secret for this test suite (bootstrap_state already consumed env var)
+    auth::set_jwt_secret(b"test-jwt-secret-rbac".to_vec());
 
-    // Create an Editor user
-    user_store
-        .create("editor_user", "editor_pass", Some(Role::Editor))
-        .unwrap();
+    // Add test-specific users (bootstrap_state already called ensure_default_user)
+    if let Some(user_store) = &app_state.user_store {
+        // Create a Viewer user with NO granular permissions (legacy behavior)
+        user_store
+            .create("viewer_user", "viewer_pass", Some(Role::Viewer))
+            .unwrap();
 
-    // Create a Viewer user with granular permissions: Read on "test-coll" only
-    user_store
-        .create_with_permissions(
-            "restricted_viewer",
-            "restricted_pass",
-            Some(Role::Viewer),
-            Some(vec![Permission {
-                resource: Resource::Collection("test-coll".to_string()),
-                actions: vec![Action::Read],
-                metadata_restriction: None,
-            }]),
-        )
-        .unwrap();
+        // Create an Editor user
+        user_store
+            .create("editor_user", "editor_pass", Some(Role::Editor))
+            .unwrap();
 
-    // Create a Viewer user with metadata restriction
-    user_store
-        .create_with_permissions(
-            "filtered_viewer",
-            "filtered_pass",
-            Some(Role::Viewer),
-            Some(vec![Permission {
-                resource: Resource::AllCollections,
-                actions: vec![Action::Read],
-                metadata_restriction: Some(MetadataRestriction {
-                    field: "department".to_string(),
-                    allowed_values: vec![serde_json::json!("sales")],
-                }),
-            }]),
-        )
-        .unwrap();
+        // Create a Viewer user with granular permissions: Read on "test-coll" only
+        user_store
+            .create_with_permissions(
+                "restricted_viewer",
+                "restricted_pass",
+                Some(Role::Viewer),
+                Some(vec![Permission {
+                    resource: Resource::Collection("test-coll".to_string()),
+                    actions: vec![Action::Read],
+                    metadata_restriction: None,
+                }]),
+            )
+            .unwrap();
 
-    // Create an Editor user with Write only on specific collection
-    user_store
-        .create_with_permissions(
-            "restricted_editor",
-            "restricted_edit_pass",
-            Some(Role::Viewer), // role is Viewer but has granular Write perm
-            Some(vec![Permission {
-                resource: Resource::Collection("test-coll".to_string()),
-                actions: vec![Action::Read, Action::Write],
-                metadata_restriction: None,
-            }]),
-        )
-        .unwrap();
+        // Create a Viewer user with metadata restriction
+        user_store
+            .create_with_permissions(
+                "filtered_viewer",
+                "filtered_pass",
+                Some(Role::Viewer),
+                Some(vec![Permission {
+                    resource: Resource::AllCollections,
+                    actions: vec![Action::Read],
+                    metadata_restriction: Some(MetadataRestriction {
+                        field: "department".to_string(),
+                        allowed_values: vec![serde_json::json!("sales")],
+                    }),
+                }]),
+            )
+            .unwrap();
 
-    let user_store = Arc::new(user_store);
+        // Create an Editor user with Write only on specific collection
+        user_store
+            .create_with_permissions(
+                "restricted_editor",
+                "restricted_edit_pass",
+                Some(Role::Viewer), // role is Viewer but has granular Write perm
+                Some(vec![Permission {
+                    resource: Resource::Collection("test-coll".to_string()),
+                    actions: vec![Action::Read, Action::Write],
+                    metadata_restriction: None,
+                }]),
+            )
+            .unwrap();
+    }
 
-    let app_state = AppState::new(
-        config.clone(),
-        None,
-        Some(user_store.clone()),
-        None,
-        None,
-        None,
-    )
-    .unwrap();
-
-    let app = routes::create_router(&config)
-        .layer(axum::middleware::from_fn(middleware::request_logger))
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        )
-        .with_state(app_state);
+    let user_store = app_state.user_store.as_ref().unwrap().clone();
+    let app = build_app(&config, app_state);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

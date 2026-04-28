@@ -1,4 +1,4 @@
-//! # Reindex Handlers — background index rebuild endpoints
+﻿//! # Reindex Handlers — background index rebuild endpoints
 //!
 //! Provides handlers to start, monitor and list background reindex jobs
 //! for a collection. At most one reindex job may run per collection.
@@ -422,7 +422,7 @@ pub async fn list_reindex_jobs(
     }
 
     // Sort by started_at descending (newest first)
-    jobs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    jobs.sort_by_key(|b| std::cmp::Reverse(b.started_at));
 
     Ok(Json(ListReindexJobsResponse { jobs }))
 }
@@ -737,6 +737,7 @@ pub fn run_retention_cycle(app_state: &AppState) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Helper: create a completed job with a specific `completed_at` timestamp.

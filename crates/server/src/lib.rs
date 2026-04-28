@@ -5,7 +5,9 @@
 pub mod api_keys;
 pub mod audit;
 pub mod auth;
+pub mod bootstrap;
 pub mod cloud_settings;
+pub mod db;
 pub mod error;
 pub mod handlers;
 pub mod llm_credentials;

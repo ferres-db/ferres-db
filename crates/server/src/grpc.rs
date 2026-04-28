@@ -1,4 +1,4 @@
-//! # gRPC service — FerresDB native gRPC API
+﻿//! # gRPC service — FerresDB native gRPC API
 //!
 //! Implementação do serviço gRPC definido em `proto/ferresdb.proto`.
 //! Reutiliza toda a lógica do core (`Collection`, `Point`, `MetadataFilter`)
@@ -57,6 +57,7 @@ fn wal_entry_to_proto(entry: WalEntry) -> WalEntryMessage {
 
 // ─── Helper: converter DistanceMetric proto ↔ core ──────────────────────
 
+#[allow(clippy::result_large_err)]
 fn proto_distance_to_core(d: i32) -> Result<ferres_db_core::DistanceMetric, Status> {
     match d {
         1 => Ok(ferres_db_core::DistanceMetric::Cosine),
@@ -468,7 +469,7 @@ impl FerresDb for FerresGrpcService {
         request: Request<ListPointsRequest>,
     ) -> Result<Response<ListPointsResponse>, Status> {
         let req = request.into_inner();
-        let limit = (req.limit as usize).min(1000).max(1);
+        let limit = (req.limit as usize).clamp(1, 1000);
         let offset = req.offset as usize;
 
         let collection_arc = {
@@ -563,7 +564,7 @@ impl FerresDb for FerresGrpcService {
         } else {
             let predicate = |id: &str| {
                 coll.get(id)
-                    .map(|p| filter.matches_point(&p))
+                    .map(|p| filter.matches_point(p))
                     .unwrap_or(false)
             };
             coll.search(&req.vector, req.limit as usize, Some(&predicate), None)
@@ -593,7 +594,7 @@ impl FerresDb for FerresGrpcService {
         self.state
             .query_stats
             .entry(req.collection.clone())
-            .or_insert_with(|| crate::state::QueryStats::new())
+            .or_default()
             .record_query(took_ms);
         self.state
             .global_query_stats
@@ -692,7 +693,7 @@ impl FerresDb for FerresGrpcService {
         self.state
             .query_stats
             .entry(req.collection.clone())
-            .or_insert_with(|| crate::state::QueryStats::new())
+            .or_default()
             .record_query(took_ms);
         self.state
             .global_query_stats
@@ -893,6 +894,7 @@ impl FerresDb for FerresGrpcService {
 
 /// Executa upsert sincronamente (sem .await) para que o RwLockWriteGuard
 /// não precise cruzar um ponto de suspensão.
+#[allow(clippy::result_large_err)]
 fn do_upsert_sync(
     state: &AppState,
     req: &UpsertPointsRequest,
@@ -970,6 +972,7 @@ fn do_upsert_sync(
 
 /// Executa search sincronamente (sem .await) para que o RwLockReadGuard
 /// não precise cruzar um ponto de suspensão.
+#[allow(clippy::result_large_err)]
 fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchResponse, Status> {
     let start = Instant::now();
 
@@ -1001,7 +1004,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
     } else {
         let predicate = |id: &str| {
             coll.get(id)
-                .map(|p| filter.matches_point(&p))
+                .map(|p| filter.matches_point(p))
                 .unwrap_or(false)
         };
         coll.search(&req.vector, req.limit as usize, Some(&predicate), None)
@@ -1030,7 +1033,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
     state
         .query_stats
         .entry(req.collection.clone())
-        .or_insert_with(|| crate::state::QueryStats::new())
+        .or_default()
         .record_query(took_ms);
     state.global_query_stats.record(&req.collection, took_ms);
 
@@ -1041,6 +1044,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::state::ServerConfig;
     use serde_json::json;

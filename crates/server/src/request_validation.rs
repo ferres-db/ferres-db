@@ -1,4 +1,4 @@
-//! # Request Validation — validação centralizada de payloads
+﻿//! # Request Validation — validação centralizada de payloads
 //!
 //! Limites únicos para prevenir DoS (vetores gigantes, batches excessivos).
 //! Usado por handlers de points (upsert, delete, search).
@@ -78,6 +78,7 @@ pub fn validate_search_limit(limit: usize) -> ApiResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::handlers::points::PointInput;
 

@@ -40,15 +40,14 @@ pub async fn replica_write_guard(
     if method == Method::GET {
         return next.run(req).await;
     }
-    if method == Method::POST {
-        if path.ends_with("/search")
+    if method == Method::POST
+        && (path.ends_with("/search")
             || path.ends_with("/search/hybrid")
             || path.ends_with("/search/explain")
             || path.ends_with("/search/estimate")
-            || path == "/api/v1/auth/login"
-        {
-            return next.run(req).await;
-        }
+            || path == "/api/v1/auth/login")
+    {
+        return next.run(req).await;
     }
     if method == Method::POST || method == Method::PUT || method == Method::DELETE {
         return ApiError::method_not_allowed("Write operations are not allowed on a read replica")
@@ -294,7 +293,7 @@ pub fn create_collection_rate_limit_layer(
     let config = builder
         .key_extractor(CollectionKeyExtractor)
         .finish()
-        .unwrap();
+        .unwrap_or_else(|| unreachable!("GovernorConfigBuilder with valid params must succeed"));
 
     GovernorLayer {
         config: Arc::new(config),

@@ -28,6 +28,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # full history needed for pr-diff-range; shallow clone causes "undefined" line numbers
       - uses: github/codeql-action/init@4f3212b61783c3c68e8309a0f18a699764811cda # v3.27.1
         with:
           languages: ${{ matrix.language }}

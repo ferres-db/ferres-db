@@ -1,4 +1,4 @@
-//! # Audit — audit trail completo para todas as operações
+﻿//! # Audit — audit trail completo para todas as operações
 //!
 //! Registra ações de usuários em arquivos JSONL com rotação diária.
 //! O logger usa um channel buffered com uma única task de background para
@@ -311,7 +311,7 @@ impl AuditLogger {
         }
 
         // Mais recentes primeiro
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
         entries.truncate(limit);
         entries
     }
@@ -351,6 +351,7 @@ pub fn audit_entry(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[tokio::test]

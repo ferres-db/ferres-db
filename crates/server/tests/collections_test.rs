@@ -1,3 +1,4 @@
+﻿#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! # Collection Integration Tests
 //!
 //! Testes de integração para os endpoints de gerenciamento de coleções.
@@ -9,10 +10,8 @@ use std::net::SocketAddr;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
-use ferres_db_server::auth;
-use ferres_db_server::middleware;
-use ferres_db_server::routes;
-use ferres_db_server::state::{AppState, ServerConfig};
+use ferres_db_server::bootstrap::{bootstrap_state, build_app};
+use ferres_db_server::state::ServerConfig;
 
 /// API key usada em todos os testes de integração.
 const TEST_API_KEY: &str = "test-key-collections";
@@ -31,10 +30,6 @@ struct TestServer {
 ///
 /// Retorna um cliente HTTP (com API key nos headers) e um callback de cleanup.
 async fn setup_server() -> TestServer {
-    // Configura API key para testes
-    std::env::set_var("FERRESDB_API_KEYS", TEST_API_KEY);
-    auth::init_api_keys();
-
     // Encontra uma porta livre
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -55,19 +50,8 @@ async fn setup_server() -> TestServer {
         ..Default::default()
     };
 
-    // Inicializa AppState
-    let app_state = AppState::new(config.clone(), None, None, None, None, None).unwrap();
-
-    // Cria o router com middleware
-    let app = routes::create_router(&config)
-        .layer(axum::middleware::from_fn(middleware::request_logger))
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        )
-        .with_state(app_state);
+    let app_state = bootstrap_state(&config).unwrap();
+    let app = build_app(&config, app_state);
 
     // Cria o listener
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();

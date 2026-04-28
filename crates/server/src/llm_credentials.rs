@@ -1,4 +1,4 @@
-//! # LLM Credentials — provider API keys stored in SQLite
+﻿//! # LLM Credentials — provider API keys stored in SQLite
 //!
 //! Tabela `llm_credentials(provider TEXT PRIMARY KEY, api_key TEXT)`.
 //! As API keys nunca são retornadas em GET — somente um booleano `configured`.
@@ -19,6 +19,8 @@ pub enum LlmCredentialsError {
     LockPoisoned,
     #[error("unknown provider: {0}")]
     UnknownProvider(String),
+    #[error("migration error: {0}")]
+    Migration(#[from] crate::db::migrations::MigrationError),
 }
 
 /// Provedor LLM suportado pelo proxy.
@@ -82,15 +84,9 @@ impl LlmCredentialsStore {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = Connection::open(path)?;
-        conn.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS llm_credentials (
-                provider TEXT PRIMARY KEY,
-                api_key TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            )
-            "#,
-            [],
+        crate::db::migrations::run_migrations(
+            &conn,
+            crate::db::migrations::MIGRATIONS_LLM_CREDENTIALS,
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -202,6 +198,7 @@ impl LlmCredentialsStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn temp_db() -> (tempfile::TempDir, std::path::PathBuf) {

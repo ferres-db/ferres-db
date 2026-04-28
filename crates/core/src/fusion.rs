@@ -1,4 +1,4 @@
-//! # Fusion Strategies for Hybrid Search
+﻿//! # Fusion Strategies for Hybrid Search
 //!
 //! Este módulo contém algoritmos de fusão para combinar rankings de
 //! diferentes fontes (e.g. busca vetorial + BM25 keyword search).
@@ -248,6 +248,7 @@ pub fn weighted_fusion(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Helper: cria um ranking a partir de IDs (score decrescente fictício).

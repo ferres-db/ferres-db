@@ -64,6 +64,71 @@ Architecture and decisions: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/
 - Logging with `tracing` (avoid `println!` in production code).
 - Unit tests in the same file (`#[cfg(test)] mod tests`) or in `tests/` for integration tests.
 
+### Async & Locks — rule enforced by Clippy CI
+
+**`std::sync::RwLock` and `Mutex` guards must never be held across an `await` point.**
+
+Holding a synchronous lock guard across `.await` causes deadlocks on Tokio's cooperative scheduler because the executor cannot preempt a task that holds a lock while it is suspended.
+
+CI enforces this with `-D clippy::await_holding_lock` and `-D clippy::await_holding_refcell_ref`.
+
+**Three accepted patterns:**
+
+**A — extract a sync helper** (model from `crates/server/src/grpc.rs`):
+
+```rust
+async fn handler(state: AppState, ...) -> Result<...> {
+    let result = do_work_sync(&state, ...)?;   // acquires lock, returns data
+    emit_event_async(result).await;            // no lock held
+}
+```
+
+**B — scope the guard with a block** (standard for handlers):
+
+```rust
+let payload = {
+    let mut coll = collection_arc.write()?;    // guard lives only in this block
+    coll.insert_batch(points)?
+};                                              // guard dropped here automatically
+state.emit_event(...).await;                   // no lock held
+```
+
+**C — use `tokio::sync::RwLock`** (rare; only when the critical section itself contains `.await`):
+
+```rust
+let mut coll = tokio_rwlock.write().await;
+coll.async_operation().await;  // lock held intentionally — document why
+```
+
+Pattern B is the project standard. Pattern A is used in gRPC handlers. Pattern C is exceptional and requires a comment.
+
+> **Never use explicit `drop(guard)` before an async call as a substitute for block scoping.** Block scoping is compiler-enforced; a missing `drop()` call introduces a bug silently.
+
+### Error handling
+
+- Use `?` or return `Result` for recoverable errors.
+- Use `.expect("clear reason")` for invariants that **cannot** fail — the message must explain *why* it cannot fail, not just what the value is.
+- **Never** use bare `.unwrap()` in production code (`src/`, `lib.rs`). Tests and benchmarks are exempt.
+- For lock poison: if the function returns `Result`, convert with `.map_err(|_| MyError::LockPoisoned)?`. If the function cannot return `Result`, use `.expect("which_lock poisoned — describe what that means")`.
+
+Examples:
+
+```rust
+// ✅ OK — message explains the invariant
+std::num::NonZeroUsize::new(cache_size)
+    .expect("cache_size > 0 was checked in the enclosing if-guard")
+
+// ✅ OK — lock poison, function can't return Result
+self.events.read()
+    .expect("events RwLock poisoned — a thread panicked while holding a write guard")
+
+// ✅ OK — lock poison, function returns Result
+conn.lock().map_err(|_| MyError::LockPoisoned)?
+
+// ❌ BAD — no context when this panics in production
+self.events.read().unwrap()
+```
+
 ## Testing
 
 ### Unit and integration (Rust)
@@ -93,6 +158,32 @@ python tests/fixtures/generate_corpus.py
 cd crates/core
 cargo bench
 ```
+
+## SQLite Schema Migrations
+
+Schema changes for SQLite stores (api_keys, users, cloud_settings, llm_credentials) are managed through versioned migration slices in `crates/server/src/db/migrations.rs`.
+
+**To add a column or table:**
+
+1. Open `crates/server/src/db/migrations.rs`.
+2. Find the relevant `MIGRATIONS_*` slice for your store (e.g., `MIGRATIONS_USERS`).
+3. Append a new entry with `version = last_version + 1`:
+
+```rust
+Migration {
+    version: 4,
+    name: "users_add_last_login",
+    up: "ALTER TABLE users ADD COLUMN last_login INTEGER DEFAULT NULL",
+},
+```
+
+4. **Never edit or remove an existing migration** that may have already been applied in production. Only append new ones.
+5. Add a test for the new migration if it changes table structure.
+
+The `run_migrations` function in `db::migrations` handles:
+- Applying only pending migrations (skips already-applied ones via `schema_migrations` table)
+- Downgrade detection (returns an error if the DB schema version is ahead of the known migrations)
+- Baseline detection (existing databases without `schema_migrations` are baselied automatically on first run)
 
 ## Contribution flow
 

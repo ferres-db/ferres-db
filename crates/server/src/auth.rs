@@ -122,7 +122,7 @@ pub async fn require_api_key(req: Request, next: Next) -> Result<Response, impl 
     if crate::api_keys::ApiKeyStore::validate(api_key) || is_valid_legacy(api_key) {
         let namespace_allowance = crate::api_keys::get_meta_global(api_key).and_then(|meta| {
             meta.allowed_namespaces
-                .map(|list| crate::permissions::NamespaceAllowance::Only(list))
+                .map(crate::permissions::NamespaceAllowance::Only)
         });
         let user = AuthUser {
             username: "api_key".to_string(),
@@ -131,9 +131,7 @@ pub async fn require_api_key(req: Request, next: Next) -> Result<Response, impl 
             namespace_allowance,
         };
         // Validar namespace solicitado na query ou no header antes de prosseguir
-        if let Err(resp) = check_request_namespace(&req, &user) {
-            return Err(resp);
-        }
+        check_request_namespace(&req, &user)?;
         let mut req = req;
         req.extensions_mut().insert(user);
         return Ok(next.run(req).await);

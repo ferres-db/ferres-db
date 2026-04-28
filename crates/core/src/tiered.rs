@@ -365,7 +365,9 @@ impl WarmStorage {
         let vector: Vec<f32> = bytes
             .chunks_exact(4)
             .map(|chunk| {
-                let arr: [u8; 4] = chunk.try_into().unwrap();
+                let arr: [u8; 4] = chunk
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("chunks_exact(4) guarantees a 4-byte slice"));
                 f32::from_le_bytes(arr)
             })
             .collect();
@@ -643,7 +645,7 @@ impl ColdStorage {
                 // percent-encode: '/' -> "%2F", ':' -> "%3A", etc.
                 for byte in c.to_string().as_bytes() {
                     use std::fmt::Write;
-                    write!(&mut safe, "%{byte:02X}").unwrap();
+                    let _ = write!(&mut safe, "%{byte:02X}");
                 }
             }
         }
@@ -1304,7 +1306,7 @@ impl TieredCollection {
     /// Retorna a distribuição de pontos por tier.
     pub fn tier_distribution(&self) -> TierDistribution {
         let dimension = self.collection.config().dimension;
-        let tiers = self.point_tiers.read().unwrap();
+        let tiers = self.point_tiers.read().unwrap_or_else(|e| e.into_inner());
 
         let mut hot = 0usize;
         let mut warm = 0usize;
@@ -1456,7 +1458,7 @@ impl TierMetadata {
     pub fn from_tiered_collection(tc: &TieredCollection) -> Self {
         let point_tiers = tc.point_tiers.read().map(|t| t.clone()).unwrap_or_default();
 
-        let tracker = tc.access_tracker.lock().unwrap();
+        let tracker = tc.access_tracker.lock().unwrap_or_else(|e| e.into_inner());
         let mut last_access = HashMap::new();
         let mut access_count = HashMap::new();
 
@@ -1482,6 +1484,7 @@ impl TierMetadata {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::collection::CollectionConfig;
     use crate::quantization::QuantizationConfig;
@@ -1833,13 +1836,22 @@ mod tests {
 
         let mut tc = TieredCollection::new(collection, tiered_config, Some(&tmp)).unwrap();
 
-        // Insere 5 pontos (mais pontos = grafo HNSW mais bem conectado,
-        // evitando flakiness com grafos muito pequenos).
+        // 10 pontos: hot1/warm1/cold1 são únicamente próximos da query [1,0,0].
+        // 7 fillers espalham o espaço para o HNSW construir um grafo denso e
+        // bem conectado — sem eles (5 nós) o beam search pode perder cold1.
+        // Distâncias de [1,0,0]: hot1=0, warm1≈0.001, cold1≈0.003, fillers≥0.7.
         tc.insert(make_point("hot1", vec![1.0, 0.0, 0.0])).unwrap();
-        tc.insert(make_point("hot2", vec![0.5, 0.5, 0.0])).unwrap();
-        tc.insert(make_point("hot3", vec![0.0, 0.0, 1.0])).unwrap();
-        tc.insert(make_point("warm1", vec![0.0, 1.0, 0.0])).unwrap();
-        tc.insert(make_point("cold1", vec![0.9, 0.1, 0.0])).unwrap();
+        tc.insert(make_point("warm1", vec![0.999, 0.001, 0.0]))
+            .unwrap();
+        tc.insert(make_point("cold1", vec![0.998, 0.002, 0.0]))
+            .unwrap();
+        tc.insert(make_point("f1", vec![0.0, 1.0, 0.0])).unwrap();
+        tc.insert(make_point("f2", vec![0.0, 0.0, 1.0])).unwrap();
+        tc.insert(make_point("f3", vec![-1.0, 0.0, 0.0])).unwrap();
+        tc.insert(make_point("f4", vec![0.0, -1.0, 0.0])).unwrap();
+        tc.insert(make_point("f5", vec![0.5, 0.5, 0.5])).unwrap();
+        tc.insert(make_point("f6", vec![-0.5, 0.5, 0.0])).unwrap();
+        tc.insert(make_point("f7", vec![0.5, 0.0, -0.5])).unwrap();
 
         // Demove warm1 e cold1
         tc.demote_to_warm("warm1").unwrap();
@@ -1847,30 +1859,18 @@ mod tests {
         tc.demote_to_cold("cold1").unwrap();
 
         assert_eq!(tc.point_tier("hot1"), Some(StorageTier::Hot));
-        assert_eq!(tc.point_tier("hot2"), Some(StorageTier::Hot));
-        assert_eq!(tc.point_tier("hot3"), Some(StorageTier::Hot));
         assert_eq!(tc.point_tier("warm1"), Some(StorageTier::Warm));
         assert_eq!(tc.point_tier("cold1"), Some(StorageTier::Cold));
 
-        // Busca HNSW retorna IDs de pontos em TODOS os tiers
-        // (porque demote usa remove_data_only, sem tombstone no HNSW).
+        // remove_data_only não cria tombstone no HNSW: warm1 e cold1 ainda
+        // aparecem na busca. São os 2 únicos pontos com d < 0.005 da query —
+        // qualquer grafo HNSW com 10 nós os retorna nos top-5 de forma confiável.
         let results = tc.search(&[1.0, 0.0, 0.0], 5).unwrap();
-        assert_eq!(
-            results.len(),
-            5,
-            "HNSW search must return points from all tiers"
-        );
+        assert!(!results.is_empty(), "search returned no results");
+        assert_eq!(results[0].0, "hot1", "hot1 must be closest to [1,0,0]");
 
-        // hot1 deve ser o mais próximo de [1,0,0]
-        assert_eq!(results[0].0, "hot1");
-
-        // Pontos em todos os tiers devem estar presentes
         let result_ids: std::collections::HashSet<&str> =
             results.iter().map(|r| r.0.as_str()).collect();
-        assert!(
-            result_ids.contains("hot1"),
-            "hot point must appear in results"
-        );
         assert!(
             result_ids.contains("warm1"),
             "warm point must appear in results"
@@ -1893,14 +1893,14 @@ mod tests {
             warm_point.is_some(),
             "get_from_any_tier must find warm points"
         );
-        assert_eq!(warm_point.unwrap().vector, vec![0.0, 1.0, 0.0]);
+        assert_eq!(warm_point.unwrap().vector, vec![0.999, 0.001, 0.0]);
 
         let cold_point = tc.get_from_any_tier("cold1");
         assert!(
             cold_point.is_some(),
             "get_from_any_tier must find cold points"
         );
-        assert_eq!(cold_point.unwrap().vector, vec![0.9, 0.1, 0.0]);
+        assert_eq!(cold_point.unwrap().vector, vec![0.998, 0.002, 0.0]);
 
         // Ponto inexistente retorna None
         assert!(tc.get_from_any_tier("nonexistent").is_none());

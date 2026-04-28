@@ -1,4 +1,4 @@
-//! # Cost — estimativa de custo de queries antes da execução
+﻿//! # Cost — estimativa de custo de queries antes da execução
 //!
 //! Este módulo fornece heurísticas para estimar o custo de uma busca vetorial
 //! **antes** de executá-la. O objetivo é dar ao usuário visibilidade sobre
@@ -277,6 +277,7 @@ pub fn estimate_search_cost(params: &CostEstimateParams) -> QueryCostEstimate {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn base_params() -> CostEstimateParams {
