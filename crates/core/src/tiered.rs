@@ -1,4 +1,4 @@
-﻿//! # Tiered Storage — movimentação automática de vetores entre camadas de armazenamento
+//! # Tiered Storage — movimentação automática de vetores entre camadas de armazenamento
 //!
 //! Implementa armazenamento em três camadas (Hot, Warm, Cold) com promoção/demoção
 //! automática baseada na frequência de acesso:
@@ -1843,7 +1843,8 @@ mod tests {
         tc.insert(make_point("hot2", vec![0.5, 0.5, 0.0])).unwrap();
         tc.insert(make_point("hot3", vec![0.0, 0.0, 1.0])).unwrap();
         tc.insert(make_point("warm1", vec![0.9, 0.1, 0.0])).unwrap();
-        tc.insert(make_point("cold1", vec![0.95, 0.05, 0.0])).unwrap();
+        tc.insert(make_point("cold1", vec![0.95, 0.05, 0.0]))
+            .unwrap();
 
         // Demove warm1 e cold1
         tc.demote_to_warm("warm1").unwrap();
