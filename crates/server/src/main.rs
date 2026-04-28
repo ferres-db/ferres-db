@@ -248,8 +248,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Timeout applies only to the drain phase (after signal), not to normal serving.
     let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
-    let graceful = axum::serve(listener, app)
-        .with_graceful_shutdown(async move { drain_rx.await.ok(); });
+    let graceful = axum::serve(listener, app).with_graceful_shutdown(async move {
+        drain_rx.await.ok();
+    });
     let graceful_task = tokio::spawn(graceful.into_future());
 
     shutdown_signal.await;
