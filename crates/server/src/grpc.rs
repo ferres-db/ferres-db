@@ -594,7 +594,7 @@ impl FerresDb for FerresGrpcService {
         self.state
             .query_stats
             .entry(req.collection.clone())
-            .or_insert_with(crate::state::QueryStats::new)
+            .or_default()
             .record_query(took_ms);
         self.state
             .global_query_stats
@@ -693,7 +693,7 @@ impl FerresDb for FerresGrpcService {
         self.state
             .query_stats
             .entry(req.collection.clone())
-            .or_insert_with(crate::state::QueryStats::new)
+            .or_default()
             .record_query(took_ms);
         self.state
             .global_query_stats
@@ -1033,7 +1033,7 @@ fn do_search_sync(state: &AppState, req: &SearchRequest) -> Result<SearchRespons
     state
         .query_stats
         .entry(req.collection.clone())
-        .or_insert_with(crate::state::QueryStats::new)
+        .or_default()
         .record_query(took_ms);
     state.global_query_stats.record(&req.collection, took_ms);
 
