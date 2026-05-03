@@ -57,7 +57,7 @@ prometheus = "0.14"
 uuid = { workspace = true }
 sysinfo = "0.31"
 fs4 = "0.6"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 # S3 backup upload
 aws-sdk-s3 = "1"
 aws-config = "1"
